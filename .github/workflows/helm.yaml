@@ -78,9 +78,13 @@ jobs:
         run: helm package "${CHART_DIR}"
 
       - name: Push
+        # A plain glob loop (not find -exec, which swallows the exit code and
+        # turns a denied push into a green job).
         run: |
-          find . -maxdepth 1 -type f -name "agentops-*.tgz" \
-            -exec helm push {} "${OCI_REPO}" \;
+          set -euo pipefail
+          for chart in ./agentops-*.tgz; do
+            helm push "${chart}" "${OCI_REPO}"
+          done
 
   # On a published GitHub release (tag vX.Y.Z): publish the release chart.
   publish-release:
@@ -112,6 +116,10 @@ jobs:
         run: helm package "${CHART_DIR}"
 
       - name: Push
+        # A plain glob loop (not find -exec, which swallows the exit code and
+        # turns a denied push into a green job).
         run: |
-          find . -maxdepth 1 -type f -name "agentops-*.tgz" \
-            -exec helm push {} "${OCI_REPO}" \;
+          set -euo pipefail
+          for chart in ./agentops-*.tgz; do
+            helm push "${chart}" "${OCI_REPO}"
+          done
