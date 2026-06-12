@@ -1,0 +1,102 @@
+# Default values for the agentops chart.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Create the release namespace as part of the chart (helm install --namespace
+# still selects which namespace; this only adds a Namespace object to the
+# release so `--create-namespace` isn't required).
+createNamespace: false
+
+image:
+  repository: pomerium/agentops
+  # Defaults to the chart's appVersion when left empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Slack credentials. Either let the chart create the Secret by setting both
+# slack.signingSecret and slack.botToken, or point existingSecret.name at a
+# Secret you manage yourself. An existing Secret must use the keys
+# SLACK_SIGNING_SECRET and SLACK_BOT_TOKEN.
+slack:
+  signingSecret: ""
+  botToken: ""
+existingSecret:
+  name: ""
+
+config:
+  # Externally reachable base URL; the Slack OAuth redirect URI is this +
+  # "/oauth/callback". Required.
+  oauthRedirectBaseURL: ""
+  # Minimum log level: debug|info|warn|error. debug traces the full HTTP +
+  # sandbox/ACP comms.
+  logLevel: info
+  # Upper bound on a sandbox session's lifetime.
+  sessionTTL: 1h
+  # Debounce interval for streaming agent replies back into Slack. Empty uses
+  # the binary default.
+  streamInterval: ""
+
+serviceAccount:
+  annotations: {}
+
+# Install the Role/RoleBinding granting the app the access it needs:
+# read AgentTemplates, drive agent-sandbox (SandboxClaims/Sandboxes), and
+# exec into sandbox pods. Disable to manage RBAC out of band.
+rbac:
+  create: true
+
+# Install the agents.pomerium.com AgentTemplate CustomResourceDefinition
+# (from crds/). The external agent-sandbox CRDs (SandboxTemplate, SandboxClaim,
+# Sandbox) remain a cluster prerequisite and are NOT installed by this chart.
+installCRDs: true
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Persistent storage for the SQLite database at /data. The app is a
+# single-writer, pod-pinned StatefulSet (replicas stays 1) — do not scale out.
+# When disabled, /data is an emptyDir and the database is ephemeral.
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 1Gi
+  accessModes:
+    - ReadWriteOnce
+
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # limits:
+  #   cpu: "1"
+  #   memory: 512Mi
+
+podAnnotations: {}
+
+# Extra environment variables, as a list of core/v1 EnvVar entries.
+extraEnvVars: []
+
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

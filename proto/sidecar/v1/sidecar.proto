@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package sidecar.v1;
+
+option go_package = "github.com/pomerium/agentops/internal/sidecar/pb;sidecarpb";
+
+// SidecarControl is the control protocol between agentops and the
+// sandbox sidecar proxy. It is spoken as gRPC over the stdio of the exec'd
+// `sidecar serve` process. A single bidirectional stream carries all
+// messages; oneof envelopes on both directions keep the protocol extensible
+// (future: token refresh, drain, envoy restart).
+service SidecarControlService {
+  rpc Control(stream ControlRequest) returns (stream ControlResponse);
+}
+
+message ControlRequest {
+  oneof msg {
+    Configure configure = 1;
+  }
+}
+
+// Configure carries the full set of HTTP endpoints the sidecar should serve.
+// Endpoints defined via SIDECAR_HTTP_* environment variables on the sidecar
+// container are merged in by the sidecar itself.
+message Configure {
+  repeated HttpEndpoint endpoints = 1;
+}
+
+// HttpEndpoint maps a localhost listener to an upstream URL, injecting the
+// given headers on every proxied request. Secret credentials live only in
+// `headers` and never reach the agent container.
+message HttpEndpoint {
+  // Unique endpoint name; used for envoy resource names and status reporting.
+  string name = 1;
+  // Port of the 127.0.0.1 listener exposed to the agent container.
+  uint32 listen_port = 2;
+  // Upstream scheme://host[:port]; the request path is forwarded unchanged.
+  string upstream_url = 3;
+  // Headers added to every upstream request (overwriting client-sent values).
+  repeated Header headers = 4;
+}
+
+message Header {
+  string name = 1;
+  string value = 2;
+}
+
+message ControlResponse {
+  oneof msg {
+    Status status = 1;
+  }
+}
+
+// Status reports sidecar lifecycle transitions. READY is sent once all
+// listeners are live; ERROR is terminal.
+message Status {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_STARTING = 1;
+    STATE_READY = 2;
+    STATE_ERROR = 3;
+  }
+  State state = 1;
+  string message = 2;
+  repeated EndpointStatus endpoints = 3;
+}
+
+message EndpointStatus {
+  string name = 1;
+  uint32 listen_port = 2;
+  // True when the endpoint came from SIDECAR_HTTP_* env vars rather than a
+  // Configure message.
+  bool env_defined = 3;
+}

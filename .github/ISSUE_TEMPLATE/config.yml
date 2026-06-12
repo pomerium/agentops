@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / Discussion
+    url: https://github.com/pomerium/agentops/discussions
+    about: Ask questions or discuss ideas that aren't a bug report or feature request.

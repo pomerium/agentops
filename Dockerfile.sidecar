@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# Sandbox sidecar proxy: the `sidecar` Go binary plus envoy. Runs as the
+# second container in every sandbox pod and serves 127.0.0.1 listeners that
+# inject secret headers (MCP OAuth tokens, LLM API keys) on the way to the
+# upstreams — so the agent container never sees credentials.
+
+# ---- build stage --------------------------------------------------------
+# Pin to the builder's native platform and cross-compile to the target arch so
+# multi-arch buildx builds compile natively rather than under QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# TARGETOS/TARGETARCH are supplied automatically by BuildKit per --platform.
+ARG TARGETOS TARGETARCH
+
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/sidecar ./cmd/sidecar
+
+# The distroless final stage has no shell; create the writable directory for
+# the rendered envoy bootstrap here. Sticky world-writable (like /tmp): pod
+# securityContexts commonly override the image USER, so any uid must be able
+# to write it. Built one level deep because COPY only preserves the modes of
+# entries *inside* the copied tree, not of the destination dir it creates.
+RUN install -d -m 1777 /out/run/sidecar
+
+# ---- final stage --------------------------------------------------------
+# The envoy distroless image ships the envoy binary at /usr/local/bin/envoy
+# together with its glibc runtime and CA certificates, and nothing else — no
+# shell. `sidecar idle` is the container's pause process.
+FROM envoyproxy/envoy:distroless-v1.37.2
+
+COPY --from=build /out/run /run
+COPY --from=build /out/sidecar /usr/local/bin/sidecar
+
+ENV SIDECAR_ENVOY_PATH=/usr/local/bin/envoy \
+    SIDECAR_CONFIG_DIR=/run/sidecar
+
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/sidecar"]
+CMD ["idle"]

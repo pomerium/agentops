@@ -1,0 +1,28 @@
+{{ .Chart.Name }} ({{ include "agentops.fullname" . }}) has been installed.
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Image:     {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+
+1. Check the pod is running:
+
+   kubectl get pods --namespace {{ .Release.Namespace }} \
+     -l "app.kubernetes.io/name={{ include "agentops.name" . }},app.kubernetes.io/instance={{ .Release.Name }}"
+
+2. The app serves plain HTTP on the {{ .Values.service.type }} Service
+   "{{ include "agentops.fullname" . }}" port {{ .Values.service.port }}. Put a
+   TLS-terminating ingress (Pomerium or any reverse proxy) in front of it, and
+   make sure config.oauthRedirectBaseURL ({{ .Values.config.oauthRedirectBaseURL }})
+   resolves to it — the Slack OAuth redirect URI is that URL + "/oauth/callback".
+
+Prerequisites NOT installed by this chart:
+  - The external agent-sandbox CRDs (SandboxTemplate, SandboxClaim, Sandbox)
+    from https://github.com/kubernetes-sigs/agent-sandbox must already exist.
+{{- if .Values.installCRDs }}
+  - The agents.pomerium.com AgentTemplate CRD IS installed by this chart.
+{{- else }}
+  - installCRDs is false: apply the agents.pomerium.com AgentTemplate CRD
+    separately.
+{{- end }}
+
+Docs: https://github.com/pomerium/agentops

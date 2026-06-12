@@ -1,0 +1,135 @@
+# Example SandboxTemplate: the GENERIC Claude Code harness + sidecar pair,
+# with no git working context.
+#
+# A SandboxTemplate (from the agent-sandbox project) defines how a sandbox is
+# baked: the agent harness image, the secret-isolating sidecar, and — for
+# workflow-specific templates — the git working context (repo + credentials).
+# A AgentTemplate points at it by name via .spec.sandboxTemplateRef.name.
+#
+# Use this template for workflows without a repository.
+# Workflows that need a checked-out repo get their own template that adds a
+# `git-init` init container with the repo URL/ref and a credentials
+# secretKeyRef — see sandboxtemplate-pomerium-zero-claude-code.yaml. Because
+# repo + credentials are baked into the template, such templates are
+# workflow-specific by design.
+#
+# When agentops launches a workflow it creates a SandboxClaim that
+# references this template. The claim is created with warm-pool semantics
+# "none" so each run gets a fresh pod, and the app injects the per-run agent
+# context (AGENT_SYSTEM_PROMPT, AGENT_SESSION_ID) as claim env targeted at the
+# `agent` container — which is why this template MUST set:
+#
+#     spec.envVarsInjectionPolicy: Allowed
+#
+# Once the sandbox pod is Ready, the orchestrator exec's into the pod twice:
+#
+#   1. Into the `sidecar` container, running `sidecar serve`: the
+#      secret-isolating proxy. It receives the per-user MCP endpoint configs
+#      (upstream URL + Authorization header) over gRPC on the exec stdio and
+#      serves credential-free 127.0.0.1 listeners (shared pod network
+#      namespace) that envoy maps to the upstreams with the secret headers
+#      injected.
+#   2. Into the `agent` container, running ${ACP_AGENT_CMD} (default
+#      "acp-agent") to speak the Agent Client Protocol (ACP) over the exec'd
+#      process's stdio. ACP_AGENT_CMD is therefore the contract between this
+#      image and the app: it must launch a process that speaks ACP on
+#      stdin/stdout.
+#
+# The agent container never sees a secret: MCP servers are reached via
+# http://127.0.0.1:91xx and the Anthropic API via http://127.0.0.1:9999, with
+# envoy in the sidecar adding the credentials upstream.
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: claude-code
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  # REQUIRED: allow the SandboxClaim to inject per-run environment variables.
+  envVarsInjectionPolicy: Allowed
+
+  podTemplate:
+    spec:
+      # The harness image runs as the non-root `node` user (uid 1000): the
+      # claude-agent-acp adapter disables the bypassPermissions mode under root,
+      # which we need so MCP tool calls run unattended (no Slack approval per
+      # call). fsGroup grants uid 1000 write access to the mounted workspace
+      # volume below (the mount otherwise masks the image's chown).
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        # Container names are a contract with agentops: claim env vars
+        # are targeted at "agent" by name, and the orchestrator exec's into
+        # "agent" and "sidecar" by name.
+        - name: agent
+          # Local Claude Code harness built from deploy/harness/claude-code:
+          # node + git + @agentclientprotocol/claude-agent-acp (Claude Code over
+          # ACP). Build with `make harness-build` (or
+          #     docker build -t agentops-agent:dev \
+          #       -f deploy/harness/claude-code/Dockerfile deploy/harness).
+          # For a no-LLM demo agent instead, build deploy/harness/demo/Dockerfile.
+          image: agentops-agent:dev
+          # Use the locally-built image; do not pull from a registry.
+          imagePullPolicy: IfNotPresent
+          # ACP_AGENT_CMD is the command the app exec's over stdio to speak ACP.
+          # The orchestrator runs the equivalent of:
+          #     /bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'
+          # agent-entrypoint exec's claude-agent-acp (the Claude Code ACP
+          # adapter). It MUST match the binary/script the image installs.
+          env:
+            - name: ACP_AGENT_CMD
+              value: "agent-entrypoint"
+            # NO CREDENTIALS HERE — that's the point of the sidecar. The
+            # Anthropic API is reached through the sidecar's loopback listener;
+            # envoy adds the real x-api-key from the Secret mounted into the
+            # SIDECAR container below. claude-agent-acp/Claude Code honor
+            # ANTHROPIC_BASE_URL.
+            - name: ANTHROPIC_BASE_URL
+              value: "http://127.0.0.1:9999"
+            # NOT a secret: Claude Code refuses to run without *some*
+            # credential present ("Authentication required"), so give it a
+            # placeholder. Envoy overwrites the x-api-key header with the real
+            # key (OVERWRITE_IF_EXISTS_OR_ADD) on the way upstream.
+            - name: ANTHROPIC_API_KEY
+              value: "placeholder-replaced-by-sidecar"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+        # Secret-isolating proxy (sidecar binary + envoy), built from
+        # Dockerfile.sidecar with `make sidecar-build`. Idles until the app
+        # exec's `sidecar serve`. Endpoints come from two places:
+        #   - the gRPC control stream (per-user MCP servers, ports 9100+), and
+        #   - SIDECAR_HTTP_<NAME>_* env vars below (template-level secrets,
+        #     ports 9900-9999 by convention; 9901 is envoy's admin port).
+        - name: sidecar
+          image: agentops-sidecar:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            # Anthropic API proxy: agent's ANTHROPIC_BASE_URL above points at
+            # this listener. The key is injected upstream as x-api-key
+            # (HEADER_X_API_KEY → "x-api-key"); it exists only in this
+            # container's environment.
+            - name: SIDECAR_HTTP_ANTHROPIC_PORT
+              value: "9999"
+            - name: SIDECAR_HTTP_ANTHROPIC_UPSTREAM_URL
+              value: "https://api.anthropic.com"
+            - name: SIDECAR_HTTP_ANTHROPIC_HEADER_X_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: claude-code-credentials
+                  key: ANTHROPIC_API_KEY
+
+  # Per-sandbox working directory (ACP NewSession uses /workspace as its cwd).
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

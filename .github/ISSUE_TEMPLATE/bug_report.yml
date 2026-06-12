@@ -1,0 +1,48 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create an AgentTemplate with ...
+        2. @mention the bot with ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Controller/gateway logs, sandbox pod logs, or Slack error output. This is automatically formatted as code.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image tag, Helm chart version, or commit SHA.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes distribution and version, how the app is deployed (Helm, manifests), and anything unusual about the setup.
+      placeholder: |
+        Kubernetes: GKE 1.32
+        Install: Helm chart 0.x.y
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: Redacted AgentTemplate or Helm values that reproduce the issue. **Remove all tokens and secrets.**
+      render: yaml

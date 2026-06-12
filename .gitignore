@@ -1,0 +1,36 @@
+# Compiled binaries / build outputs
+/out/
+/bin/
+/dist/
+/agentops
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Local SQLite databases and PVC data dir
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Note: go.sum is intentionally NOT ignored (it must be committed).
+
+docs/

@@ -1,0 +1,38 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# Pin a released image tag in production. Set newName to your registry image
+# when you publish one; kept registry-free here so it matches the local build.
+images:
+  - name: agentops
+    newTag: v0.1.0
+
+# replicas stays 1: the app is a single-writer, pod-pinned StatefulSet (SQLite
+# on a PVC + in-memory ACP sessions), so it must not be scaled out.
+
+patches:
+  # Point the OAuth redirect at the production hostname.
+  - target:
+      kind: ConfigMap
+      name: agentops-config
+    patch: |-
+      - op: replace
+        path: /data/OAUTH_REDIRECT_BASE_URL
+        value: https://agentops.example.com
+  # Production resource requests/limits.
+  - target:
+      kind: StatefulSet
+      name: agentops
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "1"
+            memory: 512Mi

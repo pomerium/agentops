@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base deployment of agentops. Apply an overlay (deploy/overlays/<env>)
+# rather than this base directly, so the image tag and OAUTH_REDIRECT_BASE_URL
+# are set for your environment.
+#
+# The Slack credentials Secret (agentops-secrets, see
+# deploy/secret.example.yaml) is applied out-of-band and is intentionally NOT
+# listed here — keep real secrets out of version control.
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - service.yaml
+  - statefulset.yaml
+  # AgentTemplate CRD, referenced as a directory base so kustomize's default
+  # load restrictor allows it. The external agent-sandbox CRDs
+  # (SandboxTemplate/SandboxClaim/Sandbox) remain a cluster prerequisite.
+  - ../../config/crd

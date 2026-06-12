@@ -1,0 +1,12 @@
+# Code generation for proto/. Plugins run via `go tool` so their versions are
+# pinned by go.mod, matching the controller-gen/sqlc convention.
+version: v2
+plugins:
+  - local: [go, tool, protoc-gen-go]
+    out: .
+    opt: module=github.com/pomerium/agentops
+  - local: [go, tool, protoc-gen-go-grpc]
+    out: .
+    opt: module=github.com/pomerium/agentops
+inputs:
+  - directory: proto
