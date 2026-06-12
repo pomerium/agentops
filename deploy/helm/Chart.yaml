@@ -1,0 +1,23 @@
+apiVersion: v2
+name: agentops
+description: >-
+  Slack-native agentic ChatOps for Pomerium — runs AI agents in isolated
+  Kubernetes sandboxes.
+type: application
+# version is the chart SemVer; appVersion tracks the application image tag.
+# CI rewrites both at publish time (dev: 0.0.0-git.<sha>; release: the tag).
+version: 0.1.0
+appVersion: v0.1.0
+home: https://www.pomerium.com/
+icon: https://www.pomerium.com/static-img/favicon.svg
+sources:
+  - https://github.com/pomerium/agentops
+maintainers:
+  - name: Pomerium Team
+    email: support@pomerium.com
+keywords:
+  - pomerium
+  - slack
+  - chatops
+  - agents
+  - mcp

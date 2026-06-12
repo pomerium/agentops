@@ -1,0 +1,84 @@
+name: Docker
+permissions:
+  contents: read
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: pomerium/agentops
+            dockerfile: ./Dockerfile
+          - image: pomerium/agentops-sidecar
+            dockerfile: ./Dockerfile.sidecar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v3
+
+      # Compute the tags and whether to push, from the triggering ref:
+      #   pull_request      -> build only (no push, amd64 only for speed)
+      #   push to main      -> push :main and :git-<sha>
+      #   push tag vX.Y.Z   -> push :vX.Y.Z, :latest and :git-<sha>
+      - name: Prepare metadata
+        id: meta
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          SHA_TAG="git-${GITHUB_SHA::8}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            TAGS="${IMAGE}:${VERSION},${IMAGE}:latest,${IMAGE}:${SHA_TAG}"
+            PUSH=true
+            PLATFORMS="linux/amd64,linux/arm64"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" && "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            TAGS="${IMAGE}:main,${IMAGE}:${SHA_TAG}"
+            PUSH=true
+            PLATFORMS="linux/amd64,linux/arm64"
+          else
+            # Pull request: validate the build only. Single-arch keeps it fast.
+            TAGS="${IMAGE}:pr"
+            PUSH=false
+            PLATFORMS="linux/amd64"
+          fi
+          {
+            echo "tags=${TAGS}"
+            echo "push=${PUSH}"
+            echo "platforms=${PLATFORMS}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to DockerHub
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ steps.meta.outputs.platforms }}
+          push: ${{ steps.meta.outputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          provenance: false
+          # Scope the GitHub Actions cache per image so the two builds don't
+          # evict each other.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/pomerium/agentops

@@ -1,0 +1,67 @@
+# Example AgentTemplate — "gstack".
+#
+# Invoked from Slack by @mentioning the bot followed by this template's name:
+#
+#     @bot gstack ...
+#
+# Gives the agent the garrytan/gstack source (an "AI software factory" toolkit
+# of Claude Code skills: /office-hours, /plan-ceo-review, /design-*, /review,
+# /qa, /ship, ...) as working context, plus the MCP servers a product-building
+# workflow leans on: Linear for issue tracking, Notion for specs and docs,
+# GitHub for the PR-based /ship flow, and PostHog for product analytics. When
+# a user invokes it, agentops:
+#   1. resolves this template by its metadata.name ("gstack");
+#   2. ensures the user has connected every server in .spec.requiredMCPServers,
+#      posting an OAuth link in-thread for any missing ones (PKCE + Dynamic
+#      Client Registration);
+#   3. once connected, launches the gstack-claude-code SandboxTemplate (which
+#      bakes the github.com/garrytan/gstack checkout) and injects the rendered
+#      systemPrompt plus one Authorization token per MCP server;
+#   4. opens a live ACP session bound to the Slack thread.
+apiVersion: agents.pomerium.com/v1alpha1
+kind: AgentTemplate
+metadata:
+  name: gstack
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  # System prompt rendered into the sandbox (injected as AGENT_SYSTEM_PROMPT).
+  systemPrompt: |
+    You are a product-engineering assistant invoked from Slack. The
+    garrytan/gstack repository — a toolkit of Claude Code skills that turn a
+    solo developer into a virtual engineering team (plan reviews, design
+    consultation, QA, security audit, ship) — is checked out in your workspace
+    as working context; read its skills to follow the Think → Plan → Build →
+    Review → Test → Ship process it encodes. Use the linear MCP server to look
+    up and file issues, the notion MCP server for specs and product docs, the
+    github MCP server to inspect repositories and pull requests, and the
+    posthog MCP server to query product analytics. Ground your answers in the
+    checked-out code, cite what you looked at, and ask before taking any
+    action that changes state.
+
+  # MCP servers the invoking user must be connected to before the workflow
+  # runs. Each {name, url} is an OAuth-brokered, per-user connection; the name
+  # is the credential key and is surfaced in the Slack auth prompt. These are
+  # the vendors' hosted remote MCP endpoints (OAuth + Dynamic Client
+  # Registration).
+  requiredMCPServers:
+    - name: linear
+      url: https://mcp.linear.app/mcp
+    - name: notion
+      url: https://mcp.notion.com/mcp
+    - name: posthog
+      url: https://posthog-mcp.corp.pomerium.com
+    # Other hosted MCP servers commonly paired with a product/dev workflow —
+    # uncomment what your team uses (every listed server gates the workflow on
+    # a per-user OAuth connection, so keep the required set minimal):
+    # - name: sentry        # error tracking / triage
+    #   url: https://mcp.sentry.dev/mcp
+    # - name: figma         # design files, for the /design-* skills
+    #   url: https://mcp.figma.com/mcp
+  # Selects the SandboxTemplate that defines how the sandbox is baked: the
+  # harness + base image, the sidecar, AND the git working context (public
+  # repo, no credentials Secret) — see sandboxtemplate-gstack-claude-code.yaml.
+  # The template is workflow-specific because the repo is part of the bake.
+  sandboxTemplateRef:
+    name: gstack-claude-code

@@ -1,0 +1,117 @@
+name: Helm
+permissions:
+  contents: read
+on:
+  pull_request:
+    paths:
+      - "deploy/helm/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "deploy/helm/**"
+  release:
+    types:
+      - published
+
+env:
+  CHART_DIR: ./deploy/helm
+  OCI_REGISTRY: registry-1.docker.io
+  OCI_REPO: oci://registry-1.docker.io/pomerium
+
+jobs:
+  # On PRs: lint the chart and render it both ways to catch template errors.
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Helm CLI
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+
+      - name: Lint
+        run: helm lint "${CHART_DIR}"
+
+      - name: Template (persistent / StatefulSet PVC)
+        run: |
+          helm template agentops "${CHART_DIR}" \
+            --set slack.signingSecret=test \
+            --set slack.botToken=test \
+            --set config.oauthRedirectBaseURL=https://agentops.example.com
+
+      - name: Template (ephemeral / emptyDir)
+        run: |
+          helm template agentops "${CHART_DIR}" \
+            --set slack.signingSecret=test \
+            --set slack.botToken=test \
+            --set config.oauthRedirectBaseURL=https://agentops.example.com \
+            --set persistence.enabled=false
+
+  # On pushes to main: publish a dev chart pinned to the dev image tag.
+  publish-dev:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Helm CLI
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+
+      - name: Set dev version
+        run: |
+          set -euo pipefail
+          VERSION="0.0.0-git.${GITHUB_SHA::7}"
+          APP_VERSION="git-${GITHUB_SHA::8}"
+          sed -i "s/^version:.*/version: ${VERSION}/" "${CHART_DIR}/Chart.yaml"
+          sed -i "s/^appVersion:.*/appVersion: ${APP_VERSION}/" "${CHART_DIR}/Chart.yaml"
+
+      - name: Login
+        run: |
+          helm registry login "${OCI_REGISTRY}" \
+            --username "${{ secrets.DOCKERHUB_USER }}" \
+            --password "${{ secrets.DOCKERHUB_TOKEN }}"
+
+      - name: Package
+        run: helm package "${CHART_DIR}"
+
+      - name: Push
+        run: |
+          find . -maxdepth 1 -type f -name "agentops-*.tgz" \
+            -exec helm push {} "${OCI_REPO}" \;
+
+  # On a published GitHub release (tag vX.Y.Z): publish the release chart.
+  publish-release:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Helm CLI
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+
+      - name: Set release version
+        run: |
+          set -euo pipefail
+          # Chart SemVer must not carry a leading "v"; the appVersion (and the
+          # image tag it selects) keeps it to match the Docker tag vX.Y.Z.
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version:.*/version: ${VERSION}/" "${CHART_DIR}/Chart.yaml"
+          sed -i "s/^appVersion:.*/appVersion: ${GITHUB_REF_NAME}/" "${CHART_DIR}/Chart.yaml"
+
+      - name: Login
+        run: |
+          helm registry login "${OCI_REGISTRY}" \
+            --username "${{ secrets.DOCKERHUB_USER }}" \
+            --password "${{ secrets.DOCKERHUB_TOKEN }}"
+
+      - name: Package
+        run: helm package "${CHART_DIR}"
+
+      - name: Push
+        run: |
+          find . -maxdepth 1 -type f -name "agentops-*.tgz" \
+            -exec helm push {} "${OCI_REPO}" \;

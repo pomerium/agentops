@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentops-config
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+data:
+  OAUTH_REDIRECT_BASE_URL: "https://agentops.example.com"
+  # debug|info|warn|error. Set to debug to see the full HTTP + sandbox/ACP
+  # comms trace. The dev overlay sets this to debug.
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agentops
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  serviceName: agentops
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentops
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentops
+    spec:
+      serviceAccountName: agentops
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agentops
+          # Locally-built image (see Dockerfile / `make docker-build`). Overlays
+          # set the tag. No registry is used, so pulls stay local.
+          image: agentops:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/agentops"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SLACK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agentops-secrets
+                  key: SLACK_SIGNING_SECRET
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentops-secrets
+                  key: SLACK_BOT_TOKEN
+            - name: OAUTH_REDIRECT_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agentops-config
+                  key: OAUTH_REDIRECT_BASE_URL
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: agentops-config
+                  key: LOG_LEVEL
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DB_PATH
+              value: "/data/agentops.db"
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: SESSION_TTL
+              value: "1h"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: agentops
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

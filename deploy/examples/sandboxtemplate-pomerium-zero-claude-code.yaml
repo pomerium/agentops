@@ -1,0 +1,112 @@
+# Example WORKFLOW-SPECIFIC SandboxTemplate: the Claude Code harness + sidecar
+# (see sandboxtemplate-claude-code.yaml for the generic pair and the full
+# commentary) plus the baked-in git working context for the `pomerium-zero`
+# workflow.
+#
+# The template defines how the sandbox is baked, and the working context is
+# part of that bake: the `git-init` init container carries the repo URL/ref as
+# plain env and the git credentials as a secretKeyRef. Because credentials and
+# repo are defined together here, the SandboxTemplate is tied to one agent
+# template by design. This is the PRIVATE-repo variant — the GIT_TOKEN
+# secretKeyRef is deliberately NOT optional, so a missing Secret fails the pod
+# instead of silently cloning unauthenticated (compare
+# sandboxtemplate-gstack-claude-code.yaml, which bakes a public repo and
+# carries no credentials at all).
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: pomerium-zero-claude-code
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  # REQUIRED: allow the SandboxClaim to inject per-run environment variables
+  # (AGENT_SYSTEM_PROMPT, AGENT_SESSION_ID → the agent container).
+  envVarsInjectionPolicy: Allowed
+
+  podTemplate:
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      # The git checkout: clones the baked repo into the shared workspace and
+      # exits before the agent container starts — the git token never exists
+      # in the agent's environment.
+      initContainers:
+        - name: git-init
+          image: agentops-agent:dev
+          imagePullPolicy: IfNotPresent
+          command: ["git-checkout"]
+          env:
+            # The working context this template bakes. Replace with your own
+            # private skills/runbooks repo.
+            - name: GIT_REPO_URL
+              value: "https://github.com/pomerium/pomerium-zero-skills.git"
+            - name: GIT_REPO_REF
+              value: "main"
+            # Credentials come from a Secret, never literal values. The ref is
+            # NOT optional: checkouts must be authenticated, and a missing
+            # Secret must fail the pod rather than fall back to an
+            # unauthenticated clone.
+            - name: GIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: pomerium-zero-git-credentials
+                  key: GIT_TOKEN
+            # Optional: git-checkout defaults to "x-access-token" (the GitHub
+            # fine-grained/app-token username) when unset.
+            - name: GIT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: pomerium-zero-git-credentials
+                  key: GIT_USERNAME
+                  optional: true
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        # Container names are a contract with agentops: claim env vars
+        # are targeted at "agent" by name, and the orchestrator exec's into
+        # "agent" and "sidecar" by name.
+        - name: agent
+          image: agentops-agent:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ACP_AGENT_CMD
+              value: "agent-entrypoint"
+            # NO CREDENTIALS HERE — see sandboxtemplate-claude-code.yaml.
+            - name: ANTHROPIC_BASE_URL
+              value: "http://127.0.0.1:9999"
+            - name: ANTHROPIC_API_KEY
+              value: "placeholder-replaced-by-sidecar"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+
+        # Secret-isolating proxy — see sandboxtemplate-claude-code.yaml.
+        - name: sidecar
+          image: agentops-sidecar:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SIDECAR_HTTP_ANTHROPIC_PORT
+              value: "9999"
+            - name: SIDECAR_HTTP_ANTHROPIC_UPSTREAM_URL
+              value: "https://api.anthropic.com"
+            - name: SIDECAR_HTTP_ANTHROPIC_HEADER_X_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: claude-code-credentials
+                  key: ANTHROPIC_API_KEY
+
+  # Per-sandbox working directory for the git checkout (ACP NewSession uses
+  # /workspace as its cwd).
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

@@ -1,0 +1,40 @@
+# Build is multi-stage; only the Go source/module files are needed in the
+# context. Exclude everything that would invalidate the cache or bloat the
+# image without contributing to the binary.
+
+# VCS and CI
+.git
+.github
+.gitignore
+
+# Container/build tooling (not needed inside the build context)
+Dockerfile
+.dockerignore
+Makefile
+
+# Local build outputs and caches
+/out
+/bin
+/dist
+*.test
+*.out
+
+# Environment / secrets — never include local env files in the build context
+.env
+.env.*
+
+# Editor/OS cruft
+.idea
+.vscode
+.DS_Store
+
+# Runtime data — never ship local SQLite databases or PVC data
+/data
+*.db
+*.db-shm
+*.db-wal
+
+# Docs and specs (not required to compile)
+*.md
+SPEC.md
+docs
