@@ -1,0 +1,39 @@
+# Google Cloud Build pipeline for the agent harness image(s).
+#
+# agentops' own GitHub Actions (.github/workflows/docker.yaml) publish the app
+# and sidecar (pomerium/agentops, pomerium/agentops-sidecar) to Docker Hub. The
+# agent *harness* images are NOT published there — they are built here and
+# pushed to Artifact Registry in the pomerium-public-prd GCP project, where the
+# GitOps SandboxTemplates pull them from.
+#
+# Wired up in the infrastructure repo (terraform/gcp/public-prd/cloud-build.tf):
+# a 2nd-gen GitHub trigger runs this file on push to main, as a dedicated build
+# service account with artifactregistry.writer on the `agentops` repository.
+#
+# Build context is deploy/harness so the shared git-checkout.sh is reachable by
+# each harness Dockerfile (matches `make harness-build`).
+substitutions:
+  _AR_HOST: us-central1-docker.pkg.dev
+  _AR_REPO: pomerium-public-prd/agentops
+
+steps:
+  # claude-code harness (the reference, e2e-tested harness).
+  - name: gcr.io/cloud-builders/docker
+    id: build-claude-code
+    args:
+      - build
+      - -f
+      - deploy/harness/claude-code/Dockerfile
+      - -t
+      - ${_AR_HOST}/${_AR_REPO}/claude-code:main
+      - -t
+      - ${_AR_HOST}/${_AR_REPO}/claude-code:git-${SHORT_SHA}
+      - deploy/harness
+
+images:
+  - ${_AR_HOST}/${_AR_REPO}/claude-code:main
+  - ${_AR_HOST}/${_AR_REPO}/claude-code:git-${SHORT_SHA}
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
