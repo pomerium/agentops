@@ -337,3 +337,61 @@ separate `app_mention` subscription is **not** required.
   matching the subscribed surfaces (`channels:history`, `groups:history`, …).
   The bot's user id is discovered at startup via `auth.test`.
 
+This is a self-hosted app, and you need to create a Slack application by visiting https://api.slack.com/apps and clicking Create Application. 
+Choose Create from Manifest option as it is easiest. Then Install to Workspace to obtain the bot token. 
+
+Then, configure the following env variables with the values from Slack application either via secret reference or providing them during Helm install
+
+- `SLACK_SIGNING_SECRET`
+- `SLACK_BOT_TOKEN`
+
+Make sure you confirm the Event URL in the slack as it requires application to be running and respond to a challenge sent by Slack - otherwise your application would not receive the notifications from slack when new messages arrive.
+
+### Manifest
+
+```json
+{
+    "display_information": {
+        "name": "pom"
+    },
+    "features": {
+        "bot_user": {
+            "display_name": "Pomerium",
+            "always_online": false
+        }
+    },
+    "oauth_config": {
+        "scopes": {
+            "bot": [
+                "app_mentions:read",
+                "channels:history",
+                "chat:write",
+                "reactions:write",
+                "im:history",
+                "groups:history",
+                "mpim:history"
+            ]
+        },
+        "pkce_enabled": false
+    },
+    "settings": {
+        "event_subscriptions": {
+            "request_url": "https://slack-agent.example.com/slack/events",
+            "bot_events": [
+                "message.channels",
+                "message.groups",
+                "message.im",
+                "message.mpim"
+            ]
+        },
+        "interactivity": {
+            "is_enabled": true,
+            "request_url": "https://slack-agent.example.com/slack/interactivity"
+        },
+        "org_deploy_enabled": false,
+        "socket_mode_enabled": false,
+        "token_rotation_enabled": false,
+        "is_mcp_enabled": true
+    }
+}
+```
