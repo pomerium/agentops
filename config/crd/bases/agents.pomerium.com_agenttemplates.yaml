@@ -60,6 +60,15 @@ spec:
                     MCPServerRef identifies an MCP server that a workflow requires the invoking
                     user to be connected to before the workflow can run.
                   properties:
+                    dialAddress:
+                      description: |-
+                        DialAddress optionally overrides the host[:port] the sandbox sidecar
+                        connects to for this server, while TLS SNI and the Host header still come
+                        from URL. Use it to reach an in-cluster Service
+                        (e.g. "mcp-gateway.gateway.svc.cluster.local:443") instead of
+                        hairpinning through an external LoadBalancer VIP. Empty dials the
+                        host:port parsed from URL.
+                      type: string
                     name:
                       description: |-
                         Name is a short, stable identifier for the server, unique within a

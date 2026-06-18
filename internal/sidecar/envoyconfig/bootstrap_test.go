@@ -186,6 +186,55 @@ func TestBuildBootstrapHTTPDefaultPort(t *testing.T) {
 	}
 }
 
+func TestBuildBootstrapDialAddressOverride(t *testing.T) {
+	t.Parallel()
+	// DialAddress decouples the dial target from the public URL: envoy connects
+	// to the in-cluster Service, but SNI and the Host header still present the
+	// public hostname so the host-routing gateway routes correctly.
+	listeners, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name:        "zero-admin",
+		ListenPort:  9200,
+		UpstreamURL: "https://admin-mcp.example.com",
+		DialAddress: "gateway.gateway.svc.cluster.local:443",
+	}})
+
+	// Cluster dials the override address.
+	ep := clusters[0].LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetAddress() != "gateway.gateway.svc.cluster.local" || ep.GetPortValue() != 443 {
+		t.Errorf("dial = %s:%d, want gateway.gateway.svc.cluster.local:443", ep.GetAddress(), ep.GetPortValue())
+	}
+
+	// SNI stays the public hostname.
+	var tlsCtx tlsv3.UpstreamTlsContext
+	if err := clusters[0].TransportSocket.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+		t.Fatalf("unpack tls context: %v", err)
+	}
+	if tlsCtx.Sni != "admin-mcp.example.com" {
+		t.Errorf("SNI = %q, want admin-mcp.example.com (public hostname, not dial target)", tlsCtx.Sni)
+	}
+
+	// Host header (HostRewriteLiteral) stays the public authority.
+	action := soleRoute(t, unpackHCM(t, listeners[0])).GetRoute()
+	if action.GetHostRewriteLiteral() != "admin-mcp.example.com" {
+		t.Errorf("host rewrite = %q, want admin-mcp.example.com", action.GetHostRewriteLiteral())
+	}
+}
+
+func TestBuildBootstrapDialAddressInheritsURLPort(t *testing.T) {
+	t.Parallel()
+	// DialAddress without a port inherits the port from the upstream URL.
+	_, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name:        "svc",
+		ListenPort:  9201,
+		UpstreamURL: "https://api.example.com:8443",
+		DialAddress: "internal.svc.cluster.local",
+	}})
+	ep := clusters[0].LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetAddress() != "internal.svc.cluster.local" || ep.GetPortValue() != 8443 {
+		t.Errorf("dial = %s:%d, want internal.svc.cluster.local:8443 (port inherited from URL)", ep.GetAddress(), ep.GetPortValue())
+	}
+}
+
 func TestBuildBootstrapAdminAndMarshal(t *testing.T) {
 	t.Parallel()
 	b, err := envoyconfig.BuildBootstrap([]envoyconfig.Endpoint{

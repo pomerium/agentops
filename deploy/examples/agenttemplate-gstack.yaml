@@ -51,7 +51,7 @@ spec:
     - name: notion
       url: https://mcp.notion.com/mcp
     - name: posthog
-      url: https://posthog-mcp.corp.pomerium.com
+      url: https://posthog-mcp.example.com
     # Other hosted MCP servers commonly paired with a product/dev workflow —
     # uncomment what your team uses (every listed server gates the workflow on
     # a per-user OAuth connection, so keep the required set minimal):

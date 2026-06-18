@@ -42,6 +42,10 @@ type Endpoint struct {
 	Name        string
 	ListenPort  uint32
 	UpstreamURL string
+	// DialAddress optionally overrides the host[:port] envoy connects to, while
+	// SNI and the Host header still derive from UpstreamURL. Empty means dial
+	// the host:port parsed from UpstreamURL.
+	DialAddress string
 	Headers     map[string]string
 }
 
@@ -104,6 +108,11 @@ type upstream struct {
 	host string
 	port uint32
 	tls  bool
+	// dialHost/dialPort are the address envoy actually connects to. They default
+	// to host/port and are overridden by Endpoint.DialAddress so the sandbox can
+	// reach an in-cluster Service while host/port (SNI + Host header) stay public.
+	dialHost string
+	dialPort uint32
 }
 
 // authority is the value for the upstream Host header. Per HTTP convention the
@@ -135,13 +144,41 @@ func parseUpstream(ep Endpoint) (upstream, error) {
 		return upstream{}, fmt.Errorf("endpoint %q: upstream URL scheme must be http or https", ep.Name)
 	}
 	if p := u.Port(); p != "" {
-		var port uint32
-		if _, err := fmt.Sscanf(p, "%d", &port); err != nil || port == 0 || port > 65535 {
+		port, err := parsePort(p)
+		if err != nil {
 			return upstream{}, fmt.Errorf("endpoint %q: invalid upstream port %q", ep.Name, p)
 		}
 		up.port = port
 	}
+
+	// The dial target defaults to the public host:port; DialAddress overrides it
+	// without touching SNI/authority. A bare host inherits the URL's port.
+	up.dialHost, up.dialPort = up.host, up.port
+	if ep.DialAddress != "" {
+		host, portStr, err := net.SplitHostPort(ep.DialAddress)
+		if err != nil {
+			// No port component: treat the whole value as a host, keep the URL port.
+			up.dialHost = ep.DialAddress
+		} else {
+			port, err := parsePort(portStr)
+			if err != nil {
+				return upstream{}, fmt.Errorf("endpoint %q: invalid dial address port %q", ep.Name, portStr)
+			}
+			up.dialHost, up.dialPort = host, port
+		}
+		if up.dialHost == "" {
+			return upstream{}, fmt.Errorf("endpoint %q: dial address has no host", ep.Name)
+		}
+	}
 	return up, nil
+}
+
+func parsePort(s string) (uint32, error) {
+	port, err := strconv.ParseUint(s, 10, 16)
+	if err != nil || port == 0 {
+		return 0, fmt.Errorf("invalid port %q", s)
+	}
+	return uint32(port), nil
 }
 
 func clusterName(ep Endpoint) string { return "ep-" + ep.Name }
@@ -241,7 +278,7 @@ func buildCluster(ep Endpoint, up upstream) (*clusterv3.Cluster, error) {
 				LbEndpoints: []*endpointv3.LbEndpoint{{
 					HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
 						Endpoint: &endpointv3.Endpoint{
-							Address: socketAddress(up.host, up.port),
+							Address: socketAddress(up.dialHost, up.dialPort),
 						},
 					},
 				}},

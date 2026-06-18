@@ -576,6 +576,7 @@ func (m *Manager) buildProxiedEndpoints(ctx context.Context, lc launchContext) (
 			Name:        srv.Name,
 			ListenPort:  sandbox.MCPListenPort(i),
 			UpstreamURL: srv.URL,
+			DialAddress: srv.DialAddress,
 			Headers:     map[string]string{"authorization": "Bearer " + token},
 		})
 	}

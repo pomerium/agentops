@@ -8,6 +8,7 @@
 //
 //	SIDECAR_HTTP_<NAME>_PORT=9999
 //	SIDECAR_HTTP_<NAME>_UPSTREAM_URL=https://api.example.com
+//	SIDECAR_HTTP_<NAME>_DIAL_ADDRESS=host[:port]   (optional)
 //	SIDECAR_HTTP_<NAME>_HEADER_<HEADER_NAME>=value
 //
 // Header names map underscores to dashes (X_API_KEY → x-api-key), so NAME
@@ -27,6 +28,7 @@ const prefix = "SIDECAR_HTTP_"
 const (
 	suffixPort        = "_PORT"
 	suffixUpstreamURL = "_UPSTREAM_URL"
+	suffixDialAddress = "_DIAL_ADDRESS"
 	infixHeader       = "_HEADER_"
 )
 
@@ -36,6 +38,7 @@ type Endpoint struct {
 	Name        string
 	ListenPort  uint32
 	UpstreamURL string
+	DialAddress string
 	Headers     map[string]string
 }
 
@@ -50,6 +53,7 @@ func Parse(environ []string) ([]Endpoint, error) {
 		hasPort bool
 		url     string
 		hasURL  bool
+		dial    string
 		headers map[string]string
 	}
 	partials := map[string]*partial{}
@@ -83,6 +87,12 @@ func Parse(environ []string) ([]Endpoint, error) {
 			}
 			p := get(name)
 			p.url, p.hasURL = value, true
+		case strings.HasSuffix(rest, suffixDialAddress):
+			name := strings.TrimSuffix(rest, suffixDialAddress)
+			if name == "" {
+				return nil, fmt.Errorf("malformed sidecar env var %q", key)
+			}
+			get(name).dial = value
 		case strings.HasSuffix(rest, suffixPort):
 			name := strings.TrimSuffix(rest, suffixPort)
 			if name == "" {
@@ -91,8 +101,8 @@ func Parse(environ []string) ([]Endpoint, error) {
 			p := get(name)
 			p.port, p.hasPort = value, true
 		default:
-			return nil, fmt.Errorf("unrecognized sidecar env var %q: expected %s<NAME>%s, %s<NAME>%s, or %s<NAME>%s<HEADER>",
-				key, prefix, suffixPort, prefix, suffixUpstreamURL, prefix, infixHeader)
+			return nil, fmt.Errorf("unrecognized sidecar env var %q: expected %s<NAME>%s, %s<NAME>%s, %s<NAME>%s, or %s<NAME>%s<HEADER>",
+				key, prefix, suffixPort, prefix, suffixUpstreamURL, prefix, suffixDialAddress, prefix, infixHeader)
 		}
 	}
 
@@ -133,6 +143,7 @@ func Parse(environ []string) ([]Endpoint, error) {
 			Name:        strings.ToLower(name),
 			ListenPort:  uint32(port),
 			UpstreamURL: p.url,
+			DialAddress: p.dial,
 			Headers:     p.headers,
 		})
 	}

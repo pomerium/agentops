@@ -150,6 +150,20 @@ func (s *Server) Control(stream grpc.BidiStreamingServer[sidecarpb.ControlReques
 	}
 }
 
+// endpointFromEnv maps an env-parsed endpoint to the envoy config shape. The
+// mapping is explicit by field name rather than a positional struct conversion
+// so that adding or reordering a field in either struct surfaces as a compile
+// error here instead of silently misassigning.
+func endpointFromEnv(ep envparse.Endpoint) envoyconfig.Endpoint {
+	return envoyconfig.Endpoint{
+		Name:        ep.Name,
+		ListenPort:  ep.ListenPort,
+		UpstreamURL: ep.UpstreamURL,
+		DialAddress: ep.DialAddress,
+		Headers:     ep.Headers,
+	}
+}
+
 // merge combines env-defined endpoints with the Configure message, rejecting
 // name and listen-port collisions.
 func (s *Server) merge(configure *sidecarpb.Configure) ([]envoyconfig.Endpoint, []*sidecarpb.EndpointStatus, error) {
@@ -177,7 +191,7 @@ func (s *Server) merge(configure *sidecarpb.Configure) ([]envoyconfig.Endpoint, 
 	}
 
 	for _, ep := range s.cfg.EnvEndpoints {
-		if err := add(envoyconfig.Endpoint(ep), true); err != nil {
+		if err := add(endpointFromEnv(ep), true); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -190,6 +204,7 @@ func (s *Server) merge(configure *sidecarpb.Configure) ([]envoyconfig.Endpoint, 
 			Name:        ep.GetName(),
 			ListenPort:  ep.GetListenPort(),
 			UpstreamURL: ep.GetUpstreamUrl(),
+			DialAddress: ep.GetDialAddress(),
 			Headers:     headers,
 		}, false)
 		if err != nil {
