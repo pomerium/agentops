@@ -16,6 +16,15 @@ type MCPServerRef struct {
 	// URL is the streamable-HTTP endpoint of the MCP server.
 	// +required
 	URL string `json:"url"`
+
+	// DialAddress optionally overrides the host[:port] the sandbox sidecar
+	// connects to for this server, while TLS SNI and the Host header still come
+	// from URL. Use it to reach an in-cluster Service
+	// (e.g. "mcp-gateway.gateway.svc.cluster.local:443") instead of
+	// hairpinning through an external LoadBalancer VIP. Empty dials the
+	// host:port parsed from URL.
+	// +optional
+	DialAddress string `json:"dialAddress,omitempty"`
 }
 
 // SandboxTemplateReference selects the SandboxTemplate that provides the agent

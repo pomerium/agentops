@@ -198,7 +198,12 @@ type HttpEndpoint struct {
 	// Upstream scheme://host[:port]; the request path is forwarded unchanged.
 	UpstreamUrl string `protobuf:"bytes,3,opt,name=upstream_url,json=upstreamUrl,proto3" json:"upstream_url,omitempty"`
 	// Headers added to every upstream request (overwriting client-sent values).
-	Headers       []*Header `protobuf:"bytes,4,rep,name=headers,proto3" json:"headers,omitempty"`
+	Headers []*Header `protobuf:"bytes,4,rep,name=headers,proto3" json:"headers,omitempty"`
+	// Optional dial-target override (host[:port]) envoy connects to, while SNI and
+	// the Host header still come from upstream_url. Lets a sandbox reach an
+	// in-cluster Service without hairpinning through an external LB VIP. Empty =
+	// dial host:port parsed from upstream_url.
+	DialAddress   string `protobuf:"bytes,5,opt,name=dial_address,json=dialAddress,proto3" json:"dial_address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -259,6 +264,13 @@ func (x *HttpEndpoint) GetHeaders() []*Header {
 		return x.Headers
 	}
 	return nil
+}
+
+func (x *HttpEndpoint) GetDialAddress() string {
+	if x != nil {
+		return x.DialAddress
+	}
+	return ""
 }
 
 type Header struct {
@@ -513,13 +525,14 @@ const file_sidecar_v1_sidecar_proto_rawDesc = "" +
 	"\tconfigure\x18\x01 \x01(\v2\x15.sidecar.v1.ConfigureH\x00R\tconfigureB\x05\n" +
 	"\x03msg\"C\n" +
 	"\tConfigure\x126\n" +
-	"\tendpoints\x18\x01 \x03(\v2\x18.sidecar.v1.HttpEndpointR\tendpoints\"\x94\x01\n" +
+	"\tendpoints\x18\x01 \x03(\v2\x18.sidecar.v1.HttpEndpointR\tendpoints\"\xb7\x01\n" +
 	"\fHttpEndpoint\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1f\n" +
 	"\vlisten_port\x18\x02 \x01(\rR\n" +
 	"listenPort\x12!\n" +
 	"\fupstream_url\x18\x03 \x01(\tR\vupstreamUrl\x12,\n" +
-	"\aheaders\x18\x04 \x03(\v2\x12.sidecar.v1.HeaderR\aheaders\"2\n" +
+	"\aheaders\x18\x04 \x03(\v2\x12.sidecar.v1.HeaderR\aheaders\x12!\n" +
+	"\fdial_address\x18\x05 \x01(\tR\vdialAddress\"2\n" +
 	"\x06Header\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"F\n" +

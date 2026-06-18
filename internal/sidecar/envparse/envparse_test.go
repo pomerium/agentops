@@ -82,6 +82,21 @@ func TestParse(t *testing.T) {
 			},
 		},
 		{
+			name: "endpoint with dial address override",
+			environ: []string{
+				"SIDECAR_HTTP_ZERO_PORT=9005",
+				"SIDECAR_HTTP_ZERO_UPSTREAM_URL=https://admin-mcp.example.com",
+				"SIDECAR_HTTP_ZERO_DIAL_ADDRESS=gateway.gateway.svc.cluster.local:443",
+			},
+			want: []envparse.Endpoint{{
+				Name:        "zero",
+				ListenPort:  9005,
+				UpstreamURL: "https://admin-mcp.example.com",
+				DialAddress: "gateway.gateway.svc.cluster.local:443",
+				Headers:     map[string]string{},
+			}},
+		},
+		{
 			name: "missing port",
 			environ: []string{
 				"SIDECAR_HTTP_API_UPSTREAM_URL=https://example.com",

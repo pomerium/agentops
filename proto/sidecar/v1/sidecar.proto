@@ -38,6 +38,11 @@ message HttpEndpoint {
   string upstream_url = 3;
   // Headers added to every upstream request (overwriting client-sent values).
   repeated Header headers = 4;
+  // Optional dial-target override (host[:port]) envoy connects to, while SNI and
+  // the Host header still come from upstream_url. Lets a sandbox reach an
+  // in-cluster Service without hairpinning through an external LB VIP. Empty =
+  // dial host:port parsed from upstream_url.
+  string dial_address = 5;
 }
 
 message Header {

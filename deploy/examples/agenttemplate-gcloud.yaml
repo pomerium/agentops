@@ -72,11 +72,16 @@ spec:
   # commented below — uncomment the ones your team uses.
   requiredMCPServers:
     - name: cloud-run        # skill: Cloud Run — deploy/manage services & jobs
-      url: https://cloudrun-mcp.corp.pomerium.com
+      url: https://cloudrun-mcp.example.com
+      # dialAddress overrides the host[:port] the sidecar connects to while SNI
+      # and the Host header stay the public URL above. Use it when the public
+      # hostname resolves to an in-cluster LoadBalancer VIP that would hairpin —
+      # point envoy at the gateway's in-cluster Service instead.
+      dialAddress: mcp-gateway.gateway.svc.cluster.local:443
     - name: cloudlogging     # recipe: observability — Cloud Logging queries
-      url: https://logging-mcp.corp.pomerium.com
+      url: https://logging-mcp.example.com
     - name: gke              # skill: GKE (Kubernetes Engine) — clusters/workloads
-      url: https://k8s-mcp.corp.pomerium.com
+      url: https://k8s-mcp.example.com
     # - name: cloud-run        # skill: Cloud Run — deploy/manage services & jobs
     #   url: https://run.googleapis.com/mcp
     # - name: bigquery         # skill: BigQuery — datasets, tables, queries

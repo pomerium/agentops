@@ -46,6 +46,10 @@ type ProxiedEndpoint struct {
 	Name        string
 	ListenPort  uint32
 	UpstreamURL string
+	// DialAddress optionally overrides the host[:port] the sidecar's envoy dials,
+	// while SNI and the Host header stay derived from UpstreamURL. Empty dials the
+	// host:port parsed from UpstreamURL.
+	DialAddress string
 	Headers     map[string]string
 }
 
@@ -158,6 +162,7 @@ func configureSidecar(ctx context.Context, tel *telemetry.Component, conn *Agent
 				Name:        SidecarEndpointName(ep.Name),
 				ListenPort:  ep.ListenPort,
 				UpstreamUrl: ep.UpstreamURL,
+				DialAddress: ep.DialAddress,
 			}
 			for name, value := range ep.Headers {
 				pbEp.Headers = append(pbEp.Headers, &sidecarpb.Header{Name: name, Value: value})
