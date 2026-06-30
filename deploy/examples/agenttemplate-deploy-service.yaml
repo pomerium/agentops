@@ -12,8 +12,9 @@
 #      .spec.requiredMCPServers (prompting an OAuth link in-thread for any
 #      that are missing);
 #   3. once all servers are connected, launches an agent-sandbox SandboxClaim
-#      from .spec.sandboxTemplateRef, injecting the rendered systemPrompt, the
-#      the rendered systemPrompt; MCP tokens go to the sandbox sidecar;
+#      against .spec.warmPoolRef (a SandboxWarmPool that selects the
+#      SandboxTemplate), injecting the rendered systemPrompt; MCP tokens go to
+#      the sandbox sidecar;
 #   4. opens a live ACP session bound to the Slack thread.
 #
 # Mirrors SPEC.md section 5.
@@ -43,12 +44,14 @@ spec:
     - name: k8s
       url: https://k8s-mcp.example.com/mcp
 
-  # Selects the SandboxTemplate that defines how the sandbox is baked: the
-  # harness + base image, the sidecar, and — when the workflow needs a repo —
-  # the git working context (repo URL/ref + credentials secretKeyRef on the
-  # template's git-init container). A workflow with a repo gets its own
-  # template; copy sandboxtemplate-pomerium-zero-claude-code.yaml as the
-  # starting point (here: a hypothetical deploy-runbooks-claude-code baking
+  # Selects the agent-sandbox SandboxWarmPool (run with replicas: 0) whose
+  # SandboxTemplate defines how the sandbox is baked: the harness + base image,
+  # the sidecar, and — when the workflow needs a repo — the git working context
+  # (repo URL/ref + credentials secretKeyRef on the template's git-init
+  # container). A workflow with a repo gets its own template + pool; copy
+  # sandboxtemplate-pomerium-zero-claude-code.yaml and
+  # sandboxwarmpool-pomerium-zero-claude-code.yaml as the starting point (here:
+  # a hypothetical deploy-runbooks-claude-code baking
   # https://github.com/acme/deploy-runbooks.git).
-  sandboxTemplateRef:
+  warmPoolRef:
     name: deploy-runbooks-claude-code

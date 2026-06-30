@@ -131,27 +131,30 @@ Process configuration comes from environment variables (see
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, or `error`. Set `debug` to see HTTP request logs, the sandbox/ACP comms trace (method/update kinds only), and the per-turn agent trace — tool calls, thoughts, and superseded narration, tagged with the sandbox and turn. |
 | `AGENT_COMMAND` | no | — | Command exec'd in the sandbox to start the ACP agent over stdio; empty uses the orchestrator default. |
 
-Per-workflow configuration is supplied as CRDs (`AgentTemplate` and the
-referenced `SandboxTemplate`), not environment variables.
+Per-workflow configuration is supplied as CRDs (`AgentTemplate`, the
+`SandboxWarmPool` it references, and that pool's `SandboxTemplate`), not
+environment variables.
 
 ## Install
 
 Three things land in the cluster, in order: the upstream **agent-sandbox**
 controller and CRDs (prerequisite), **this app** (Helm, or Kustomize for local
 dev), and at least one **agent harness** image with its `SandboxTemplate` +
-`AgentTemplate` pair (see [Agent harnesses](#agent-harnesses) and
-[Defining an agent](#defining-an-agent)).
+`SandboxWarmPool` + `AgentTemplate` set (see [Agent harnesses](#agent-harnesses)
+and [Defining an agent](#defining-an-agent)).
 
 ### 1. Install agent-sandbox (prerequisite)
 
 Sandboxes are [`agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)
-pods; its controller and CRDs (`Sandbox`, `SandboxTemplate`, `SandboxClaim`)
-must be present before the app can launch anything. Upstream publishes plain
-manifests (no Helm chart); the controller lands in namespace
-`agent-sandbox-system`:
+pods; its controller and CRDs (`Sandbox`, `SandboxTemplate`, `SandboxClaim`,
+`SandboxWarmPool`) must be present before the app can launch anything. This app
+targets the `v1beta1` API (agent-sandbox v0.5.0+), in which a `SandboxClaim`
+references a `SandboxWarmPool` (which in turn references a `SandboxTemplate`).
+Upstream publishes plain manifests (no Helm chart); the controller lands in
+namespace `agent-sandbox-system`:
 
 ```sh
-VERSION=v0.4.6  # latest: curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r .tag_name
+VERSION=v0.5.0  # latest: curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | jq -r .tag_name
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml"    # Sandbox CRD + controller
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml"  # SandboxTemplate, SandboxClaim, SandboxWarmPool
 ```
@@ -189,8 +192,9 @@ must be able to reach it at the Event Subscriptions / Interactivity URLs (see
 ### 3. Set up an agent harness
 
 Pick (or build) a harness image from [Agent harnesses](#agent-harnesses), then
-apply its `SandboxTemplate`, the LLM-credentials Secret it references, and an
-`AgentTemplate` that uses it — worked examples under
+apply its `SandboxTemplate`, a `SandboxWarmPool` (replicas: 0) that references
+it, the LLM-credentials Secret the template references, and an `AgentTemplate`
+that selects the pool via `.spec.warmPoolRef.name` — worked examples under
 [`deploy/examples/`](./deploy/examples) are described in
 [Defining an agent](#defining-an-agent).
 
@@ -260,14 +264,15 @@ These require two repository secrets: **`DOCKERHUB_USER`** and
 ## Defining an agent
 
 An agent users can invoke from Slack is an `AgentTemplate` (group
-`agents.pomerium.com/v1alpha1`) plus the `SandboxTemplate` it references. The
-worked examples under [`deploy/examples/`](./deploy/examples):
+`agents.pomerium.com/v1alpha1`) plus the `SandboxWarmPool` it references via
+`.spec.warmPoolRef.name` and that pool's `SandboxTemplate`. The worked examples
+under [`deploy/examples/`](./deploy/examples):
 
 **`AgentTemplate`** — a workflow users invoke as `@bot <metadata.name> ...`:
 
 | Example | Invoke as | What it shows |
 | --- | --- | --- |
-| [`agenttemplate-deploy-service.yaml`](./deploy/examples/agenttemplate-deploy-service.yaml) | `deploy-service` | System prompt, required MCP servers (github + k8s), and a workflow-specific `sandboxTemplateRef` that bakes the git working context. |
+| [`agenttemplate-deploy-service.yaml`](./deploy/examples/agenttemplate-deploy-service.yaml) | `deploy-service` | System prompt, required MCP servers (github + k8s), and a workflow-specific `warmPoolRef` whose template bakes the git working context. |
 | [`agenttemplate-gstack.yaml`](./deploy/examples/agenttemplate-gstack.yaml) | `gstack` | Bakes the `garrytan/gstack` "AI software factory" skills repo, paired with product/dev MCP servers (Linear, Notion, GitHub, PostHog). |
 | [`agenttemplate-gcloud.yaml`](./deploy/examples/agenttemplate-gcloud.yaml) | `gcloud` | Bakes Google's official `google/skills` repo, each product skill paired with Google's matching first-party Cloud MCP server (Cloud Run, BigQuery, GKE, …), plus a `sessionConfig` picking the model. |
 
@@ -280,6 +285,19 @@ worked examples under [`deploy/examples/`](./deploy/examples):
 | [`sandboxtemplate-gstack-claude-code.yaml`](./deploy/examples/sandboxtemplate-gstack-claude-code.yaml) | `gstack` | Workflow-specific: bakes a **public** repo (no credentials Secret — `git-checkout` does an unauthenticated shallow fetch). |
 | [`sandboxtemplate-google-skills-claude-code.yaml`](./deploy/examples/sandboxtemplate-google-skills-claude-code.yaml) | `gcloud` | Workflow-specific: bakes the public `google/skills` repo into `/workspace`. |
 
+**`SandboxWarmPool`** — the indirection a `SandboxClaim` binds to in v1beta1.
+agentops runs a fresh sandbox per run, so each pool is sized `replicas: 0`
+(nothing pre-warmed); because the claim injects per-run env, the controller
+cold-starts a new pod from the pool's `sandboxTemplateRef` for every run. Deploy
+one pool per harness, named to match the `AgentTemplate`'s `warmPoolRef.name`:
+
+| Example | Pairs with template |
+| --- | --- |
+| [`sandboxwarmpool-claude-code.yaml`](./deploy/examples/sandboxwarmpool-claude-code.yaml) | `claude-code` |
+| [`sandboxwarmpool-pomerium-zero-claude-code.yaml`](./deploy/examples/sandboxwarmpool-pomerium-zero-claude-code.yaml) | `pomerium-zero-claude-code` |
+| [`sandboxwarmpool-gstack-claude-code.yaml`](./deploy/examples/sandboxwarmpool-gstack-claude-code.yaml) | `gstack-claude-code` |
+| [`sandboxwarmpool-google-skills-claude-code.yaml`](./deploy/examples/sandboxwarmpool-google-skills-claude-code.yaml) | `google-skills-claude-code` |
+
 **Secret** — LLM credentials a `SandboxTemplate` references:
 
 | Example | What it shows |
@@ -288,7 +306,7 @@ worked examples under [`deploy/examples/`](./deploy/examples):
 
 The agent is selected from Slack by the template's `metadata.name`. Key
 `AgentTemplate` spec fields: `systemPrompt`, `requiredMCPServers`
-(`{name, url}`), `sandboxTemplateRef`, and `sessionConfig` (below).
+(`{name, url}`), `warmPoolRef`, and `sessionConfig` (below).
 
 ### Harness session configuration (`sessionConfig`)
 

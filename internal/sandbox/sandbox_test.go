@@ -15,7 +15,7 @@ import (
 func TestBuildSandboxClaimInjectsContext(t *testing.T) {
 	wf := &v1alpha1.AgentTemplate{
 		Spec: v1alpha1.AgentTemplateSpec{
-			SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "pomerium-zero-claude-code"},
+			WarmPoolRef: v1alpha1.SandboxWarmPoolReference{Name: "pomerium-zero-claude-code"},
 		},
 	}
 	deadline := time.Now().Add(30 * time.Minute)
@@ -29,11 +29,12 @@ func TestBuildSandboxClaimInjectsContext(t *testing.T) {
 	if claim.Namespace != "agentops" {
 		t.Errorf("namespace = %q", claim.Namespace)
 	}
-	if claim.Spec.TemplateRef.Name != "pomerium-zero-claude-code" {
-		t.Errorf("template ref = %q, want pomerium-zero-claude-code", claim.Spec.TemplateRef.Name)
-	}
-	if claim.Spec.WarmPool == nil || *claim.Spec.WarmPool != "none" {
-		t.Errorf("warmpool = %v, want none", claim.Spec.WarmPool)
+	// v1beta1: the claim binds to a SandboxWarmPool (which selects the harness
+	// SandboxTemplate); there is no warm-pool policy field. The claim carries
+	// Env, which forces a cold start — reproducing the old WarmPoolPolicyNone
+	// "fresh pod per run" behavior against a replicas:0 pool.
+	if claim.Spec.WarmPoolRef.Name != "pomerium-zero-claude-code" {
+		t.Errorf("warm pool ref = %q, want pomerium-zero-claude-code", claim.Spec.WarmPoolRef.Name)
 	}
 	if claim.Spec.Lifecycle == nil || claim.Spec.Lifecycle.ShutdownTime == nil {
 		t.Fatal("expected lifecycle shutdown time to be set from deadline")
@@ -80,7 +81,7 @@ func TestBuildSandboxClaimInjectsContext(t *testing.T) {
 func TestBuildSandboxClaimTargetsConfiguredContainer(t *testing.T) {
 	wf := &v1alpha1.AgentTemplate{
 		Spec: v1alpha1.AgentTemplateSpec{
-			SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "tmpl"},
+			WarmPoolRef: v1alpha1.SandboxWarmPoolReference{Name: "tmpl"},
 		},
 	}
 	claim := sandbox.BuildSandboxClaim("ns", sandbox.LaunchSpec{
@@ -101,7 +102,7 @@ func TestBuildSandboxClaimTargetsConfiguredContainer(t *testing.T) {
 func TestBuildSandboxClaimDefaultsContainer(t *testing.T) {
 	wf := &v1alpha1.AgentTemplate{
 		Spec: v1alpha1.AgentTemplateSpec{
-			SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "tmpl"},
+			WarmPoolRef: v1alpha1.SandboxWarmPoolReference{Name: "tmpl"},
 		},
 	}
 	claim := sandbox.BuildSandboxClaim("ns", sandbox.LaunchSpec{

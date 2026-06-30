@@ -27,10 +27,12 @@ type MCPServerRef struct {
 	DialAddress string `json:"dialAddress,omitempty"`
 }
 
-// SandboxTemplateReference selects the SandboxTemplate that provides the agent
-// harness and base image for a workflow.
-type SandboxTemplateReference struct {
-	// Name of the SandboxTemplate (in the same namespace).
+// SandboxWarmPoolReference selects the agent-sandbox SandboxWarmPool that
+// provides the agent harness and base image for a workflow. The warm pool (run
+// with replicas: 0) in turn references the SandboxTemplate; a SandboxClaim now
+// binds to the pool, not the template directly (agent-sandbox v1beta1).
+type SandboxWarmPoolReference struct {
+	// Name of the SandboxWarmPool (in the same namespace).
 	// +required
 	Name string `json:"name"`
 }
@@ -63,14 +65,18 @@ type AgentTemplateSpec struct {
 	// +listMapKey=name
 	RequiredMCPServers []MCPServerRef `json:"requiredMCPServers,omitempty"`
 
-	// SandboxTemplateRef selects how the sandbox is baked for this workflow:
-	// the harness + base image, the secret-isolating sidecar, and — when the
-	// workflow needs a repository checked out — the git working context (repo
-	// URL/ref and credentials secretKeyRef on the template's git-init init
-	// container). Templates that bake a repo are workflow-specific by design
-	// (e.g. "pomerium-zero-claude-code").
+	// WarmPoolRef selects the agent-sandbox SandboxWarmPool that bakes the
+	// sandbox for this workflow. The pool (run with replicas: 0) references a
+	// SandboxTemplate, which defines the harness + base image, the
+	// secret-isolating sidecar, and — when the workflow needs a repository
+	// checked out — the git working context (repo URL/ref and credentials
+	// secretKeyRef on the template's git-init init container). Pools whose
+	// template bakes a repo are workflow-specific by design (e.g.
+	// "pomerium-zero-claude-code"). agentops creates a SandboxClaim against this
+	// pool per run; because the claim injects per-run env, the sandbox is always
+	// cold-started (a fresh pod per run).
 	// +required
-	SandboxTemplateRef SandboxTemplateReference `json:"sandboxTemplateRef"`
+	WarmPoolRef SandboxWarmPoolReference `json:"warmPoolRef"`
 }
 
 // AgentTemplateStatus is the observed state of an AgentTemplate.
@@ -85,7 +91,7 @@ type AgentTemplateStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=agt
-// +kubebuilder:printcolumn:name="Sandbox",type=string,JSONPath=`.spec.sandboxTemplateRef.name`
+// +kubebuilder:printcolumn:name="WarmPool",type=string,JSONPath=`.spec.warmPoolRef.name`
 
 // AgentTemplate is the declarative definition of an agentic workflow that
 // users can invoke from Slack.

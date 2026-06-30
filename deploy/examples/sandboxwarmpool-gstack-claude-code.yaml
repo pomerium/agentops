@@ -1,0 +1,16 @@
+# SandboxWarmPool for the gstack-claude-code harness (public-repo bake). See
+# sandboxwarmpool-claude-code.yaml for why the pool is sized replicas: 0 (fresh
+# pod per run via cold start).
+#
+# A AgentTemplate selects this pool by name via .spec.warmPoolRef.name.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: gstack-claude-code
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: gstack-claude-code

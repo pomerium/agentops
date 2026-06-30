@@ -11,7 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	v1alpha1 "github.com/pomerium/agentops/api/v1alpha1"
 )
@@ -72,8 +72,6 @@ func ClaimName(sessionID string) string {
 // BuildSandboxClaim constructs the SandboxClaim for a launch. It is a pure
 // function (no clock, no cluster access) so it can be unit-tested.
 func BuildSandboxClaim(namespace string, spec LaunchSpec) *sbxv1.SandboxClaim {
-	warmPool := sbxv1.WarmPoolPolicyNone
-
 	claim := &sbxv1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ClaimName(spec.SessionID),
@@ -83,9 +81,15 @@ func BuildSandboxClaim(namespace string, spec LaunchSpec) *sbxv1.SandboxClaim {
 				"agents.pomerium.com/session":  sanitizeName(spec.SessionID),
 			},
 		},
+		// v1beta1: a claim binds to a SandboxWarmPool (which references the
+		// harness SandboxTemplate), not to a template directly. There is no
+		// warm-pool policy field anymore; instead, because the claim sets Env,
+		// the sandbox is always cold-started from the pool's template — i.e. a
+		// fresh pod per run, the behavior the old WarmPoolPolicyNone gave us.
+		// Operators run the referenced pool with replicas: 0 so nothing is
+		// pre-warmed.
 		Spec: sbxv1.SandboxClaimSpec{
-			TemplateRef: sbxv1.SandboxTemplateRef{Name: spec.Template.Spec.SandboxTemplateRef.Name},
-			WarmPool:    &warmPool,
+			WarmPoolRef: sbxv1.SandboxWarmPoolRef{Name: spec.Template.Spec.WarmPoolRef.Name},
 			Env:         buildEnv(spec),
 		},
 	}

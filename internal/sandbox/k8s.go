@@ -14,8 +14,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 
-	extv1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1alpha1"
-	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	extv1 "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/typed/api/v1beta1"
+	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/pomerium/agentops/internal/telemetry"
 )

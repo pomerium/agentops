@@ -17,8 +17,8 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.sandboxTemplateRef.name
-      name: Sandbox
+    - jsonPath: .spec.warmPoolRef.name
+      name: WarmPool
       type: string
     name: v1alpha1
     schema:
@@ -87,21 +87,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
-              sandboxTemplateRef:
-                description: |-
-                  SandboxTemplateRef selects how the sandbox is baked for this workflow:
-                  the harness + base image, the secret-isolating sidecar, and — when the
-                  workflow needs a repository checked out — the git working context (repo
-                  URL/ref and credentials secretKeyRef on the template's git-init init
-                  container). Templates that bake a repo are workflow-specific by design
-                  (e.g. "pomerium-zero-claude-code").
-                properties:
-                  name:
-                    description: Name of the SandboxTemplate (in the same namespace).
-                    type: string
-                required:
-                - name
-                type: object
               sessionConfig:
                 additionalProperties:
                   type: string
@@ -120,8 +105,27 @@ spec:
                   SystemPrompt is the system prompt provided to the agent for this
                   workflow.
                 type: string
+              warmPoolRef:
+                description: |-
+                  WarmPoolRef selects the agent-sandbox SandboxWarmPool that bakes the
+                  sandbox for this workflow. The pool (run with replicas: 0) references a
+                  SandboxTemplate, which defines the harness + base image, the
+                  secret-isolating sidecar, and — when the workflow needs a repository
+                  checked out — the git working context (repo URL/ref and credentials
+                  secretKeyRef on the template's git-init init container). Pools whose
+                  template bakes a repo are workflow-specific by design (e.g.
+                  "pomerium-zero-claude-code"). agentops creates a SandboxClaim against this
+                  pool per run; because the claim injects per-run env, the sandbox is always
+                  cold-started (a fresh pod per run).
+                properties:
+                  name:
+                    description: Name of the SandboxWarmPool (in the same namespace).
+                    type: string
+                required:
+                - name
+                type: object
             required:
-            - sandboxTemplateRef
+            - warmPoolRef
             type: object
           status:
             description: AgentTemplateStatus is the observed state of an AgentTemplate.

@@ -51,7 +51,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	v1alpha1 "github.com/pomerium/agentops/api/v1alpha1"
 	"github.com/pomerium/agentops/internal/sandbox"
@@ -127,9 +127,9 @@ func TestSidecarK3sIsolatesSecrets(t *testing.T) {
 	}}
 	spec := sandbox.LaunchSpec{
 		SessionID: "sidecar-e2e",
-		Workflow: &v1alpha1.AgentTemplate{
+		Template: &v1alpha1.AgentTemplate{
 			Spec: v1alpha1.AgentTemplateSpec{
-				SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "claude-code"},
+				WarmPoolRef: v1alpha1.SandboxWarmPoolReference{Name: "claude-code"},
 			},
 		},
 	}
@@ -265,9 +265,11 @@ func repoRoot(t *testing.T) string {
 	return filepath.Join(filepath.Dir(thisFile), "..", "..")
 }
 
-// startK3s runs the k3s container and imports the images the sandbox pod
-// needs (k3s has no access to the host Docker daemon's image store).
-func startK3s(ctx context.Context, t *testing.T) *k3s.K3sContainer {
+// startK3sContainer runs a bare k3s testcontainer (no image loading). Tests
+// that only talk to the API server (e.g. CRD schema validation) use this
+// directly; the full sandbox launch path uses startK3s, which also loads the
+// sidecar/agent images.
+func startK3sContainer(ctx context.Context, t *testing.T) *k3s.K3sContainer {
 	t.Helper()
 	// Replace the module's host config: it sets CgroupnsMode "host", under
 	// which (at least on OrbStack/cgroup-v2 hosts) the kubelet treats every
@@ -291,6 +293,14 @@ func startK3s(ctx context.Context, t *testing.T) *k3s.K3sContainer {
 		defer ccancel()
 		_ = ctr.Terminate(cctx)
 	})
+	return ctr
+}
+
+// startK3s runs the k3s container and imports the images the sandbox pod
+// needs (k3s has no access to the host Docker daemon's image store).
+func startK3s(ctx context.Context, t *testing.T) *k3s.K3sContainer {
+	t.Helper()
+	ctr := startK3sContainer(ctx, t)
 
 	cmd := exec.Command("docker", "pull", echoImage)
 	cmd.Stdout = &lineLogger{t: t, prefix: "[pull]"}
