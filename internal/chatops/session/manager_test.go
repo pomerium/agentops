@@ -385,8 +385,8 @@ func deployTemplate() *v1alpha1.AgentTemplate {
 	return &v1alpha1.AgentTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "deploy"},
 		Spec: v1alpha1.AgentTemplateSpec{
-			SystemPrompt:       "be helpful",
-			SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "claude-code"},
+			SystemPrompt: "be helpful",
+			WarmPoolRef:  v1alpha1.SandboxWarmPoolReference{Name: "claude-code"},
 			RequiredMCPServers: []v1alpha1.MCPServerRef{
 				{Name: "github", URL: "https://gh/mcp"},
 				{Name: "k8s", URL: "https://k8s/mcp"},

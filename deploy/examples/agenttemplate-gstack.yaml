@@ -14,9 +14,10 @@
 #   2. ensures the user has connected every server in .spec.requiredMCPServers,
 #      posting an OAuth link in-thread for any missing ones (PKCE + Dynamic
 #      Client Registration);
-#   3. once connected, launches the gstack-claude-code SandboxTemplate (which
-#      bakes the github.com/garrytan/gstack checkout) and injects the rendered
-#      systemPrompt plus one Authorization token per MCP server;
+#   3. once connected, launches a SandboxClaim against the gstack-claude-code
+#      SandboxWarmPool (whose SandboxTemplate bakes the github.com/garrytan/gstack
+#      checkout) and injects the rendered systemPrompt plus one Authorization
+#      token per MCP server;
 #   4. opens a live ACP session bound to the Slack thread.
 apiVersion: agents.pomerium.com/v1alpha1
 kind: AgentTemplate
@@ -59,9 +60,11 @@ spec:
     #   url: https://mcp.sentry.dev/mcp
     # - name: figma         # design files, for the /design-* skills
     #   url: https://mcp.figma.com/mcp
-  # Selects the SandboxTemplate that defines how the sandbox is baked: the
-  # harness + base image, the sidecar, AND the git working context (public
-  # repo, no credentials Secret) — see sandboxtemplate-gstack-claude-code.yaml.
-  # The template is workflow-specific because the repo is part of the bake.
-  sandboxTemplateRef:
+  # Selects the agent-sandbox SandboxWarmPool (replicas: 0) whose SandboxTemplate
+  # defines how the sandbox is baked: the harness + base image, the sidecar, AND
+  # the git working context (public repo, no credentials Secret) — see
+  # sandboxwarmpool-gstack-claude-code.yaml and
+  # sandboxtemplate-gstack-claude-code.yaml. The template is workflow-specific
+  # because the repo is part of the bake.
+  warmPoolRef:
     name: gstack-claude-code

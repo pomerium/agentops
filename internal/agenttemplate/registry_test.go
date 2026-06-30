@@ -26,7 +26,7 @@ func agt(ns, name string) *v1alpha1.AgentTemplate {
 	return &v1alpha1.AgentTemplate{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 		Spec: v1alpha1.AgentTemplateSpec{
-			SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "claude-code"},
+			WarmPoolRef: v1alpha1.SandboxWarmPoolReference{Name: "claude-code"},
 		},
 	}
 }

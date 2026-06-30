@@ -15,9 +15,10 @@
 #   1. resolves this template by its metadata.name ("gcloud");
 #   2. ensures the user has connected every server in .spec.requiredMCPServers,
 #      posting an OAuth link in-thread for any missing ones;
-#   3. once connected, launches the google-skills-claude-code SandboxTemplate
-#      (which bakes the github.com/google/skills checkout) and injects the
-#      rendered systemPrompt plus one Authorization token per MCP server;
+#   3. once connected, launches a SandboxClaim against the
+#      google-skills-claude-code SandboxWarmPool (whose SandboxTemplate bakes the
+#      github.com/google/skills checkout) and injects the rendered systemPrompt
+#      plus one Authorization token per MCP server;
 #   4. opens a live ACP session bound to the Slack thread.
 #
 # AUTH NOTE: the Google Cloud MCP servers below authenticate with Google Cloud
@@ -110,10 +111,11 @@ spec:
     # (e.g. https://us-central1-aiplatform.googleapis.com/mcp). Add them
     # explicitly if your workflow needs them.
 
-  # Selects the SandboxTemplate that defines how the sandbox is baked: the
-  # harness + base image, the sidecar, AND the git working context (public
-  # repo, no credentials Secret) — see
+  # Selects the agent-sandbox SandboxWarmPool (replicas: 0) whose SandboxTemplate
+  # defines how the sandbox is baked: the harness + base image, the sidecar, AND
+  # the git working context (public repo, no credentials Secret) — see
+  # sandboxwarmpool-google-skills-claude-code.yaml and
   # sandboxtemplate-google-skills-claude-code.yaml. The template is
   # workflow-specific because the repo is part of the bake.
-  sandboxTemplateRef:
+  warmPoolRef:
     name: google-skills-claude-code
