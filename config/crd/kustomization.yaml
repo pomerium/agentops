@@ -1,7 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Installs the AgentTemplate CRD. Referenced as a directory base by
-# deploy/base so `kubectl apply -k` on an overlay also creates the CRD.
+# Installs the agents.pomerium.com CRDs. Referenced as a directory base by
+# deploy/base so `kubectl apply -k` on an overlay also creates the CRDs.
 resources:
   - bases/agents.pomerium.com_agenttemplates.yaml
+  - bases/agents.pomerium.com_channelconfigs.yaml

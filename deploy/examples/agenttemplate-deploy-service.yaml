@@ -1,13 +1,18 @@
 # Example AgentTemplate.
 #
-# A AgentTemplate declaratively defines one agentic workflow that users
-# invoke from Slack by @mentioning the bot followed by this template's name.
-# This one is reached via:
+# A AgentTemplate declaratively defines one agentic workflow. Users run it by
+# @mentioning the bot in a Slack channel bound to this template — bind a
+# channel by adding it to the singleton ChannelConfig (see channelconfig.yaml):
 #
-#     @bot deploy-service ...
+#     slackChannelTemplates:
+#       C0123ABCDEF: deploy-service
+#
+# then, in that channel:
+#
+#     @bot <prompt>
 #
 # When a user invokes it, agentops:
-#   1. resolves this template by its metadata.name;
+#   1. resolves the channel's binding to this template;
 #   2. ensures the invoking user has connected every server in
 #      .spec.requiredMCPServers (prompting an OAuth link in-thread for any
 #      that are missing);
@@ -26,8 +31,8 @@ metadata:
   labels:
     app.kubernetes.io/name: agentops
 spec:
-  # The workflow is selected by metadata.name above ("deploy-service"), via
-  # "@bot deploy-service ..." in Slack.
+  # ChannelConfig bindings reference this workflow by metadata.name above
+  # ("deploy-service").
 
   # System prompt rendered into the sandbox (injected as AGENT_SYSTEM_PROMPT).
   systemPrompt: |

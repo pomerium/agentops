@@ -39,8 +39,8 @@ type SandboxWarmPoolReference struct {
 
 // AgentTemplateSpec defines the desired configuration of a workflow.
 //
-// A workflow is selected from Slack by @mentioning the bot followed by this
-// template's metadata.name, e.g. "@bot deploy-service ...".
+// A workflow runs when the bot is @mentioned in a Slack channel bound to this
+// template (by metadata.name) in the singleton ChannelConfig.
 type AgentTemplateSpec struct {
 	// SystemPrompt is the system prompt provided to the agent for this
 	// workflow.

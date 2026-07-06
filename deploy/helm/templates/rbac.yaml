@@ -20,7 +20,7 @@ metadata:
     {{- include "agentops.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["agents.pomerium.com"]
-    resources: ["agenttemplates"]
+    resources: ["agenttemplates", "channelconfigs"]
     verbs: ["get", "list", "watch"]
   # NOTE: no "secrets" access — by design. Git credentials reach the sandbox
   # via secretKeyRef in the SandboxTemplate (resolved by the kubelet), and MCP

@@ -1,8 +1,10 @@
 # Example AgentTemplate — "gcloud".
 #
-# Invoked from Slack by @mentioning the bot followed by this template's name:
+# Invoked by @mentioning the bot in a Slack channel bound to this template in
+# the singleton ChannelConfig (see channelconfig.yaml):
 #
-#     @bot gcloud ...
+#     slackChannelTemplates:
+#       C0123ABCDEF: gcloud
 #
 # Gives the agent Google's official Agent Skills repo (github.com/google/skills)
 # as working context — Apache-2.0 skills authored by Google for Cloud Run,

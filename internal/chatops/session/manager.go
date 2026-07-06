@@ -1,5 +1,5 @@
 // Package session is the application brain. It implements gateway.App: it
-// resolves an @mentioned agent template name to its AgentTemplate, gates execution
+// resolves the AgentTemplate bound to the mentioned channel, gates execution
 // on the invoking user being connected to every required MCP server (driving
 // OAuth flows when not), launches the sandbox once connected, and bridges each
 // Slack thread to a live multi-turn ACP session.
@@ -38,11 +38,13 @@ type Broker interface {
 	AuthorizeURL(ctx context.Context, flowID string) (string, error)
 }
 
-// TemplateResolver resolves an agent template name to its AgentTemplate and
-// lists the available templates (for the help shown on an unknown name).
+// TemplateResolver resolves which agent template a channel runs: the channel's
+// binding yields a template name (agenttemplate.ErrChannelNotBound when the
+// channel has none), and the name resolves to its AgentTemplate
+// (agenttemplate.ErrNotFound when no such template exists).
 type TemplateResolver interface {
+	SlackChannelTemplate(ctx context.Context, channelID string) (string, error)
 	Resolve(ctx context.Context, name string) (*v1alpha1.AgentTemplate, error)
-	List(ctx context.Context) ([]v1alpha1.AgentTemplate, error)
 }
 
 // LiveSession is a running multi-turn ACP session.
@@ -161,14 +163,14 @@ func NewManager(cfg Config, s *store.Store, b Broker, r TemplateResolver, l Laun
 
 func threadKey(channel, threadTS string) string { return channel + "|" + threadTS }
 
-// HandleMention starts a session from an @mention of the bot. The first word
-// after the mention is the agent template name; the rest is the initial
-// prompt. A top-level mention is the thread root the bot replies under; a
-// mention inside a foreign thread loops the bot into that discussion (a new
-// session thread seeded with it); a mention inside a thread the bot already
-// drives is just another turn.
+// HandleMention starts a session from an @mention of the bot. The channel's
+// binding selects the agent template; the whole text after the mention is the
+// initial prompt. A top-level mention is the thread root the bot replies
+// under; a mention inside a foreign thread loops the bot into that discussion
+// (a new session thread seeded with it); a mention inside a thread the bot
+// already drives is just another turn.
 func (m *Manager) HandleMention(ctx context.Context, in gateway.MentionInvocation) {
-	ctx = telemetry.With(ctx, "channel", in.ChannelID, "user", in.UserID, "template", in.Template)
+	ctx = telemetry.With(ctx, "channel", in.ChannelID, "user", in.UserID)
 	ctx, op := m.tel.Start(ctx, "HandleMention")
 	defer op.Complete()
 
@@ -195,10 +197,11 @@ func (m *Manager) HandleMention(ctx context.Context, in gateway.MentionInvocatio
 		return
 	}
 
-	tmpl, ok := m.resolveOrHelp(ctx, in.Template, in.ChannelID, in.ThreadTS)
+	tmpl, ok := m.templateForChannel(ctx, in.ChannelID, in.ThreadTS)
 	if !ok {
 		return
 	}
+	ctx = telemetry.With(ctx, "template", tmpl.Name)
 
 	sessionID := newID()
 	if err := m.store.CreateSession(ctx, store.Session{
@@ -207,7 +210,7 @@ func (m *Manager) HandleMention(ctx context.Context, in gateway.MentionInvocatio
 		SlackThreadTS:  in.ThreadTS,
 		SlackUserID:    in.UserID,
 		WorkflowName:   tmpl.Name,
-		InitialPrompt:  in.Args,
+		InitialPrompt:  in.Prompt,
 		Status:         "pending",
 	}); err != nil {
 		m.log.ErrorContext(ctx, "create session failed", "err", err)
@@ -221,29 +224,48 @@ func (m *Manager) HandleMention(ctx context.Context, in gateway.MentionInvocatio
 		channelID: in.ChannelID,
 		threadTS:  in.ThreadTS,
 		template:  tmpl,
-		args:      in.Args,
+		args:      in.Prompt,
 	})
 }
 
-// resolveOrHelp resolves a template name, posting the help text (unknown
-// name) or an infrastructure warning (anything else) into the given thread
-// when it fails.
-func (m *Manager) resolveOrHelp(ctx context.Context, template, channelID, threadTS string) (*v1alpha1.AgentTemplate, bool) {
-	tmpl, err := m.resolver.Resolve(ctx, template)
-	if err == nil {
-		return tmpl, true
-	}
-	// Only a genuine "no such template" gets the help text. Anything else
-	// is an infrastructure failure (missing CRD, RBAC, API-server trouble)
-	// that would otherwise masquerade as a typo — say so and log it.
-	if !errors.Is(err, agenttemplate.ErrNotFound) {
-		m.log.ErrorContext(ctx, "resolve agent template failed", "template", template, "err", err)
-		m.post(ctx, channelID, threadTS, slack.MsgOptionText(
-			fmt.Sprintf(":warning: I couldn't look up agent `%s` — something is broken on my side, not a typo. Ask an admin to check the app logs.", template), false))
+// templateForChannel resolves the agent template bound to a channel, posting
+// the appropriate notice into replyThreadTS when it fails: an unbound channel
+// asks for a binding, a binding that names a missing AgentTemplate is called
+// out as an operator error (not a user typo), and anything else is an
+// infrastructure failure.
+func (m *Manager) templateForChannel(ctx context.Context, channelID, replyThreadTS string) (*v1alpha1.AgentTemplate, bool) {
+	name, err := m.resolver.SlackChannelTemplate(ctx, channelID)
+	switch {
+	case errors.Is(err, agenttemplate.ErrChannelNotBound):
+		m.log.InfoContext(ctx, "mention in a channel with no agent binding", "channel", channelID)
+		m.post(ctx, channelID, replyThreadTS, slack.MsgOptionText(
+			":wave: No agent is configured for this channel yet. Ask an admin to set one up for this channel.", false))
+		return nil, false
+	case err != nil:
+		m.postLookupFailure(ctx, channelID, replyThreadTS, err)
 		return nil, false
 	}
-	m.post(ctx, channelID, threadTS, slack.MsgOptionText(m.unknownTemplateText(ctx, template), false))
-	return nil, false
+	tmpl, err := m.resolver.Resolve(ctx, name)
+	switch {
+	case errors.Is(err, agenttemplate.ErrNotFound):
+		m.log.ErrorContext(ctx, "channel bound to a missing agent template", "channel", channelID, "template", name)
+		m.post(ctx, channelID, replyThreadTS, slack.MsgOptionText(
+			fmt.Sprintf(":warning: This channel is set up to run agent `%s`, but no such agent exists. This is a configuration problem — ask an admin to fix the channel's binding or create the agent.", name), false))
+		return nil, false
+	case err != nil:
+		m.postLookupFailure(ctx, channelID, replyThreadTS, err)
+		return nil, false
+	}
+	return tmpl, true
+}
+
+// postLookupFailure reports an infrastructure failure (missing CRD, RBAC,
+// API-server trouble) resolving a channel's agent — logged and said outright
+// rather than letting it masquerade as a missing binding.
+func (m *Manager) postLookupFailure(ctx context.Context, channelID, replyThreadTS string, err error) {
+	m.log.ErrorContext(ctx, "resolve channel agent template failed", "channel", channelID, "err", err)
+	m.post(ctx, channelID, replyThreadTS, slack.MsgOptionText(
+		":warning: I couldn't look up the agent for this channel — something is broken on my side. Ask an admin to check the app logs.", false))
 }
 
 // startLoopIn starts a session from a mention inside a foreign thread: the
@@ -257,10 +279,11 @@ func (m *Manager) startLoopIn(ctx context.Context, in gateway.MentionInvocation)
 	ctx, op := m.tel.Start(ctx, "startLoopIn")
 	defer op.Complete()
 
-	tmpl, ok := m.resolveOrHelp(ctx, in.Template, in.ChannelID, in.OriginThreadTS)
+	tmpl, ok := m.templateForChannel(ctx, in.ChannelID, in.OriginThreadTS)
 	if !ok {
 		return
 	}
+	ctx = telemetry.With(ctx, "template", tmpl.Name)
 
 	var texts []string
 	replies, err := m.poster.ThreadReplies(ctx, in.ChannelID, in.OriginThreadTS, transcriptFetchMax)
@@ -270,7 +293,7 @@ func (m *Manager) startLoopIn(ctx context.Context, in gateway.MentionInvocation)
 	} else {
 		texts = transcriptTexts(replies, in.MessageTS)
 	}
-	prompt := composeLoopInPrompt(texts, in.Args)
+	prompt := composeLoopInPrompt(texts, in.Prompt)
 
 	originLink, err := m.poster.Permalink(ctx, in.ChannelID, in.MessageTS)
 	if err != nil {
@@ -333,40 +356,6 @@ func linkOr(url, label string) string {
 		return label
 	}
 	return "<" + url + "|" + label + ">"
-}
-
-// unknownTemplateText is the help shown when a mention names a template that
-// doesn't resolve (or names none), listing the available templates.
-func (m *Manager) unknownTemplateText(ctx context.Context, template string) string {
-	available := m.availableTemplates(ctx)
-	switch {
-	case template == "" && available == "":
-		return ":wave: Mention me with an agent name to start, e.g. `@me <agent> <prompt>`."
-	case template == "":
-		return ":wave: Mention me with an agent name to start. Available: " + available
-	case available == "":
-		return fmt.Sprintf(":warning: No agent named `%s` exists.", template)
-	default:
-		return fmt.Sprintf(":warning: No agent named `%s`. Available: %s", template, available)
-	}
-}
-
-// availableTemplates renders the registered template names as a comma-separated
-// list of code spans, or "" when none are registered or the list fails.
-func (m *Manager) availableTemplates(ctx context.Context) string {
-	list, err := m.resolver.List(ctx)
-	if err != nil {
-		m.log.ErrorContext(ctx, "list agent templates failed", "err", err)
-		return ""
-	}
-	if len(list) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(list))
-	for i := range list {
-		names = append(names, "`"+list[i].Name+"`")
-	}
-	return strings.Join(names, ", ")
 }
 
 type launchContext struct {

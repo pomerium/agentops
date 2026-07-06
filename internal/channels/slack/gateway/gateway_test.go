@@ -100,33 +100,18 @@ func newServer(app gateway.App) *gateway.Server {
 	return gateway.New(gateway.Config{SigningSecret: testSecret, BotUserID: testBotUserID}, app, nil)
 }
 
-func TestParseSubcommand(t *testing.T) {
-	cases := []struct{ in, sub, rest string }{
-		{"deploy-service prod now", "deploy-service", "prod now"},
-		{"  review   ", "review", ""},
-		{"", "", ""},
-	}
-	for _, c := range cases {
-		sub, rest := gateway.ParseSubcommand(c.in)
-		if sub != c.sub || rest != c.rest {
-			t.Errorf("ParseSubcommand(%q) = (%q,%q), want (%q,%q)", c.in, sub, rest, c.sub, c.rest)
-		}
-	}
-}
-
 func TestParseMention(t *testing.T) {
-	cases := []struct{ in, bot, tmpl, args string }{
-		{"<@U0BOT> deploy-service prod now", "U0BOT", "deploy-service", "prod now"},
-		{"<@U0BOT|the-bot> review", "U0BOT", "review", ""},
-		{"  <@U0BOT>   hello   ", "U0BOT", "hello", ""},
-		{"hey <@U0BOT> deploy do it", "U0BOT", "deploy", "do it"},
-		{"<@U0BOT>", "U0BOT", "", ""},
-		{"<@U0BOT> stuff", "", "stuff", ""}, // unknown bot id: strip leading mention
+	cases := []struct{ in, bot, prompt string }{
+		{"<@U0BOT> deploy prod now", "U0BOT", "deploy prod now"},
+		{"<@U0BOT|the-bot> review", "U0BOT", "review"},
+		{"  <@U0BOT>   hello   ", "U0BOT", "hello"},
+		{"hey <@U0BOT> do it", "U0BOT", "do it"},
+		{"<@U0BOT>", "U0BOT", ""},
+		{"<@U0BOT> stuff", "", "stuff"}, // unknown bot id: strip leading mention
 	}
 	for _, c := range cases {
-		tmpl, args := gateway.ParseMention(c.in, c.bot)
-		if tmpl != c.tmpl || args != c.args {
-			t.Errorf("ParseMention(%q, %q) = (%q,%q), want (%q,%q)", c.in, c.bot, tmpl, args, c.tmpl, c.args)
+		if prompt := gateway.ParseMention(c.in, c.bot); prompt != c.prompt {
+			t.Errorf("ParseMention(%q, %q) = %q, want %q", c.in, c.bot, prompt, c.prompt)
 		}
 	}
 }
@@ -146,7 +131,7 @@ func TestMentionInMessageStartsSession(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	got := app.waitMention(t)
-	if got.Template != "deploy-service" || got.Args != "ship it" {
+	if got.Prompt != "deploy-service ship it" {
 		t.Errorf("mention parse wrong: %+v", got)
 	}
 	if got.UserID != "U1" || got.ChannelID != "C1" || got.MessageTS != "1700000000.0001" || got.ThreadTS != "1700000000.0001" {
@@ -190,7 +175,7 @@ func TestThreadedMentionDispatchesMention(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	got := app.waitMention(t)
-	if got.Template != "sre" || got.Args != "what do you think?" {
+	if got.Prompt != "sre what do you think?" {
 		t.Errorf("mention parse wrong: %+v", got)
 	}
 	if got.OriginThreadTS != "1700000000.0001" || got.MessageTS != "1700000000.0042" {
@@ -222,7 +207,7 @@ func TestThreadBroadcastMentionDispatchesMention(t *testing.T) {
 		t.Fatalf("status = %d", rec.Code)
 	}
 	got := app.waitMention(t)
-	if got.Template != "sre" || got.OriginThreadTS != "1700000000.0001" {
+	if got.Prompt != "sre help here" || got.OriginThreadTS != "1700000000.0001" {
 		t.Errorf("broadcast mention fields wrong: %+v", got)
 	}
 }

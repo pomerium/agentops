@@ -1,8 +1,10 @@
 # Example AgentTemplate — "gstack".
 #
-# Invoked from Slack by @mentioning the bot followed by this template's name:
+# Invoked by @mentioning the bot in a Slack channel bound to this template in
+# the singleton ChannelConfig (see channelconfig.yaml):
 #
-#     @bot gstack ...
+#     slackChannelTemplates:
+#       C0123ABCDEF: gstack
 #
 # Gives the agent the garrytan/gstack source (an "AI software factory" toolkit
 # of Claude Code skills: /office-hours, /plan-ceo-review, /design-*, /review,

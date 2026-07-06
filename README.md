@@ -1,9 +1,10 @@
 # agentops
 
-Run agentic workflows straight from Slack. **@mention the bot** with a workflow
-name and a prompt — `@bot deploy-service ship it` — and it spins up an isolated
-agent to do the work, turning the Slack thread into a live, multi-turn
-conversation with that agent. When a workflow needs access to an external tool
+Run agentic workflows straight from Slack. **@mention the bot** with a prompt —
+`@bot ship it` — and it spins up an isolated agent to do the work, turning the
+Slack thread into a live, multi-turn conversation with that agent. Each channel
+is bound to exactly one workflow (in `#deploys` the bot deploys, in `#oncall`
+it triages), so nobody has to remember workflow names. When a workflow needs access to an external tool
 (GitHub, Kubernetes, …), the bot walks **you** through a one-click connection the
 first time, then reuses your own credentials on every run — so the agent always
 acts as you, with exactly the access you granted.
@@ -29,19 +30,19 @@ data. The patterns below are the ones with the strongest pull in team chat
 today; the hosted products in each category all deliver into Slack, but none
 of them run on your cluster or act as the person who asked.
 
-- **Deploy / release ChatOps** — `@bot deploy-service ship the latest api
-  build`: the agent proposes a rollout, an approve/deny button gates it in the
-  thread, and it runs with the *deployer's* RBAC rather than a god-mode bot
+- **Deploy / release ChatOps** — `@bot ship the latest api build` in
+  `#deploys`: the agent proposes a rollout, an approve/deny button gates it in
+  the thread, and it runs with the *deployer's* RBAC rather than a god-mode bot
   token. Shipped example:
   [`agenttemplate-deploy-service.yaml`](./deploy/examples/agenttemplate-deploy-service.yaml).
-- **Incident & on-call triage** — `@bot oncall-triage why is checkout 5xx'ing`:
+- **Incident & on-call triage** — `@bot why is checkout 5xx'ing` in `#oncall`:
   reads pods, events, and metrics with the on-call engineer's own scopes and
   posts findings in the alert thread. The incident data never leaves your infra.
 - **Knowledge Q&A / support deflection** — answer the recurring questions in
   `#help-*` channels from Notion/Confluence/Drive MCP servers, grounded in
   what the *asker* is allowed to read, without indexing internal docs into a
   third-party SaaS.
-- **Data pulls** — `@bot data-pull weekly actives by plan`: runs the query
+- **Data pulls** — `@bot weekly actives by plan` in `#data-requests`: runs the query
   through a warehouse MCP server as the analyst and posts the table — or a
   real `.xlsx`, since file upload is the natural delivery mechanism for agent
   output in Slack.
@@ -51,8 +52,8 @@ of them run on your cluster or act as the person who asked.
   agents useful to teammates who will never open a terminal.
 - **Release notes** — draft from GitHub + Linear activity, publish to Notion;
   the publish step triggers the per-user OAuth connect on first use.
-- **Access requests** — `@bot grant-access give Jen read on staging logs`:
-  propose a downscoped grant, approve or deny in the thread.
+- **Access requests** — `@bot give Jen read on staging logs` in
+  `#access-requests`: propose a downscoped grant, approve or deny in the thread.
 
 ### Dev to prod is `git push`
 
@@ -77,17 +78,18 @@ approval buttons).
 
 ## Using the bot
 
-1. **Start a workflow.** In any channel the bot has been invited to, @mention it
-   with a workflow name followed by your prompt:
+1. **Start a workflow.** In a channel the bot has been invited to (and that an
+   admin has bound to a workflow — see [ChannelConfig](#channelconfig)),
+   @mention it with your prompt:
 
    ```
-   @bot deploy-service roll out the latest api build
+   @bot roll out the latest api build
    ```
 
-   The first word after the mention is the workflow name; the rest is the initial
-   prompt. The bot reacts to your message with :hourglass_flowing_sand: while it
-   gets ready, swapping it for :white_check_mark: when the agent is live (or
-   :x: if something went wrong).
+   The channel determines which workflow runs; everything after the mention is
+   the initial prompt. The bot reacts to your message with
+   :hourglass_flowing_sand: while it gets ready, swapping it for
+   :white_check_mark: when the agent is live (or :x: if something went wrong).
 
    You can also **loop the bot into an ongoing discussion** by @mentioning it
    inside an existing thread. The bot reads the thread so far as context (message
@@ -168,7 +170,7 @@ A Helm chart lives at [`deploy/helm`](./deploy/helm) and is published as an OCI
 artifact to `oci://registry-1.docker.io/pomerium/agentops` on every release
 (and as `0.0.0-git.<sha>` on each push to `main`). It installs the
 StatefulSet, RBAC, Service, the Slack credentials Secret, and the
-`AgentTemplate` CRD.
+`AgentTemplate` and `ChannelConfig` CRDs.
 
 ```sh
 helm install agentops oci://registry-1.docker.io/pomerium/agentops \
@@ -197,6 +199,12 @@ it, the LLM-credentials Secret the template references, and an `AgentTemplate`
 that selects the pool via `.spec.warmPoolRef.name` — worked examples under
 [`deploy/examples/`](./deploy/examples) are described in
 [Defining an agent](#defining-an-agent).
+
+### 4. Bind channels to agents
+
+Apply the singleton `ChannelConfig` mapping each Slack channel ID to the
+`AgentTemplate` it runs (see [ChannelConfig](#channelconfig)); mentioning the
+bot in a bound channel starts that agent.
 
 ## Agent harnesses
 
@@ -265,12 +273,14 @@ These require two repository secrets: **`DOCKERHUB_USER`** and
 
 An agent users can invoke from Slack is an `AgentTemplate` (group
 `agents.pomerium.com/v1alpha1`) plus the `SandboxWarmPool` it references via
-`.spec.warmPoolRef.name` and that pool's `SandboxTemplate`. The worked examples
-under [`deploy/examples/`](./deploy/examples):
+`.spec.warmPoolRef.name` and that pool's `SandboxTemplate`, bound to a Slack
+channel via the `ChannelConfig` singleton. The worked examples under
+[`deploy/examples/`](./deploy/examples):
 
-**`AgentTemplate`** — a workflow users invoke as `@bot <metadata.name> ...`:
+**`AgentTemplate`** — one agentic workflow, run by whichever channels are bound
+to it:
 
-| Example | Invoke as | What it shows |
+| Example | Template name | What it shows |
 | --- | --- | --- |
 | [`agenttemplate-deploy-service.yaml`](./deploy/examples/agenttemplate-deploy-service.yaml) | `deploy-service` | System prompt, required MCP servers (github + k8s), and a workflow-specific `warmPoolRef` whose template bakes the git working context. |
 | [`agenttemplate-gstack.yaml`](./deploy/examples/agenttemplate-gstack.yaml) | `gstack` | Bakes the `garrytan/gstack` "AI software factory" skills repo, paired with product/dev MCP servers (Linear, Notion, GitHub, PostHog). |
@@ -304,9 +314,33 @@ one pool per harness, named to match the `AgentTemplate`'s `warmPoolRef.name`:
 | --- | --- |
 | [`secret.claude-code.example.yaml`](./deploy/examples/secret.claude-code.example.yaml) | The `claude-code-credentials` Secret holding `ANTHROPIC_API_KEY`, consumed by the sidecar via `SIDECAR_HTTP_*` env vars. |
 
-The agent is selected from Slack by the template's `metadata.name`. Key
-`AgentTemplate` spec fields: `systemPrompt`, `requiredMCPServers`
+Key `AgentTemplate` spec fields: `systemPrompt`, `requiredMCPServers`
 (`{name, url}`), `warmPoolRef`, and `sessionConfig` (below).
+
+### ChannelConfig
+
+Which agent a mention runs is decided by the channel, not the message: the
+singleton `ChannelConfig` (it must be named `default`; the CRD rejects any
+other name) maps Slack channel IDs to `AgentTemplate` names. Keeping every
+binding in one map guarantees each channel runs exactly one agent. Worked
+example: [`channelconfig.yaml`](./deploy/examples/channelconfig.yaml).
+
+```yaml
+apiVersion: agents.pomerium.com/v1alpha1
+kind: ChannelConfig
+metadata:
+  name: default
+  namespace: agentops
+spec:
+  slackChannelTemplates:
+    C0123ABCDEF: deploy-service   # channel ID -> AgentTemplate name
+    C0456GHIJKL: gcloud
+```
+
+Find a channel's ID in Slack under the channel name → "View channel details".
+Binding changes are picked up immediately (`kubectl apply`, no restart).
+Mentioning the bot in an unbound channel gets a reply asking an admin to add a
+binding.
 
 ### Harness session configuration (`sessionConfig`)
 

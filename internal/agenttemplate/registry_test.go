@@ -65,18 +65,50 @@ func TestResolveIgnoresOtherNamespaces(t *testing.T) {
 	}
 }
 
-func TestListTemplates(t *testing.T) {
+func channelConfig(ns string, bindings map[string]string) *v1alpha1.ChannelConfig {
+	return &v1alpha1.ChannelConfig{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: v1alpha1.ChannelConfigName},
+		Spec:       v1alpha1.ChannelConfigSpec{SlackChannelTemplates: bindings},
+	}
+}
+
+func TestChannelTemplate(t *testing.T) {
 	ctx := context.Background()
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(agt("ns", "a"), agt("ns", "b")).
+		WithObjects(channelConfig("ns", map[string]string{"C1": "deploy-service"})).
 		Build()
 	reg := agenttemplate.New(c, "ns")
-	list, err := reg.List(ctx)
+
+	got, err := reg.SlackChannelTemplate(ctx, "C1")
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ChannelTemplate(C1): %v", err)
 	}
-	if len(list) != 2 {
-		t.Errorf("expected 2 templates, got %d", len(list))
+	if got != "deploy-service" {
+		t.Errorf("ChannelTemplate(C1) = %q, want deploy-service", got)
+	}
+
+	if _, err := reg.SlackChannelTemplate(ctx, "C9"); !errors.Is(err, agenttemplate.ErrChannelNotBound) {
+		t.Errorf("unmapped channel: expected ErrChannelNotBound, got %v", err)
+	}
+}
+
+func TestChannelTemplateNoConfig(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	reg := agenttemplate.New(c, "ns")
+	if _, err := reg.SlackChannelTemplate(ctx, "C1"); !errors.Is(err, agenttemplate.ErrChannelNotBound) {
+		t.Errorf("missing ChannelConfig: expected ErrChannelNotBound, got %v", err)
+	}
+}
+
+func TestChannelTemplateIgnoresOtherNamespaces(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).
+		WithObjects(channelConfig("other-ns", map[string]string{"C1": "deploy-service"})).
+		Build()
+	reg := agenttemplate.New(c, "ns")
+	if _, err := reg.SlackChannelTemplate(ctx, "C1"); !errors.Is(err, agenttemplate.ErrChannelNotBound) {
+		t.Errorf("expected configs in other namespaces to be ignored, got %v", err)
 	}
 }

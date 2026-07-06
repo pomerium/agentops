@@ -22,9 +22,9 @@ import (
 	"github.com/pomerium/agentops/internal/telemetry"
 )
 
-// MentionInvocation is a parsed @mention of the bot in a channel. The first
-// word after the mention selects the agent template; the rest is the initial
-// prompt (which may be empty).
+// MentionInvocation is a parsed @mention of the bot in a channel. The channel
+// determines which agent template runs; the whole text after the mention is
+// the initial prompt (which may be empty).
 type MentionInvocation struct {
 	TeamID    string
 	UserID    string
@@ -43,9 +43,9 @@ type MentionInvocation struct {
 	// Text is the raw message text including the bot mention. It is used
 	// verbatim as the turn prompt when the mention lands in a thread the bot
 	// already drives, matching how plain thread replies are forwarded.
-	Text     string
-	Template string
-	Args     string
+	Text string
+	// Prompt is Text with the bot mention stripped.
+	Prompt string
 }
 
 // ThreadMessage is a user message posted in a thread.
@@ -260,7 +260,6 @@ func (s *Server) handleMessageEvent(ctx context.Context, event slackevents.Event
 	}
 
 	if s.mentionsBot(msg.Text) {
-		template, args := ParseMention(msg.Text, s.cfg.BotUserID)
 		in := MentionInvocation{
 			TeamID:         event.TeamID,
 			UserID:         msg.User,
@@ -269,14 +268,13 @@ func (s *Server) handleMessageEvent(ctx context.Context, event slackevents.Event
 			ThreadTS:       msg.TimeStamp,
 			OriginThreadTS: msg.ThreadTimeStamp,
 			Text:           msg.Text,
-			Template:       template,
-			Args:           args,
+			Prompt:         ParseMention(msg.Text, s.cfg.BotUserID),
 		}
 		if msg.ThreadTimeStamp != "" {
 			in.ThreadTS = msg.ThreadTimeStamp
 		}
 		s.tel.Debug(ctx, "dispatching app mention", "user", in.UserID, "channel", in.ChannelID,
-			"template", in.Template, "thread_ts", in.ThreadTS, "origin_thread_ts", in.OriginThreadTS)
+			"thread_ts", in.ThreadTS, "origin_thread_ts", in.OriginThreadTS)
 		go s.app.HandleMention(context.WithoutCancel(ctx), in)
 		return
 	}
