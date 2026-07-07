@@ -52,7 +52,25 @@ func (f *fakeBroker) AuthorizeURL(_ context.Context, flowID string) (string, err
 	return "https://provider.example/authorize?flow=" + flowID, nil
 }
 
-type fakeResolver struct{ tmpl *v1alpha1.AgentTemplate }
+// fakeResolver binds channels per its bindings map and resolves only tmpl's
+// name.
+type fakeResolver struct {
+	tmpl     *v1alpha1.AgentTemplate
+	bindings map[string]string
+}
+
+// boundResolver resolves tmpl and binds it to channel C1, the channel the
+// tests mention from.
+func boundResolver(tmpl *v1alpha1.AgentTemplate) *fakeResolver {
+	return &fakeResolver{tmpl: tmpl, bindings: map[string]string{"C1": tmpl.Name}}
+}
+
+func (f *fakeResolver) SlackChannelTemplate(_ context.Context, channelID string) (string, error) {
+	if name, ok := f.bindings[channelID]; ok {
+		return name, nil
+	}
+	return "", fmt.Errorf("%w: %q", agenttemplate.ErrChannelNotBound, channelID)
+}
 
 func (f *fakeResolver) Resolve(_ context.Context, name string) (*v1alpha1.AgentTemplate, error) {
 	if f.tmpl != nil && f.tmpl.Name == name {
@@ -61,23 +79,16 @@ func (f *fakeResolver) Resolve(_ context.Context, name string) (*v1alpha1.AgentT
 	return nil, fmt.Errorf("%w: %q", agenttemplate.ErrNotFound, name)
 }
 
-func (f *fakeResolver) List(_ context.Context) ([]v1alpha1.AgentTemplate, error) {
-	if f.tmpl == nil {
-		return nil, nil
-	}
-	return []v1alpha1.AgentTemplate{*f.tmpl}, nil
-}
-
 // failingResolver simulates an infrastructure failure (missing CRD, RBAC,
 // API-server trouble): every call errors with something that is NOT
-// ErrNotFound.
+// ErrChannelNotBound/ErrNotFound.
 type failingResolver struct{}
 
-func (failingResolver) Resolve(_ context.Context, _ string) (*v1alpha1.AgentTemplate, error) {
-	return nil, errors.New("no matches for kind AgentTemplate in version agents.pomerium.com/v1alpha1")
+func (failingResolver) SlackChannelTemplate(_ context.Context, _ string) (string, error) {
+	return "", errors.New("no matches for kind ChannelConfig in version agents.pomerium.com/v1alpha1")
 }
 
-func (failingResolver) List(_ context.Context) ([]v1alpha1.AgentTemplate, error) {
+func (failingResolver) Resolve(_ context.Context, _ string) (*v1alpha1.AgentTemplate, error) {
 	return nil, errors.New("no matches for kind AgentTemplate in version agents.pomerium.com/v1alpha1")
 }
 
@@ -399,11 +410,11 @@ func TestHandleMentionPromptsAuthWhenMissing(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": false}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
 	})
 
 	if launcher.launchCount() != 0 {
@@ -435,11 +446,11 @@ func TestHandleMentionLaunchesWhenAllConnected(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy", Args: "ship it",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Prompt: "ship it",
 	})
 
 	if launcher.launchCount() != 1 {
@@ -472,24 +483,47 @@ func TestHandleMentionLaunchesWhenAllConnected(t *testing.T) {
 	}
 }
 
-func TestHandleMentionUnknownTemplate(t *testing.T) {
+func TestHandleMentionUnboundChannel(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
+	// C9 has no binding (boundResolver binds C1 only).
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
-		UserID: "U1", ChannelID: "C1", MessageTS: "1.0", ThreadTS: "1.0", Template: "nonexistent",
+		UserID: "U1", ChannelID: "C9", MessageTS: "1.0", ThreadTS: "1.0",
 	})
 	if launcher.launchCount() != 0 {
-		t.Error("should not launch for unknown template")
+		t.Error("should not launch in an unbound channel")
 	}
-	if !strings.Contains(strings.ToLower(poster.all()), "no agent named") {
-		t.Errorf("expected an error message about an unknown template, got: %s", poster.all())
+	if !strings.Contains(strings.ToLower(poster.all()), "no agent is configured for this channel") {
+		t.Errorf("expected the unbound-channel notice, got: %s", poster.all())
 	}
-	// The help lists the available template name.
-	if !strings.Contains(poster.all(), "deploy") {
-		t.Errorf("expected help to list available templates, got: %s", poster.all())
+}
+
+// A channel bound to a template that doesn't exist is an operator error, not a
+// user typo — the message must say so, distinctly from the unbound case.
+func TestHandleMentionBoundTemplateMissing(t *testing.T) {
+	broker := &fakeBroker{connected: map[string]bool{}}
+	launcher := &fakeLauncher{}
+	poster := &fakePoster{}
+	m := newManager(t, broker, &fakeResolver{
+		tmpl:     deployTemplate(),
+		bindings: map[string]string{"C1": "ghost"},
+	}, launcher, poster)
+
+	m.HandleMention(context.Background(), gateway.MentionInvocation{
+		UserID: "U1", ChannelID: "C1", MessageTS: "1.0", ThreadTS: "1.0",
+	})
+	if launcher.launchCount() != 0 {
+		t.Error("should not launch when the bound template is missing")
+	}
+	all := poster.all()
+	if !strings.Contains(all, "`ghost`") || !strings.Contains(all, "configuration problem") {
+		t.Errorf("expected the missing-template config-error notice naming the binding, got: %s", all)
+	}
+	if strings.Contains(strings.ToLower(all), "no agent is configured for this channel") {
+		t.Errorf("a bad binding must not be reported as an unbound channel, got: %s", all)
 	}
 }
 
@@ -512,20 +546,20 @@ func TestHandleMentionResolverFailureIsDistinguishedFromUnknown(t *testing.T) {
 	m := session.NewManager(session.Config{Namespace: "ns"}, st, broker, failingResolver{}, launcher, poster, log)
 
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
-		UserID: "U1", ChannelID: "C1", MessageTS: "1.0", ThreadTS: "1.0", Template: "deploy",
+		UserID: "U1", ChannelID: "C1", MessageTS: "1.0", ThreadTS: "1.0",
 	})
 
 	if launcher.launchCount() != 0 {
 		t.Error("should not launch when the resolver fails")
 	}
 	all := strings.ToLower(poster.all())
-	if strings.Contains(all, "no agent named") {
-		t.Errorf("an infra failure must not be reported as an unknown agent, got: %s", poster.all())
+	if strings.Contains(all, "no agent is configured for this channel") {
+		t.Errorf("an infra failure must not be reported as an unbound channel, got: %s", poster.all())
 	}
 	if !strings.Contains(all, "look up") {
 		t.Errorf("expected a lookup-failure message, got: %s", poster.all())
 	}
-	if !strings.Contains(logBuf.String(), "no matches for kind AgentTemplate") {
+	if !strings.Contains(logBuf.String(), "no matches for kind ChannelConfig") {
 		t.Errorf("expected the resolve error in the log, got: %s", logBuf.String())
 	}
 }
@@ -534,11 +568,11 @@ func TestHandleMentionInLiveThreadIsIgnored(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	mention := gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
 	}
 	m.HandleMention(context.Background(), mention)
 	if launcher.launchCount() != 1 {
@@ -555,11 +589,11 @@ func TestHandleMessageRejectsNonOwner(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
 	})
 	if launcher.launchCount() != 1 || launcher.liveSession() == nil {
 		t.Fatalf("precondition: expected a launched session")
@@ -594,12 +628,12 @@ func TestOAuthCallbackResumesLaunch(t *testing.T) {
 	}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	// First, the mention leaves the session awaiting auth for k8s.
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
 	})
 	if launcher.launchCount() != 0 {
 		t.Fatalf("precondition: should be awaiting auth, launches=%d", launcher.launchCount())
@@ -625,17 +659,58 @@ func TestOAuthCallbackResumesLaunch(t *testing.T) {
 	}
 }
 
+// An OAuth resume whose persisted template no longer resolves (deleted or
+// renamed mid-flow) must tell the thread instead of vanishing: the browser
+// already said "connected", so silence would look like a launch that never
+// comes.
+func TestOAuthCallbackTemplateGoneNotifiesThread(t *testing.T) {
+	broker := &fakeBroker{
+		connected: map[string]bool{"github": true, "k8s": false},
+		callback: mcpbroker.CallbackResult{
+			SlackUserID: "U1", SlackChannelID: "C1", SlackThreadTS: "1700000000.0001",
+			ServerName: "k8s", WorkflowName: "deploy",
+		},
+	}
+	launcher := &fakeLauncher{}
+	poster := &fakePoster{}
+	resolver := boundResolver(deployTemplate())
+	m := newManager(t, broker, resolver, launcher, poster)
+
+	// The mention leaves the session awaiting auth for k8s.
+	m.HandleMention(context.Background(), gateway.MentionInvocation{
+		UserID: "U1", ChannelID: "C1", TeamID: "T1",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
+	})
+	if launcher.launchCount() != 0 {
+		t.Fatalf("precondition: should be awaiting auth, launches=%d", launcher.launchCount())
+	}
+
+	// The admin deletes the template before the user finishes connecting.
+	resolver.tmpl = nil
+	broker.connected["k8s"] = true
+	if err := m.OAuthCallback(context.Background(), "code", "state"); err != nil {
+		t.Fatalf("OAuthCallback: %v", err)
+	}
+
+	if launcher.launchCount() != 0 {
+		t.Errorf("must not launch without a template, launches=%d", launcher.launchCount())
+	}
+	if !strings.Contains(poster.all(), "no longer exists") {
+		t.Errorf("expected a missing-template notice in the thread, got: %s", poster.all())
+	}
+}
+
 func TestLaunchMessageMentionsPromptWork(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	// A mention WITH an initial prompt: the ready message says we're working on
 	// it rather than inviting a reply.
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy", Args: "ship it",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Prompt: "ship it",
 	})
 	if !strings.Contains(poster.public(), "Working on your prompt") {
 		t.Errorf("ready message should say it's working on the prompt, got: %s", poster.public())
@@ -649,11 +724,11 @@ func TestLaunchMessageInvitesReplyWithoutPrompt(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001", Template: "deploy",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
 	})
 	if !strings.Contains(poster.public(), "Reply in this thread") {
 		t.Errorf("ready message should invite a reply when no prompt was given, got: %s", poster.public())
@@ -664,12 +739,12 @@ func TestTurnTogglesBusyReaction(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	root := "1700000000.0001"
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: root, ThreadTS: root, Template: "deploy",
+		MessageTS: root, ThreadTS: root,
 	})
 
 	// A turn marks the root message busy for its duration: add before the
@@ -707,14 +782,14 @@ const (
 
 // loopInMention is a bot mention posted inside an existing discussion thread.
 func loopInMention(args string) gateway.MentionInvocation {
-	text := "<@U0BOT> deploy"
+	text := "<@U0BOT>"
 	if args != "" {
 		text += " " + args
 	}
 	return gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
 		MessageTS: mentionTS, ThreadTS: originTS, OriginThreadTS: originTS,
-		Text: text, Template: "deploy", Args: args,
+		Text: text, Prompt: args,
 	}
 }
 
@@ -753,12 +828,12 @@ func TestMentionInLiveThreadRunsTurn(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	root := "1700000000.5000"
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: root, ThreadTS: root, Template: "deploy",
+		MessageTS: root, ThreadTS: root,
 	})
 	if launcher.launchCount() != 1 {
 		t.Fatalf("precondition: expected a launched session, got %d", launcher.launchCount())
@@ -768,7 +843,7 @@ func TestMentionInLiveThreadRunsTurn(t *testing.T) {
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
 		MessageTS: "1700000000.5001", ThreadTS: root, OriginThreadTS: root,
-		Text: turnText, Template: "deploy", Args: "status please",
+		Text: turnText, Prompt: "status please",
 	})
 
 	if launcher.launchCount() != 1 {
@@ -783,18 +858,18 @@ func TestMentionInLiveThreadNonOwnerIgnored(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	root := "1700000000.5000"
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: root, ThreadTS: root, Template: "deploy",
+		MessageTS: root, ThreadTS: root,
 	})
 
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U2", ChannelID: "C1", TeamID: "T1",
 		MessageTS: "1700000000.5001", ThreadTS: root, OriginThreadTS: root,
-		Text: "<@U0BOT> deploy do bad things", Template: "deploy", Args: "do bad things",
+		Text: "<@U0BOT> deploy do bad things", Prompt: "do bad things",
 	})
 
 	if launcher.launchCount() != 1 {
@@ -820,7 +895,7 @@ func TestLoopInStartsNewSession(t *testing.T) {
 			userReply("1690000000.0050", "later message"),
 		},
 	}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), loopInMention("what do you think?"))
 
@@ -866,7 +941,7 @@ func TestLoopInTranscriptCapped(t *testing.T) {
 		poster.replies = append(poster.replies,
 			userReply(fmt.Sprintf("1690000000.%04d", i+1), fmt.Sprintf("msg-%d", i)))
 	}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	in := loopInMention("summarize")
 	in.MessageTS = "1690000000.9999"
@@ -889,7 +964,7 @@ func TestLoopInRepliesFetchFailsDegrades(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{repliesErr: errors.New("missing_scope")}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), loopInMention("what do you think?"))
 
@@ -909,7 +984,7 @@ func TestLoopInPermalinkFailsDegrades(t *testing.T) {
 		replies:      []slack.Message{userReply(originTS, "we have a problem")},
 		permalinkErr: errors.New("message_not_found"),
 	}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), loopInMention("help"))
 
@@ -931,7 +1006,7 @@ func TestLoopInRootPostFailsAborts(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{failTopLevel: true}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), loopInMention("help"))
 
@@ -947,7 +1022,7 @@ func TestLoopInFirstAnswerCrossPostedOnce(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{session: &fakeLiveSession{reply: "the answer"}}
 	poster := &fakePoster{replies: []slack.Message{userReply(originTS, "we have a problem")}}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), loopInMention("what do you think?"))
 
@@ -970,7 +1045,7 @@ func TestLoopInReactionsOnOriginMention(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{replies: []slack.Message{userReply(originTS, "we have a problem")}}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	m.HandleMention(context.Background(), loopInMention("help"))
 
@@ -991,24 +1066,24 @@ func TestLoopInReactionsOnOriginMention(t *testing.T) {
 	}
 }
 
-func TestLoopInUnknownTemplateHelpsInOriginThread(t *testing.T) {
+func TestLoopInUnboundChannelNoticeInOriginThread(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{}}
 	launcher := &fakeLauncher{}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	in := loopInMention("help")
-	in.Template = "nonexistent"
+	in.ChannelID = "C9" // no binding (boundResolver binds C1 only)
 	m.HandleMention(context.Background(), in)
 
 	if launcher.launchCount() != 0 {
-		t.Error("should not launch for unknown template")
+		t.Error("should not launch in an unbound channel")
 	}
-	if !strings.Contains(strings.ToLower(poster.postsIn(originTS)), "no agent named") {
-		t.Errorf("help must land in the origin thread, got: %s", poster.all())
+	if !strings.Contains(strings.ToLower(poster.postsIn(originTS)), "no agent is configured for this channel") {
+		t.Errorf("the unbound-channel notice must land in the origin thread, got: %s", poster.all())
 	}
 	if poster.firstTopLevelTS() != "" {
-		t.Errorf("no session root should be posted for an unknown template, got: %s", poster.postsIn(""))
+		t.Errorf("no session root should be posted for an unbound channel, got: %s", poster.postsIn(""))
 	}
 }
 
@@ -1017,12 +1092,12 @@ func TestOverlappingTurnsKeepBusyUntilLast(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{session: &fakeLiveSession{gate: gate}}
 	poster := &fakePoster{}
-	m := newManager(t, broker, &fakeResolver{tmpl: deployTemplate()}, launcher, poster)
+	m := newManager(t, broker, boundResolver(deployTemplate()), launcher, poster)
 
 	root := "1700000000.0001"
 	m.HandleMention(context.Background(), gateway.MentionInvocation{
 		UserID: "U1", ChannelID: "C1", TeamID: "T1",
-		MessageTS: root, ThreadTS: root, Template: "deploy",
+		MessageTS: root, ThreadTS: root,
 	})
 
 	var wg sync.WaitGroup

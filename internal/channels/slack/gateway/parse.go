@@ -5,31 +5,19 @@ import (
 	"strings"
 )
 
-// ParseSubcommand splits a text into its leading word and the remaining
-// arguments. For "deploy-service prod" it returns ("deploy-service", "prod").
-func ParseSubcommand(text string) (subcommand, rest string) {
-	fields := strings.Fields(text)
-	if len(fields) == 0 {
-		return "", ""
-	}
-	subcommand = fields[0]
-	rest = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), subcommand))
-	return subcommand, rest
-}
-
 // leadingMentionRE matches a single mention token at the start of a message,
 // used to strip the bot's mention when its user id is unknown.
 var leadingMentionRE = regexp.MustCompile(`^\s*<@[^>]+>`)
 
-// ParseMention extracts the agent template and initial prompt from an
-// app_mention's text. The first word after the bot's mention is the template
-// name; the rest is the initial prompt (which may be empty). For
-// "<@U0BOT> hello-world say hi" with botUserID="U0BOT" this returns
-// ("hello-world", "say hi"). Text before the mention is ignored, so
-// "hey <@U0BOT> deploy now" still yields ("deploy", "now"). When botUserID is
-// empty (the bot id could not be discovered) the leading "<@…>" token is
-// stripped instead, so the common mention-leads-the-message case still parses.
-func ParseMention(text, botUserID string) (template, args string) {
+// ParseMention extracts the initial prompt from an app_mention's text: the
+// whole message with the bot's mention stripped (the channel's binding, not
+// the message, selects the agent template). For "<@U0BOT> say hi" with
+// botUserID="U0BOT" this returns "say hi"; a bare mention yields "". Text
+// before the mention is ignored, so "hey <@U0BOT> deploy now" still yields
+// "deploy now". When botUserID is empty (the bot id could not be discovered)
+// the leading "<@…>" token is stripped instead, so the common
+// mention-leads-the-message case still parses.
+func ParseMention(text, botUserID string) (prompt string) {
 	rest := text
 	if botUserID != "" {
 		botRE := regexp.MustCompile(`<@` + regexp.QuoteMeta(botUserID) + `(\|[^>]*)?>`)
@@ -41,7 +29,7 @@ func ParseMention(text, botUserID string) (template, args string) {
 	} else {
 		rest = leadingMentionRE.ReplaceAllString(text, "")
 	}
-	return ParseSubcommand(strings.TrimSpace(rest))
+	return strings.TrimSpace(rest)
 }
 
 // permissionValueSep separates the parts encoded in a permission button value.

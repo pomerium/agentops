@@ -79,7 +79,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Controller-runtime cache over AgentTemplates, scoped to the namespace.
+	// Controller-runtime cache over the agents.pomerium.com resources the app
+	// reads (AgentTemplates and the ChannelConfig singleton), scoped to the
+	// namespace.
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return err
@@ -87,7 +89,7 @@ func run(log *slog.Logger) error {
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return err
 	}
-	tmplCache, err := cache.New(restCfg, cache.Options{
+	crCache, err := cache.New(restCfg, cache.Options{
 		Scheme:            scheme,
 		DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}},
 	})
@@ -95,15 +97,25 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	go func() {
-		if err := tmplCache.Start(ctx); err != nil {
-			log.Error("agent template cache stopped", "err", err)
+		if err := crCache.Start(ctx); err != nil {
+			log.Error("agents.pomerium.com resource cache stopped", "err", err)
 		}
 	}()
-	if !tmplCache.WaitForCacheSync(ctx) {
-		return errors.New("agent template cache failed to sync")
+	// Informers start lazily on first read; create both here so a missing CRD
+	// or RBAC rule surfaces at boot instead of on the first mention. Non-fatal:
+	// a rollout can start this pod before the new CRD is applied, and the cache
+	// retries lazily on first use — so log loudly rather than crash-loop.
+	if _, err := crCache.GetInformer(ctx, &v1alpha1.AgentTemplate{}); err != nil {
+		log.Error("agent template informer failed to start; will retry on first use", "err", err)
+	}
+	if _, err := crCache.GetInformer(ctx, &v1alpha1.ChannelConfig{}); err != nil {
+		log.Error("channel config informer failed to start; will retry on first use", "err", err)
+	}
+	if !crCache.WaitForCacheSync(ctx) {
+		return errors.New("agents.pomerium.com resource cache failed to sync")
 	}
 
-	registry := agenttemplate.New(tmplCache, cfg.Namespace)
+	registry := agenttemplate.New(crCache, cfg.Namespace)
 
 	// MCP credential broker.
 	broker := mcpbroker.New(st, mcpbroker.Options{

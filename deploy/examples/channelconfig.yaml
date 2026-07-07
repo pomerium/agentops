@@ -1,0 +1,16 @@
+# The singleton ChannelConfig binds each Slack channel to the agent template
+# it runs. Mentioning the bot in a bound channel starts that agent — the whole
+# message after the mention is the prompt. A single map keyed by channel ID
+# guarantees each channel runs exactly one agent.
+#
+# Find a channel's ID in Slack: channel name -> "View channel details" -> the
+# ID at the bottom (e.g. C0123ABCDEF).
+apiVersion: agents.pomerium.com/v1alpha1
+kind: ChannelConfig
+metadata:
+  name: default # singleton; any other name is rejected
+  namespace: agentops
+spec:
+  slackChannelTemplates:
+    C0123ABCDEF: deploy-service
+    C0456GHIJKL: gcloud

@@ -4,28 +4,25 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: agenttemplates.agents.pomerium.com
+  name: channelconfigs.agents.pomerium.com
 spec:
   group: agents.pomerium.com
   names:
-    kind: AgentTemplate
-    listKind: AgentTemplateList
-    plural: agenttemplates
+    kind: ChannelConfig
+    listKind: ChannelConfigList
+    plural: channelconfigs
     shortNames:
-    - agt
-    singular: agenttemplate
+    - chcfg
+    singular: channelconfig
   scope: Namespaced
   versions:
-  - additionalPrinterColumns:
-    - jsonPath: .spec.warmPoolRef.name
-      name: WarmPool
-      type: string
-    name: v1alpha1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: |-
-          AgentTemplate is the declarative definition of an agentic workflow that
-          users can invoke from Slack.
+          ChannelConfig is the global (singleton, named "default") binding of chat
+          channels to the agent templates they run. Keeping all bindings in one map
+          guarantees each channel maps to exactly one template.
         properties:
           apiVersion:
             description: |-
@@ -45,90 +42,21 @@ spec:
           metadata:
             type: object
           spec:
-            description: |-
-              AgentTemplateSpec defines the desired configuration of a workflow.
-
-              A workflow runs when the bot is @mentioned in a Slack channel bound to this
-              template (by metadata.name) in the singleton ChannelConfig.
+            description: ChannelConfigSpec binds chat channels to agent templates.
             properties:
-              requiredMCPServers:
-                description: |-
-                  RequiredMCPServers lists the MCP servers that must be connected for the
-                  invoking user before the workflow can run.
-                items:
-                  description: |-
-                    MCPServerRef identifies an MCP server that a workflow requires the invoking
-                    user to be connected to before the workflow can run.
-                  properties:
-                    dialAddress:
-                      description: |-
-                        DialAddress optionally overrides the host[:port] the sandbox sidecar
-                        connects to for this server, while TLS SNI and the Host header still come
-                        from URL. Use it to reach an in-cluster Service
-                        (e.g. "mcp-gateway.gateway.svc.cluster.local:443") instead of
-                        hairpinning through an external LoadBalancer VIP. Empty dials the
-                        host:port parsed from URL.
-                      type: string
-                    name:
-                      description: |-
-                        Name is a short, stable identifier for the server, unique within a
-                        AgentTemplate. It is used as the credential key and surfaced to the
-                        user in auth prompts.
-                      type: string
-                    url:
-                      description: URL is the streamable-HTTP endpoint of the MCP
-                        server.
-                      type: string
-                  required:
-                  - name
-                  - url
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - name
-                x-kubernetes-list-type: map
-              sessionConfig:
+              slackChannelTemplates:
                 additionalProperties:
                   type: string
                 description: |-
-                  SessionConfig sets agent-advertised ACP session configuration options
-                  (session/set_config_option) after the session is created, keyed by
-                  option id. The value is the option's value id for select options (e.g.
-                  model: opus, effort: high on the Claude Code harness) or "true"/"false"
-                  for boolean options. Strict: if the harness does not advertise a
-                  configured option id, or rejects the value, the session fails to
-                  launch — a session running with silently unapplied config would be
-                  misleading.
+                  SlackChannelTemplates maps a Slack channel ID (e.g. "C0123ABC") to the
+                  AgentTemplate (its metadata.name, same namespace) that channel runs.
+                  Mentioning the bot in a mapped channel starts that agent with the whole
+                  post-mention text as the prompt; map keys make the channel:template
+                  binding 1:1 by construction.
                 type: object
-              systemPrompt:
-                description: |-
-                  SystemPrompt is the system prompt provided to the agent for this
-                  workflow.
-                type: string
-              warmPoolRef:
-                description: |-
-                  WarmPoolRef selects the agent-sandbox SandboxWarmPool that bakes the
-                  sandbox for this workflow. The pool (run with replicas: 0) references a
-                  SandboxTemplate, which defines the harness + base image, the
-                  secret-isolating sidecar, and — when the workflow needs a repository
-                  checked out — the git working context (repo URL/ref and credentials
-                  secretKeyRef on the template's git-init init container). Pools whose
-                  template bakes a repo are workflow-specific by design (e.g.
-                  "pomerium-zero-claude-code"). agentops creates a SandboxClaim against this
-                  pool per run; because the claim injects per-run env, the sandbox is always
-                  cold-started (a fresh pod per run).
-                properties:
-                  name:
-                    description: Name of the SandboxWarmPool (in the same namespace).
-                    type: string
-                required:
-                - name
-                type: object
-            required:
-            - warmPoolRef
             type: object
           status:
-            description: AgentTemplateStatus is the observed state of an AgentTemplate.
+            description: ChannelConfigStatus is the observed state of a ChannelConfig.
             properties:
               conditions:
                 description: Conditions represent the latest available observations.
@@ -192,6 +120,9 @@ spec:
                 x-kubernetes-list-type: map
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: ChannelConfig is a singleton; it must be named 'default'
+          rule: self.metadata.name == 'default'
     served: true
     storage: true
     subresources:
