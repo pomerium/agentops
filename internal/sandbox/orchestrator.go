@@ -9,7 +9,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/pomerium/agentops/internal/telemetry"
 )

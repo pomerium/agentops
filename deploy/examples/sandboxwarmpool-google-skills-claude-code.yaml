@@ -1,0 +1,16 @@
+# SandboxWarmPool for the google-skills-claude-code harness (public-repo bake of
+# google/skills). See sandboxwarmpool-claude-code.yaml for why the pool is sized
+# replicas: 0 (fresh pod per run via cold start).
+#
+# A AgentTemplate selects this pool by name via .spec.warmPoolRef.name.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: google-skills-claude-code
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: google-skills-claude-code

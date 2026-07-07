@@ -4,7 +4,10 @@
 # A SandboxTemplate (from the agent-sandbox project) defines how a sandbox is
 # baked: the agent harness image, the secret-isolating sidecar, and — for
 # workflow-specific templates — the git working context (repo + credentials).
-# A AgentTemplate points at it by name via .spec.sandboxTemplateRef.name.
+# In agent-sandbox v1beta1 a SandboxClaim references a SandboxWarmPool, not a
+# template directly; deploy a SandboxWarmPool (replicas: 0) that points at this
+# template (see sandboxwarmpool-claude-code.yaml), and have the AgentTemplate
+# select that pool via .spec.warmPoolRef.name.
 #
 # Use this template for workflows without a repository.
 # Workflows that need a checked-out repo get their own template that adds a
@@ -13,11 +16,12 @@
 # repo + credentials are baked into the template, such templates are
 # workflow-specific by design.
 #
-# When agentops launches a workflow it creates a SandboxClaim that
-# references this template. The claim is created with warm-pool semantics
-# "none" so each run gets a fresh pod, and the app injects the per-run agent
-# context (AGENT_SYSTEM_PROMPT, AGENT_SESSION_ID) as claim env targeted at the
-# `agent` container — which is why this template MUST set:
+# When agentops launches a workflow it creates a SandboxClaim against the
+# workflow's SandboxWarmPool. The pool runs replicas: 0 and the claim injects
+# per-run env, so the controller cold-starts a fresh pod for each run. The app
+# injects the per-run agent context (AGENT_SYSTEM_PROMPT, AGENT_SESSION_ID) as
+# claim env targeted at the `agent` container — which is why this template MUST
+# set:
 #
 #     spec.envVarsInjectionPolicy: Allowed
 #
@@ -38,7 +42,7 @@
 # The agent container never sees a secret: MCP servers are reached via
 # http://127.0.0.1:91xx and the Anthropic API via http://127.0.0.1:9999, with
 # envoy in the sidecar adding the credentials upstream.
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: claude-code

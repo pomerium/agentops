@@ -10,7 +10,7 @@ import (
 
 	"google.golang.org/grpc"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1alpha1"
+	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	v1alpha1 "github.com/pomerium/agentops/api/v1alpha1"
 	sidecarpb "github.com/pomerium/agentops/internal/sidecar/pb"
@@ -159,8 +159,8 @@ func TestConfigDefaultsContainerNames(t *testing.T) {
 func testTemplate() *v1alpha1.AgentTemplate {
 	return &v1alpha1.AgentTemplate{
 		Spec: v1alpha1.AgentTemplateSpec{
-			SandboxTemplateRef: v1alpha1.SandboxTemplateReference{Name: "claude-code"},
-			SessionConfig:      map[string]string{"model": "opus"},
+			WarmPoolRef:   v1alpha1.SandboxWarmPoolReference{Name: "claude-code"},
+			SessionConfig: map[string]string{"model": "opus"},
 		},
 	}
 }

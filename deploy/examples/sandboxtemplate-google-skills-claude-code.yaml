@@ -13,7 +13,7 @@
 # shallow fetch when GIT_TOKEN is absent. To bake a private repo instead, add
 # the GIT_TOKEN / GIT_USERNAME secretKeyRef pair (see
 # sandboxtemplate-pomerium-zero-claude-code.yaml).
-apiVersion: extensions.agents.x-k8s.io/v1alpha1
+apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
   name: google-skills-claude-code

@@ -1,0 +1,23 @@
+# SandboxWarmPool for the generic claude-code harness.
+#
+# agent-sandbox v1beta1 (v0.5.0+) requires every SandboxClaim to reference a
+# SandboxWarmPool, which in turn references the SandboxTemplate that bakes the
+# sandbox. agentops runs a FRESH sandbox per agent run, so this pool is sized
+# replicas: 0 — nothing is pre-warmed. Because each SandboxClaim agentops
+# creates injects per-run env (AGENT_SESSION_ID), the agent-sandbox controller
+# cold-starts a brand-new pod from the template for every claim, reproducing the
+# old warm-pool "none" (fresh pod per run) behavior.
+#
+# A AgentTemplate selects this pool by name via .spec.warmPoolRef.name.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: claude-code
+  namespace: agentops
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  # No pre-warmed pods; every claim cold-starts a fresh sandbox.
+  replicas: 0
+  sandboxTemplateRef:
+    name: claude-code
