@@ -102,12 +102,14 @@ func run(log *slog.Logger) error {
 		}
 	}()
 	// Informers start lazily on first read; create both here so a missing CRD
-	// or RBAC rule fails at boot instead of on the first mention.
+	// or RBAC rule surfaces at boot instead of on the first mention. Non-fatal:
+	// a rollout can start this pod before the new CRD is applied, and the cache
+	// retries lazily on first use — so log loudly rather than crash-loop.
 	if _, err := crCache.GetInformer(ctx, &v1alpha1.AgentTemplate{}); err != nil {
-		return err
+		log.Error("agent template informer failed to start; will retry on first use", "err", err)
 	}
 	if _, err := crCache.GetInformer(ctx, &v1alpha1.ChannelConfig{}); err != nil {
-		return err
+		log.Error("channel config informer failed to start; will retry on first use", "err", err)
 	}
 	if !crCache.WaitForCacheSync(ctx) {
 		return errors.New("agents.pomerium.com resource cache failed to sync")

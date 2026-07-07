@@ -659,6 +659,47 @@ func TestOAuthCallbackResumesLaunch(t *testing.T) {
 	}
 }
 
+// An OAuth resume whose persisted template no longer resolves (deleted or
+// renamed mid-flow) must tell the thread instead of vanishing: the browser
+// already said "connected", so silence would look like a launch that never
+// comes.
+func TestOAuthCallbackTemplateGoneNotifiesThread(t *testing.T) {
+	broker := &fakeBroker{
+		connected: map[string]bool{"github": true, "k8s": false},
+		callback: mcpbroker.CallbackResult{
+			SlackUserID: "U1", SlackChannelID: "C1", SlackThreadTS: "1700000000.0001",
+			ServerName: "k8s", WorkflowName: "deploy",
+		},
+	}
+	launcher := &fakeLauncher{}
+	poster := &fakePoster{}
+	resolver := boundResolver(deployTemplate())
+	m := newManager(t, broker, resolver, launcher, poster)
+
+	// The mention leaves the session awaiting auth for k8s.
+	m.HandleMention(context.Background(), gateway.MentionInvocation{
+		UserID: "U1", ChannelID: "C1", TeamID: "T1",
+		MessageTS: "1700000000.0001", ThreadTS: "1700000000.0001",
+	})
+	if launcher.launchCount() != 0 {
+		t.Fatalf("precondition: should be awaiting auth, launches=%d", launcher.launchCount())
+	}
+
+	// The admin deletes the template before the user finishes connecting.
+	resolver.tmpl = nil
+	broker.connected["k8s"] = true
+	if err := m.OAuthCallback(context.Background(), "code", "state"); err != nil {
+		t.Fatalf("OAuthCallback: %v", err)
+	}
+
+	if launcher.launchCount() != 0 {
+		t.Errorf("must not launch without a template, launches=%d", launcher.launchCount())
+	}
+	if !strings.Contains(poster.all(), "no longer exists") {
+		t.Errorf("expected a missing-template notice in the thread, got: %s", poster.all())
+	}
+}
+
 func TestLaunchMessageMentionsPromptWork(t *testing.T) {
 	broker := &fakeBroker{connected: map[string]bool{"github": true, "k8s": true}}
 	launcher := &fakeLauncher{}

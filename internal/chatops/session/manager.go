@@ -726,7 +726,14 @@ func (m *Manager) OAuthCallback(ctx context.Context, code, state string) error {
 
 	tmpl, err := m.resolver.Resolve(ctx, res.WorkflowName)
 	if err != nil {
-		return nil // can't resume automatically; user can re-run
+		// The template vanished between the mention and the callback
+		// (renamed/deleted). Say so in the thread — dropping the resume
+		// silently would leave a browser that says "connected" and a session
+		// that never launches.
+		m.log.ErrorContext(ctx, "resolve template on oauth resume failed", "template", res.WorkflowName, "err", err)
+		m.post(ctx, res.SlackChannelID, res.SlackThreadTS, slack.MsgOptionText(
+			fmt.Sprintf(":warning: Your connection went through, but agent `%s` no longer exists, so I can't continue. Ask an admin to restore it, then mention me again.", res.WorkflowName), false))
+		return nil
 	}
 	sess, err := m.store.GetSessionByThread(ctx, res.SlackChannelID, res.SlackThreadTS)
 	if err != nil {
