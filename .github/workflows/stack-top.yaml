@@ -21,26 +21,23 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       top: ${{ steps.check.outputs.top }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # The decision lives in a script so it can be tested
+      # (.github/scripts/stack-top_test.sh, run by the test workflow).
       - name: Look for pull requests stacked on this one
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.head_ref }}
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
-            echo "top=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          above=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$HEAD_REF" --state open \
-            --json number --jq 'map("#\(.number)") | join(" ")')
-          if [[ -n "$above" ]]; then
-            echo "Stacked under $above; the top of the stack runs the checks."
-            echo "top=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "top=true" >> "$GITHUB_OUTPUT"
-          fi
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: .github/scripts/stack-top.sh
