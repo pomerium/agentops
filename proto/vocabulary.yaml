@@ -1,0 +1,316 @@
+# The Harness API's string vocabularies: event types, session states, the
+# reason sets, tool-call status, permission resolutions, and the published
+# error sentinels.
+#
+# This file is the SOURCE of all of them. `make generate` renders it into the Go
+# api package, the Go wire mapping, both SDKs and the client documentation — see
+# harness/cmd/vocabgen. Edit here, never there.
+#
+# It sits next to the .proto because it is the other half of the same contract.
+# The proto describes the ENVELOPE (Event.type is a free string, SessionView.state
+# is a free string, ErrorInfo.sentinel is a free string, all deliberately, so the
+# vocabularies can grow without a schema change and an old client can tolerate a
+# value it has never heard of); this file describes what those strings say. None
+# of it becomes a proto enum, and nothing generated from it is ever used to
+# validate, reject or parse — only to name.
+#
+# Fields on a value:
+#   value     the string on the wire. THIS is the contract; renaming one is a
+#             breaking change no matter what the identifiers do.
+#   doc       the comment, rendered in every language. It reads as a
+#             continuation of the identifier, because that is this repo's Go
+#             convention: "ErrNotFound: no such session".
+#   payload   (event types) the payload type's name. Its JSON keys are read from
+#             the Go struct, so the languages with no payload type to point at
+#             can name the keys without anybody restating them.
+#   live      (session states) whether the state still owns cluster resources.
+#
+# Identifiers are DERIVED from the value, so they cannot disagree with it:
+# "state_changed" is EventStateChanged in Go, EventType.StateChanged in
+# TypeScript, EventType.STATE_CHANGED in Python.
+
+vocabularies:
+  - name: EventType
+    go_typed: true
+    go_prefix: Event
+    docs_region: event-types
+    doc: |
+      EventType names an event on a session's log.
+
+      The set is additive-only: a client must tolerate a type it does not know
+      (see the API stability contract), which is why the type field is a plain
+      string and these are the values worth naming rather than an exhaustive
+      enum. Switch on it with a default that ignores.
+    values:
+      - value: state_changed
+        doc: a session-state transition.
+        payload: StateChanged
+      - value: approval_required
+        doc: the consent-page URL the client must deliver to the person it
+          believes should approve.
+        payload: ApprovalRequired
+      - value: approved
+        doc: the verified IdP subject that approved the run.
+        payload: Approved
+      - value: launch_stalled
+        doc: an approved run whose workspace has not connected back when it
+          should have.
+        payload: LaunchStalled
+      - value: agent_message
+        doc: one addressable segment of the agent's visible output.
+        payload: AgentMessage
+      - value: agent_thought
+        doc: the agent's reasoning, when it discloses any.
+        payload: AgentThought
+      - value: tool_call
+        doc: announces or updates a tool call.
+        payload: ToolCall
+      - value: permission_request
+        doc: asks the client's principal to authorize a tool call.
+        payload: PermissionRequest
+      - value: permission_resolved
+        doc: closes a permission request, however it ended.
+        payload: PermissionResolved
+      - value: turn_completed
+        doc: a turn that finished.
+        payload: TurnCompleted
+      - value: turn_failed
+        doc: a turn that died.
+        payload: TurnFailed
+      - value: usage
+        doc: the turn's token and cost counters.
+        payload: Usage
+      - value: idle_warning
+        doc: a quiet session about to be suspended.
+        payload: IdleWarning
+      - value: suspended
+        doc: the pod was freed and the workspace kept.
+        payload: Suspended
+      - value: revived
+        doc: a suspended session came back on a new pod.
+        payload: Revived
+      - value: released
+        doc: a suspended session's workspace was reclaimed.
+        payload: Released
+      - value: session_ended
+        doc: the last event a session ever emits.
+        payload: SessionEnded
+
+  - name: SessionState
+    go_typed: true
+    go_prefix: State
+    doc: |
+      SessionState is the published session lifecycle. The string values are part
+      of the API contract, and the set is additive: tolerate a state you do not
+      know.
+    values:
+      - value: pending
+        doc: the session row exists; nothing has been launched yet.
+        live: true
+      - value: launching
+        doc: a workspace is being prepared, or a run created.
+        live: true
+      - value: awaiting_approval
+        doc: a run exists and a human has been asked to approve it.
+        live: true
+      - value: running
+        doc: an agent is attached and can take turns.
+        live: true
+      - value: suspended
+        doc: the pod is freed, the workspace and conversation kept. The next
+          prompt revives it.
+        live: true
+      - value: ended
+        doc: terminal.
+      - value: interrupted
+        doc: terminal for this episode — the harness restarted under a live
+          session. The workspace may still be revivable.
+
+  - name: Reason
+    go_prefix: Reason
+    doc: |
+      Reason is the vocabulary shared by state_changed and session_ended.
+
+      It is one set on both sides, and it is named rather than left as literals
+      because clients make DECISIONS on these, not just copy them: the Slack app
+      turns revive_failed into a whole new session. A vocabulary a client has to
+      guess at is one a rename silently breaks.
+
+      Unrecognized values must be tolerated: this set grows.
+    values:
+      - value: launch
+        doc: a session starting, as opposed to one coming back.
+      - value: revive
+        doc: a session coming back on the same workspace.
+      - value: client
+        doc: a client asked for this transition.
+      - value: idle
+        doc: the session was quiet past its idle TTL. It is both a suspend reason
+          and, when the suspend itself failed, an end reason.
+      - value: revive_failed
+        doc: a continuation could not happen and the session went back to
+          suspended with its workspace intact. The turn that asked for it gets a
+          turn_failed carrying the specifics.
+
+  - name: EndReason
+    go_prefix: End
+    docs_region: end-reasons
+    doc: |
+      EndReason is why a session ended.
+
+      Each one exists because it calls for a different next step: "the approval
+      was withdrawn", "nobody approved in time" and "the workspace never dialed
+      in" send a reader to three different places, and a client that could only
+      see "it failed" would have to guess which.
+    values:
+      - value: revoked
+        doc: the run was revoked at the authorization server.
+      - value: expired
+        doc: a running session's run window ran out.
+      - value: never_approved
+        doc: the approval window closed with nothing approved. The authorization
+          server exposes no denial signal, so "refused" and "ignored" are
+          indistinguishable and a client must not claim to know which.
+      - value: agent_exit
+        doc: the agent process ended.
+      - value: tunnel_lost
+        doc: the sandbox's tunnel died and did not come back.
+      - value: ended
+        doc: a client (or an operator) ended it deliberately.
+      - value: interrupted
+        doc: the harness restarted under a live session. Live ACP state is in
+          memory, so the session cannot continue — but the workspace survives and
+          the conversation can be revived.
+      - value: prepare_failed
+        doc: no workspace could be made ready.
+      - value: run_create_failed
+        doc: the authorization server would not create a run, so there was
+          nothing for anyone to approve.
+      - value: attach_timeout
+        doc: the workspace started but never connected back. The place to look is
+          the network path, not the app or the agent.
+      - value: launch_failed
+        doc: the launch failed some other way.
+
+  - name: ToolCallStatus
+    go_typed: true
+    go_prefix: ToolCall
+    doc: |
+      ToolCallStatus is the published, CLOSED set of tool-call states. An ACP
+      status outside this set is normalized to pending rather than passed
+      through, so a client can switch exhaustively.
+    values:
+      - value: pending
+      - value: in_progress
+      - value: completed
+      - value: failed
+
+  - name: Resolution
+    go_prefix: Resolution
+    doc: |
+      Resolution is how a permission request ended, besides by an option id.
+    values:
+      - value: expired
+        doc: the deadline passed with no answer; the agent was told the call was
+          cancelled.
+      - value: superseded
+        doc: the session ended, or the turn was cancelled, with the request
+          outstanding.
+
+# The typed error set. Every verb fails with one of these, wrapped in a detail,
+# and the NAME is what travels in ErrorInfo.sentinel — which is what makes the
+# mapping injective, because the Connect code alone cannot tell them apart.
+#
+# Extra fields on a value:
+#   message   the Go sentinel's error string.
+#   code      the Connect code it travels as, by its wire name.
+#   means     the documentation table's gloss, when the table wants a terser
+#             voice than the doc. Omitted takes the doc's first sentence.
+#
+# The order is the order it is all rendered in, and it groups the two pairs that
+# share a code — which is the thing about this table worth noticing first. It is
+# also the order Classify matches in, so an error wrapping two sentinels
+# classifies the same way every time.
+sentinels:
+  name: Sentinel
+  strip_prefix: Err
+  doc: |
+    Sentinel is the platform's published error set, by the name that travels in
+    the ErrorInfo error detail.
+
+    The Connect code alone cannot tell these apart, because two pairs share one:
+    ErrNotFound and ErrUnknownRequest both arrive as NotFound, and ErrInvalidState
+    and ErrNotRevivable both arrive as FailedPrecondition. The distinction matters
+    — "this conversation cannot be continued" calls for a new session where "not
+    valid in this state" calls for waiting — so branch on the sentinel, and fall
+    back to the code only when no detail arrived.
+  # Keyed by Connect code rather than by sentinel name, because that is how the
+  # companion's REST facade decides (statusFor), and a per-name list is how a new
+  # sentinel comes to be documented as something nothing returns.
+  http_status:
+    not_found: 404
+    permission_denied: 403
+    already_exists: 409
+    failed_precondition: 412
+    invalid_argument: 400
+    unimplemented: 501
+    unavailable: 503
+    resource_exhausted: 429
+  values:
+    - value: ErrNotFound
+      message: "harnessapi: session not found"
+      doc: no such session, or none this client may see.
+      code: not_found
+      means: no such session, or none yours
+    - value: ErrUnknownRequest
+      message: "harnessapi: unknown or expired permission request"
+      doc: an unknown or already-resolved permission request.
+      code: not_found
+    - value: ErrForbidden
+      message: "harnessapi: forbidden"
+      doc: the session belongs to another client, or the template is not in this
+        client's binding.
+      code: permission_denied
+      means: not your session, or template not in your binding
+    - value: ErrConflict
+      message: "harnessapi: conversation already has a live session"
+      doc: the conversation ref already has a live session.
+      code: already_exists
+    - value: ErrInvalidState
+      message: "harnessapi: not valid in this session state"
+      doc: "the verb does not apply in this session's state. Notably a prompt at
+        a state that is neither running nor suspended: consent must cover exactly
+        what the approver read, so there is no queue."
+      code: failed_precondition
+    - value: ErrNotRevivable
+      message: "harnessapi: this conversation cannot be continued"
+      doc: the session is suspended but cannot be continued — no recorded
+        conversation, no workspace, or no approver to pin a fresh approval to. A
+        client is expected to start a new session instead.
+      code: failed_precondition
+      means: suspended but not continuable — start a new session
+    - value: ErrInvalidArgument
+      message: "harnessapi: invalid argument"
+      doc: a malformed or missing field.
+      code: invalid_argument
+    - value: ErrNotImplemented
+      message: "harnessapi: not implemented"
+      doc: the verb is part of the published shape but has no implementation yet.
+        It is returned, never panicked, so a client can code against the final API
+        today.
+      code: unimplemented
+      means: published, not built yet
+    - value: ErrUnavailable
+      message: "harnessapi: temporarily unavailable"
+      doc: a dependency (the orchestrator, the authorization server) failed.
+        Retryable.
+      code: unavailable
+      means: a dependency failed; retryable
+    - value: ErrQuotaExceeded
+      message: "harnessapi: client quota exceeded"
+      doc: 'the client''s ClientBinding caps what it may hold at once, or how fast
+        it may open sessions, and this call would exceed it. Distinct from
+        ErrForbidden because it is a "not now", not a "not ever": the detail names
+        which quota, and a client can retry or end something first.'
+      code: resource_exhausted
+      means: your ClientBinding caps this; a "not now"
