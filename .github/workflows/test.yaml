@@ -39,6 +39,9 @@ jobs:
             exit 1
           fi
 
+      - name: Vocabulary is current
+        run: make vocab-check
+
       - name: Vet
         run: make vet
 

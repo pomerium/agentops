@@ -30,7 +30,7 @@ OVERLAY ?= dev
 HELM      ?= helm
 CHART_DIR ?= deploy/helm
 
-.PHONY: build test test-e2e vet generate generate-harness-api proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
+.PHONY: build test test-e2e vet generate generate-harness-api vocab vocab-check proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
         helm-sync-crds helm-lint helm-template helm-package
 
 ## build: compile all packages.
@@ -58,8 +58,9 @@ vet:
 ## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
 ## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
 ## the sidecar control protocol stubs (buf, from proto/sidecar), and the Harness
-## API's Connect stubs (generate-harness-api).
-generate: generate-harness-api
+## API's Connect stubs (generate-harness-api), and its string vocabularies and
+## event payload shapes (vocab).
+generate: generate-harness-api vocab
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	cd internal/chatops/db && $(SQLC) generate
@@ -71,6 +72,21 @@ generate: generate-harness-api
 ## pinned buf and plugins.
 generate-harness-api:
 	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
+
+## vocab: regenerate the Harness API's string vocabularies and event payload
+## shapes (harness/api, and the tables in docs/clients.md) from
+## proto/vocabulary.yaml and proto/payloads.yaml.
+vocab:
+	$(HARNESS_GO) run ./cmd/vocabgen -root ..
+
+## vocab-check: assert the committed artifacts still say what the sources say.
+##
+## The strings and the shapes are each one declaration with several audiences,
+## and the failure mode this catches is the quiet one: a value or a field added
+## to the Go side and to nothing else, which no test notices because every
+## language still agrees with itself.
+vocab-check:
+	$(HARNESS_GO) run ./cmd/vocabgen -root .. -check
 
 ## helm-sync-crds: copy the generated CRDs into the Helm chart, wrapped in an
 ## `installCRDs` toggle. Kept in sync via `generate`; the kustomize base reads
