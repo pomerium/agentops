@@ -711,3 +711,22 @@ func TestAnUnreadSubscriberDoesNotBreakPrompts(t *testing.T) {
 		}
 	}
 }
+
+// TestEndSessionIsIdempotent: ending an ended session succeeds, as it does on the
+// platform, so a client whose EndSession response was lost can safely ask again.
+func TestEndSessionIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	c := serve(t)(nil)
+	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
+		Template: "runid", ConversationRef: "twice", ApprovalPrompt: "ship it",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ref := api.SessionRef{SessionID: view.ID}
+	for i := range 2 {
+		if err := c.EndSession(ctx, api.EndSessionRequest{Ref: ref}); err != nil {
+			t.Fatalf("EndSession #%d: %v", i+1, err)
+		}
+	}
+}

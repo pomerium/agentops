@@ -249,7 +249,7 @@ func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
 		return err
 	}
 	if sess.view.State.Terminal() {
-		return api.Errorf(api.ErrInvalidState, "this session has already ended")
+		return nil // idempotent, as on the platform: ending an ended session is done
 	}
 	reason := req.Reason
 	if reason == "" {
