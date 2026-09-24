@@ -115,9 +115,9 @@ type session struct {
 	updatedAt time.Time
 	events    []api.Event
 	subs      map[*subscription]struct{}
-	// finished marks a log that will never grow again, which is what closes a
-	// subscriber's channel and what makes a later Subscribe succeed with nothing
-	// to deliver rather than hang.
+	// finished marks a log that will never grow again. A later Subscribe gets the
+	// backlog and then a clean end rather than a feed that hangs; a feed already
+	// open is deliberately left open (see finish).
 	finished bool
 	// pending is the permission request a scripted turn is blocked on, if any.
 	pending string
@@ -197,7 +197,7 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 func (s *Stub) Prompt(_ context.Context, req api.PromptRequest) (api.PromptResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
+	sess, err := s.findLive(req.Ref)
 	if err != nil {
 		return api.PromptResult{}, err
 	}
@@ -217,7 +217,7 @@ func (s *Stub) Prompt(_ context.Context, req api.PromptRequest) (api.PromptResul
 func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
+	sess, err := s.findLive(req.Ref)
 	if err != nil {
 		return err
 	}
@@ -244,7 +244,7 @@ func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionReq
 func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
+	sess, err := s.findLive(req.Ref)
 	if err != nil {
 		return err
 	}
@@ -337,42 +337,108 @@ func (s *Stub) Subscribe(_ context.Context, req api.SubscribeRequest) (api.Subsc
 			backlog = append(backlog, ev)
 		}
 	}
-	// Room for the replay plus whatever a test appends afterwards. A stub feeds a
-	// test, not a production log, so a buffer is honest here where a blocking
-	// broadcast would deadlock a suite that reads its stream after driving a turn.
-	sub := &subscription{
-		stub: s,
-		sess: sess,
-		out:  make(chan api.Event, len(backlog)+256),
-	}
+	sub := newSubscription(s, sess)
 	for _, ev := range backlog {
-		sub.out <- ev
+		sub.push(ev)
 	}
 	if sess.finished {
-		close(sub.out)
-		sub.closed = true
+		sub.end()
 		return sub, nil
 	}
 	sess.subs[sub] = struct{}{}
 	return sub, nil
 }
 
-// subscription is one live feed. Closing it unregisters it; only a finished log
-// closes the channel, because the handler ranges over it and a consumer-side
-// close would race the broadcast.
+// subscription is one live feed. Events are queued without a bound and handed
+// on by one goroutine per feed, so a broadcast never blocks, never drops and
+// never fails however far behind a test's reader falls: a stub serves a test, and
+// a test that pauses its reader must not change what the log says.
+//
+// Only the pump closes out, and only once the feed has been ended and drained,
+// because the handler ranges over it. Close stops the pump without closing out.
 type subscription struct {
-	stub   *Stub
-	sess   *session
-	out    chan api.Event
-	closed bool
+	stub *Stub
+	sess *session
+	out  chan api.Event
+
+	mu    sync.Mutex
+	queue []api.Event
+	ended bool
+	wake  chan struct{}
+	done  chan struct{}
+	stop  sync.Once
+}
+
+func newSubscription(stub *Stub, sess *session) *subscription {
+	sub := &subscription{
+		stub: stub,
+		sess: sess,
+		out:  make(chan api.Event),
+		wake: make(chan struct{}, 1),
+		done: make(chan struct{}),
+	}
+	go sub.pump()
+	return sub
 }
 
 func (s *subscription) Events() <-chan api.Event { return s.out }
 
 func (s *subscription) Close() {
 	s.stub.mu.Lock()
-	defer s.stub.mu.Unlock()
 	delete(s.sess.subs, s)
+	s.stub.mu.Unlock()
+	s.stop.Do(func() { close(s.done) })
+}
+
+// push queues an event for the feed.
+func (s *subscription) push(ev api.Event) {
+	s.mu.Lock()
+	s.queue = append(s.queue, ev)
+	s.mu.Unlock()
+	s.poke()
+}
+
+// end closes the feed once everything queued has been delivered.
+func (s *subscription) end() {
+	s.mu.Lock()
+	s.ended = true
+	s.mu.Unlock()
+	s.poke()
+}
+
+func (s *subscription) poke() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *subscription) pump() {
+	for {
+		s.mu.Lock()
+		if len(s.queue) == 0 {
+			ended := s.ended
+			s.mu.Unlock()
+			if ended {
+				close(s.out)
+				return
+			}
+			select {
+			case <-s.wake:
+			case <-s.done:
+				return
+			}
+			continue
+		}
+		ev := s.queue[0]
+		s.queue = s.queue[1:]
+		s.mu.Unlock()
+		select {
+		case s.out <- ev:
+		case <-s.done:
+			return
+		}
+	}
 }
 
 // --- the scripted turn -------------------------------------------------------
@@ -477,14 +543,7 @@ func (s *Stub) emitRaw(sess *session, ev api.Event) {
 // seq 0 must not disturb the log's sequence or its history.
 func (s *Stub) broadcast(sess *session, ev api.Event) {
 	for sub := range sess.subs {
-		select {
-		case sub.out <- ev:
-		default:
-			// A subscriber this far behind is a test that stopped reading. Dropping
-			// would break the ordering contract the SDKs are being tested against, so
-			// say so loudly rather than quietly deliver a log with a hole in it.
-			panic("apistub: a subscriber's buffer is full; the test is not reading its stream")
-		}
+		sub.push(ev)
 	}
 }
 
@@ -497,20 +556,15 @@ func (s *Stub) transition(sess *session, next api.SessionState, reason string) {
 	s.emit(sess, api.EventStateChanged, "", api.StateChanged{Old: prev, New: next, Reason: reason})
 }
 
-// finish marks a log as never growing again and closes every feed on it, which
-// is what a client sees as a clean end of stream.
+// finish marks a log as never growing again. A feed opened after this gets the
+// backlog and then a clean end of stream; a feed already open is left open.
+//
+// That is the one place the stub is stricter than the platform, on purpose: a
+// client must stop on the session_ended event, and one that instead waits for the
+// stream to end would pass against a server that closes it straight away. Here it
+// hangs, which is what makes the mistake visible.
 func (s *Stub) finish(sess *session) {
-	if sess.finished {
-		return
-	}
 	sess.finished = true
-	for sub := range sess.subs {
-		if !sub.closed {
-			close(sub.out)
-			sub.closed = true
-		}
-		delete(sess.subs, sub)
-	}
 }
 
 // tick returns the current instant and advances the clock. Called with the lock
@@ -566,6 +620,14 @@ func (s *Stub) find(ref api.SessionRef) (*session, error) {
 		return nil, api.Errorf(api.ErrNotFound, "no session for conversation %q", ref.ConversationRef)
 	}
 	return best, nil
+}
+
+// findLive is find for a verb that acts on a session. Such a verb operates on the
+// live session or on nothing, as SessionRef says, so IncludeTerminal — which is
+// for reading history — is ignored rather than letting it act on an ended one.
+func (s *Stub) findLive(ref api.SessionRef) (*session, error) {
+	ref.IncludeTerminal = false
+	return s.find(ref)
 }
 
 // scriptedError reads a sentinel ref and returns the published error it names.

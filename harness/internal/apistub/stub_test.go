@@ -3,8 +3,11 @@ package apistub_test
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -541,3 +544,170 @@ func drain(t *testing.T, sub api.Subscription, budget time.Duration) []api.Event
 	}
 }
 
+// lossyHTTPClient delivers the first Prompt to the server and then loses its
+// response, the way a connection reset after the server accepted it would.
+type lossyHTTPClient struct {
+	next http.Client
+	once sync.Once
+}
+
+func (l *lossyHTTPClient) Do(r *http.Request) (*http.Response, error) {
+	lost := false
+	if strings.HasSuffix(r.URL.Path, "/Prompt") {
+		l.once.Do(func() { lost = true })
+	}
+	res, err := l.next.Do(r)
+	if !lost || err != nil {
+		return res, err
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+	return nil, io.ErrUnexpectedEOF
+}
+
+// TestALostPromptResponseIsNotRetried: a prompt the server accepted runs once,
+// even when the client never hears back. Resending it would start a second turn,
+// and nothing on the wire could tell the two apart.
+func TestALostPromptResponseIsNotRetried(t *testing.T) {
+	ctx := context.Background()
+	newClient := serve(t)
+	driver := newClient(nil)
+	lossy := newClient(nil, func(cfg *apiclient.Config) {
+		cfg.HTTPClient = &lossyHTTPClient{}
+	})
+
+	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
+		Template: "runid", ConversationRef: "lossy", ApprovalPrompt: "ship it",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ref := api.SessionRef{SessionID: view.ID}
+	if _, err := lossy.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "deploy"}); err == nil {
+		t.Error("Prompt reported success for a response that never arrived")
+	}
+
+	events, err := driver.ListEvents(ctx, api.EventsRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	turns := 0
+	for _, ev := range events {
+		if ev.Type == api.EventTurnCompleted {
+			turns++
+		}
+	}
+	if turns != 1 {
+		t.Errorf("one prompt ran %d turns", turns)
+	}
+}
+
+// TestActingVerbsIgnoreIncludeTerminal: a verb that acts on a session operates
+// on the live one or on nothing, as SessionRef says, so an ended conversation is
+// not found rather than acted on.
+func TestActingVerbsIgnoreIncludeTerminal(t *testing.T) {
+	ctx := context.Background()
+	c := serve(t)(nil)
+	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
+		Template: "runid", ConversationRef: "ended", ApprovalPrompt: "ship it",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}}); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+
+	ref := api.SessionRef{ConversationRef: "ended", IncludeTerminal: true}
+	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: ref}); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("EndSession on an ended conversation: %v, want ErrNotFound", err)
+	}
+	if _, err := c.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "hi"}); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("Prompt on an ended conversation: %v, want ErrNotFound", err)
+	}
+	// Reading history is what the flag is for, and that still works.
+	if got, err := c.GetSession(ctx, ref); err != nil || got.ID != view.ID {
+		t.Errorf("GetSession with include_terminal: %v, %v", got.ID, err)
+	}
+}
+
+// TestEndedEventLeavesALiveFeedOpen: the stub does not close a live feed after
+// session_ended, so a client that waits for end-of-stream instead of stopping on
+// the event hangs here rather than passing by accident.
+func TestEndedEventLeavesALiveFeedOpen(t *testing.T) {
+	s := apistub.New()
+	ctx := context.Background()
+	v, err := s.CreateSession(ctx, api.CreateSessionRequest{
+		ClientID: "a", Template: "runid", ConversationRef: "c", ApprovalPrompt: "ship it",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ref := api.SessionRef{ClientID: "a", SessionID: v.ID}
+	sub, err := s.Subscribe(ctx, api.SubscribeRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	if err := s.EndSession(ctx, api.EndSessionRequest{Ref: ref}); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	for ev := range sub.Events() {
+		if ev.Type != api.EventSessionEnded {
+			continue
+		}
+		select {
+		case _, open := <-sub.Events():
+			if !open {
+				t.Fatal("the feed closed right after session_ended")
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+		return
+	}
+	t.Fatal("the feed closed before session_ended arrived")
+}
+
+// TestAnUnreadSubscriberDoesNotBreakPrompts: a test that stops reading its feed
+// does not make the stub panic, however much the session goes on to say.
+func TestAnUnreadSubscriberDoesNotBreakPrompts(t *testing.T) {
+	s := apistub.New()
+	ctx := context.Background()
+	v, err := s.CreateSession(ctx, api.CreateSessionRequest{
+		ClientID: "a", Template: "runid", ConversationRef: "c", ApprovalPrompt: "ship it",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ref := api.SessionRef{ClientID: "a", SessionID: v.ID}
+	sub, err := s.Subscribe(ctx, api.SubscribeRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("a prompt panicked: %v", p)
+		}
+	}()
+	for range 100 {
+		if _, err := s.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "work"}); err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+	}
+	// Nothing was dropped: the whole log arrives, in order.
+	logged, err := s.ListEvents(ctx, api.EventsRequest{Ref: ref, Limit: 10000})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for i := range logged {
+		select {
+		case ev := <-sub.Events():
+			if ev.Seq != int64(i+1) {
+				t.Fatalf("event %d arrived as seq %d", i+1, ev.Seq)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("the feed stopped after %d of %d events", i, len(logged))
+		}
+	}
+}
