@@ -269,13 +269,10 @@ func (c *Client) CreateSession(ctx context.Context, req api.CreateSessionRequest
 	res, err := call(ctx, c, c.unary.CreateSession, &pb.CreateSessionRequest{
 		Template:             req.Template,
 		ConversationRef:      req.ConversationRef,
-		Principal:            req.Principal,
-		IdempotencyKey:       req.IdempotencyKey,
 		ParentSessionId:      req.ParentSessionID,
 		ApprovalPrompt:       req.ApprovalPrompt,
 		InitialPrompt:        req.InitialPrompt,
 		SystemPromptAppendix: req.SystemPromptAppendix,
-		OriginKind:           req.OriginKind,
 	})
 	if err != nil {
 		return api.SessionView{}, err
@@ -290,14 +287,7 @@ func (c *Client) Prompt(ctx context.Context, req api.PromptRequest) (api.PromptR
 	if err != nil {
 		return api.PromptResult{}, err
 	}
-	return api.PromptResult{TurnID: res.GetTurnId(), Revived: res.GetRevived()}, nil
-}
-
-func (c *Client) CancelTurn(ctx context.Context, req api.CancelTurnRequest) error {
-	_, err := call(ctx, c, c.unary.CancelTurn, &pb.CancelTurnRequest{
-		Ref: wire.Ref(req.Ref), TurnId: req.TurnID,
-	})
-	return err
+	return api.PromptResult{TurnID: res.GetTurnId()}, nil
 }
 
 func (c *Client) RespondPermission(ctx context.Context, req api.RespondPermissionRequest) error {
@@ -307,20 +297,10 @@ func (c *Client) RespondPermission(ctx context.Context, req api.RespondPermissio
 	return err
 }
 
-func (c *Client) Suspend(ctx context.Context, ref api.SessionRef) error {
-	_, err := call(ctx, c, c.unary.Suspend, &pb.SuspendRequest{Ref: wire.Ref(ref)})
-	return err
-}
-
 func (c *Client) EndSession(ctx context.Context, req api.EndSessionRequest) error {
 	_, err := call(ctx, c, c.unary.EndSession, &pb.EndSessionRequest{
 		Ref: wire.Ref(req.Ref), Reason: req.Reason,
 	})
-	return err
-}
-
-func (c *Client) DeleteWorkspace(ctx context.Context, ref api.SessionRef) error {
-	_, err := call(ctx, c, c.unary.DeleteWorkspace, &pb.DeleteWorkspaceRequest{Ref: wire.Ref(ref)})
 	return err
 }
 
@@ -358,14 +338,6 @@ func (c *Client) ListTemplates(ctx context.Context, _ string) ([]api.TemplateSum
 	return out, nil
 }
 
-func (c *Client) ReissueApproval(ctx context.Context, ref api.SessionRef) (api.Approval, error) {
-	res, err := call(ctx, c, c.unary.ReissueApproval, &pb.ReissueApprovalRequest{Ref: wire.Ref(ref)})
-	if err != nil {
-		return api.Approval{}, err
-	}
-	return api.Approval{ApprovalURL: res.GetApprovalUrl(), ExpiresAt: wire.Time(res.GetExpiresAt())}, nil
-}
-
 func (c *Client) ListEvents(ctx context.Context, req api.EventsRequest) ([]api.Event, error) {
 	res, err := call(ctx, c, c.unary.ListEvents, &pb.ListEventsRequest{
 		Ref: wire.Ref(req.Ref), AfterSeq: req.AfterSeq, Limit: int32(req.Limit),
@@ -378,11 +350,4 @@ func (c *Client) ListEvents(ctx context.Context, req api.EventsRequest) ([]api.E
 		out = append(out, wire.EventFrom(ev))
 	}
 	return out, nil
-}
-
-func (c *Client) SetSessionMetadata(ctx context.Context, req api.SetSessionMetadataRequest) error {
-	_, err := call(ctx, c, c.unary.SetSessionMetadata, &pb.SetSessionMetadataRequest{
-		Ref: wire.Ref(req.Ref), Metadata: req.Metadata,
-	})
-	return err
 }

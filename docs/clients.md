@@ -11,7 +11,7 @@ need to write a client for it, in whatever language you have.
 > the contract is documented in one place.
 
 There are three ways to consume it, and they differ in how much of the network
-you take on rather than in what they can do. All three reach the same fourteen
+you take on rather than in what they can do. All three reach the same nine
 verbs.
 
 | | you write | you handle | good for |
@@ -41,17 +41,17 @@ createSession ──▶ pending ──▶ launching ──▶ awaiting_approval 
 
 Four things about it surprise everyone once.
 
-**The approval URL is not on the `createSession` response.** A run has to exist
-before anyone can be asked to approve it, so the URL arrives on the log as an
-`approval_required` event — and on `getSession` once it is set. A client that
-reads it off the create response reads an empty string.
+**The approval URL arrives on the log, not on a response.** A run has to exist
+before anyone can be asked to approve it, so the URL comes as an
+`approval_required` event; no view carries it.
 
 **Delivering that URL to a human is your job.** The platform mints it; who sees
 it is a question only your client can answer. Render it as chrome the agent
 cannot imitate, never as agent-supplied content.
 
 **A revive is a `prompt`, not a verb.** Prompting a `suspended` session brings it
-back on a new pod with a fresh approval, and the result says `revived: true`.
+back on a new pod with a fresh approval, and the log says so with a `revived`
+event.
 There is no queue: consent covers exactly what the approver read, so a prompt in
 any other state is `ErrInvalidState`.
 
@@ -111,13 +111,8 @@ curl --unix-socket /var/run/agentops/client.sock -sSN \
 | ListTemplates | `GET /v1/templates` |
 | GetSession | `GET /v1/sessions/{id}` |
 | Prompt | `POST /v1/sessions/{id}/prompt` |
-| CancelTurn | `POST /v1/sessions/{id}/cancel` |
 | RespondPermission | `POST /v1/sessions/{id}/permissions` |
-| Suspend | `POST /v1/sessions/{id}/suspend` |
 | EndSession | `POST /v1/sessions/{id}/end` |
-| ReissueApproval | `POST /v1/sessions/{id}/approval` |
-| SetSessionMetadata | `PUT /v1/sessions/{id}/metadata` (body IS the metadata) |
-| DeleteWorkspace | `DELETE /v1/sessions/{id}/workspace` |
 | ListEvents | `GET /v1/sessions/{id}/events?after_seq=&limit=` |
 | Subscribe | `GET /v1/sessions/{id}/events/stream` (SSE) |
 
@@ -239,7 +234,6 @@ code alone is not enough:
 | `ErrInvalidState` | `failed_precondition` | 412 | the verb does not apply in this session's state |
 | `ErrNotRevivable` | `failed_precondition` | 412 | suspended but not continuable — start a new session |
 | `ErrInvalidArgument` | `invalid_argument` | 400 | a malformed or missing field |
-| `ErrNotImplemented` | `unimplemented` | 501 | published, not built yet |
 | `ErrUnavailable` | `unavailable` | 503 | a dependency failed; retryable |
 | `ErrQuotaExceeded` | `resource_exhausted` | 429 | your ClientBinding caps this; a "not now" |
 <!-- END GENERATED: sentinels -->
@@ -300,8 +294,9 @@ production failure that development never shows you:
 Unary calls: retry twice on `unavailable`, `deadline_exceeded`, `unknown`, or a
 transport failure with no Connect error at all; back off `(attempt+1) × 200 ms`.
 Everything else is the platform's considered answer, and asking again only asks
-again. `CreateSession` is safe to retry — with an idempotency key you get the
-session you already made, and without one you have said you do not care.
+again. `CreateSession` is safe to retry: a conversation holds one live session,
+so retrying a create that did succeed is refused as `ErrConflict` rather than
+making a second one.
 
 ### Events
 
@@ -331,7 +326,7 @@ having nothing to say — not a null.
 | event or shape | payload keys (`?` = omitted when empty) |
 |---|---|
 | `state_changed` | `old` string · `new` string · `reason?` string |
-| `approval_required` | `approval_url` string · `expires_at` timestamp · `reissued?` bool |
+| `approval_required` | `approval_url` string · `expires_at` timestamp |
 | `approved` | `approver_subject` string |
 | `launch_stalled` | `waited_ns` int (ns) |
 | `agent_message` | `part_id` string · `text` string · `final` bool |
@@ -368,8 +363,6 @@ for a different next step: `never_approved` and `attach_timeout` and
 
 ### Other limits
 
-- `SetSessionMetadata` caps at **16 KiB**. It is a handle for presentation state,
-  not a document store.
 - `ListEvents` pages clamp to **500**.
 - `RespondPermission` is idempotent for ten minutes after a request resolves, so
   a client that could not tell a slow round-trip from a lost one gets the same

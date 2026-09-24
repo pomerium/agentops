@@ -73,12 +73,6 @@ payloads:
         type: timestamp
         doc: when the approval window closes. A timestamp is always written, so
           an absent expiry reads as the zero time rather than as a missing key.
-      - name: reissued
-        type: bool
-        optional: true
-        doc: marks an approval solicited by ReissueApproval rather than by the
-          launch itself, so a client can tell "approve this" from "approve this
-          again".
 
   - name: Approved
     doc: Approved is the verified identity that let the run start.

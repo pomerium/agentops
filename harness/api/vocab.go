@@ -109,8 +109,6 @@ const (
 	ReasonLaunch = "launch"
 	// ReasonRevive: a session coming back on the same workspace.
 	ReasonRevive = "revive"
-	// ReasonClient: a client asked for this transition.
-	ReasonClient = "client"
 	// ReasonIdle: the session was quiet past its idle TTL. It is both a suspend
 	// reason and, when the suspend itself failed, an end reason.
 	ReasonIdle = "idle"
@@ -209,10 +207,6 @@ var (
 	ErrNotRevivable = errors.New("harnessapi: this conversation cannot be continued")
 	// ErrInvalidArgument: a malformed or missing field.
 	ErrInvalidArgument = errors.New("harnessapi: invalid argument")
-	// ErrNotImplemented: the verb is part of the published shape but has no
-	// implementation yet. It is returned, never panicked, so a client can code
-	// against the final API today.
-	ErrNotImplemented = errors.New("harnessapi: not implemented")
 	// ErrUnavailable: a dependency (the orchestrator, the authorization server)
 	// failed. Retryable.
 	ErrUnavailable = errors.New("harnessapi: temporarily unavailable")

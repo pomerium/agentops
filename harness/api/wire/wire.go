@@ -174,21 +174,10 @@ func RefFrom(ref *pb.SessionRef, clientID string) api.SessionRef {
 func View(v api.SessionView) *pb.SessionView {
 	return &pb.SessionView{
 		Id:              v.ID,
-		ClientId:        v.ClientID,
 		ConversationRef: v.ConversationRef,
 		State:           string(v.State),
 		Template:        v.Template,
-		ParentSessionId: v.ParentSessionID,
-		Principal:       v.Principal,
-		ApproverSubject: v.ApproverSubject,
-		ApprovalUrl:     v.ApprovalURL,
-		RunId:           v.RunID,
-		RunExpiresAt:    Timestamp(v.RunExpiresAt),
 		LastSeq:         v.LastSeq,
-		CreatedAt:       Timestamp(v.CreatedAt),
-		UpdatedAt:       Timestamp(v.UpdatedAt),
-		SuspendedAt:     Timestamp(v.SuspendedAt),
-		Metadata:        v.Metadata,
 	}
 }
 
@@ -199,21 +188,10 @@ func ViewFrom(v *pb.SessionView) api.SessionView {
 	}
 	return api.SessionView{
 		ID:              v.GetId(),
-		ClientID:        v.GetClientId(),
 		ConversationRef: v.GetConversationRef(),
 		State:           api.SessionState(v.GetState()),
 		Template:        v.GetTemplate(),
-		ParentSessionID: v.GetParentSessionId(),
-		Principal:       v.GetPrincipal(),
-		ApproverSubject: v.GetApproverSubject(),
-		ApprovalURL:     v.GetApprovalUrl(),
-		RunID:           v.GetRunId(),
-		RunExpiresAt:    Time(v.GetRunExpiresAt()),
 		LastSeq:         v.GetLastSeq(),
-		CreatedAt:       Time(v.GetCreatedAt()),
-		UpdatedAt:       Time(v.GetUpdatedAt()),
-		SuspendedAt:     Time(v.GetSuspendedAt()),
-		Metadata:        v.GetMetadata(),
 	}
 }
 

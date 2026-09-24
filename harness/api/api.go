@@ -75,44 +75,18 @@ func Errorf(sentinel error, format string, args ...any) error {
 // Kubernetes and no credential detail by construction.
 type SessionView struct {
 	ID              string       `json:"id"`
-	ClientID        string       `json:"client_id"`
 	ConversationRef string       `json:"conversation_ref"`
 	State           SessionState `json:"state"`
 	Template        string       `json:"template"`
-	// ParentSessionID records lineage: the session this one was derived from.
-	ParentSessionID string `json:"parent_session_id,omitempty"`
-	// Principal is the expected approver the client nominated at creation, when
-	// it knew one. It is stored server-side and a client cannot widen it later.
-	Principal string `json:"principal,omitempty"`
-	// ApproverSubject is the verified IdP subject that approved this session's
-	// run, once one has. Empty until then.
-	ApproverSubject string `json:"approver_subject,omitempty"`
-	// ApprovalURL is the current consent page, while one is outstanding.
-	ApprovalURL  string    `json:"approval_url,omitempty"`
-	RunID        string    `json:"run_id,omitempty"`
-	RunExpiresAt time.Time `json:"run_expires_at,omitempty"`
 	// LastSeq is the highest event sequence allocated for this session, so a
 	// client can start a subscription from a known point.
-	LastSeq     int64     `json:"last_seq"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	SuspendedAt time.Time `json:"suspended_at,omitempty"`
-	// Metadata is the client's own presentation state, as it last wrote it with
-	// SetSessionMetadata. The platform stores the bytes and never looks inside
-	// them.
-	Metadata []byte `json:"metadata,omitempty"`
+	LastSeq int64 `json:"last_seq"`
 }
 
 // TemplateSummary is one entry of ListTemplates: what a client may run.
 type TemplateSummary struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
-}
-
-// Approval is a fresh consent page for a session whose window is expiring.
-type Approval struct {
-	ApprovalURL string    `json:"approval_url"`
-	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 // --- requests ----------------------------------------------------------------
@@ -135,12 +109,6 @@ type CreateSessionRequest struct {
 	// ConversationRef is an opaque, client-owned string, unique per client while a
 	// session is live.
 	ConversationRef string `json:"conversation_ref"`
-	// Principal is the expected approver's IdP subject when the client knows one.
-	// Empty means "whoever the approve route's policy admits".
-	Principal string `json:"principal,omitempty"`
-	// IdempotencyKey governs create-retry semantics: a duplicate returns the
-	// existing session rather than a second one.
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	// ParentSessionID records lineage for a derived session.
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	// ApprovalPrompt is what the human approver reads on the consent page. It
@@ -156,9 +124,6 @@ type CreateSessionRequest struct {
 	// has no opinion about mrkdwn. It is snapshotted with the template, so a
 	// revive keeps it.
 	SystemPromptAppendix string `json:"system_prompt_appendix,omitempty"`
-	// OriginKind is the client's own classification of how this session came to
-	// exist. The platform stores and returns it without interpreting it.
-	OriginKind string `json:"origin_kind,omitempty"`
 }
 
 // SessionRef addresses a session by id or by conversation, always within a
@@ -176,7 +141,7 @@ type SessionRef struct {
 	// transcript into an agent wired to upstreams nobody consented to. Without
 	// this the client can only see live sessions and has to guess.
 	//
-	// Verbs that act on a session (Prompt, Suspend, EndSession) ignore it: they
+	// Verbs that act on a session (Prompt, EndSession) ignore it: they
 	// operate on the live one or on nothing.
 	IncludeTerminal bool `json:"include_terminal,omitempty"`
 }
@@ -190,15 +155,6 @@ type PromptRequest struct {
 // PromptResult reports the turn the prompt opened.
 type PromptResult struct {
 	TurnID string `json:"turn_id"`
-	// Revived is true when this prompt is what brought a suspended session back —
-	// a new pod, a new run, and a fresh approval the client must deliver.
-	Revived bool `json:"revived,omitempty"`
-}
-
-// CancelTurnRequest interrupts a running turn.
-type CancelTurnRequest struct {
-	Ref    SessionRef `json:"ref"`
-	TurnID string     `json:"turn_id,omitempty"`
 }
 
 // RespondPermissionRequest answers an outstanding permission request.
@@ -240,24 +196,6 @@ type ListSessionsRequest struct {
 	// about, and LiveOnly is what hides it. Zero means no lower bound.
 	UpdatedSince time.Time `json:"updated_since,omitempty"`
 }
-
-// SetSessionMetadataRequest stores a client's own state against a session.
-//
-// The platform keeps the bytes and forms no opinion about them: this is where a
-// client puts what it, and only it, needs to render the session again after a
-// restart — which message it posted, what it has already shown. It exists so a
-// client needs no database of its own to be stateless, and so the platform never
-// has to hold a table shaped like somebody else's product.
-type SetSessionMetadataRequest struct {
-	Ref SessionRef `json:"ref"`
-	// Metadata replaces whatever was stored. It is capped (MaxMetadataBytes);
-	// larger is ErrInvalidArgument, because this is a handle for presentation
-	// state, not a document store.
-	Metadata []byte `json:"metadata,omitempty"`
-}
-
-// MaxMetadataBytes caps one session's client metadata.
-const MaxMetadataBytes = 16 << 10
 
 // KeepaliveInterval is how often a subscription carries a keepalive while
 // nothing else is happening on it.
@@ -305,16 +243,11 @@ type Subscription interface {
 type API interface {
 	CreateSession(ctx context.Context, req CreateSessionRequest) (SessionView, error)
 	Prompt(ctx context.Context, req PromptRequest) (PromptResult, error)
-	CancelTurn(ctx context.Context, req CancelTurnRequest) error
 	RespondPermission(ctx context.Context, req RespondPermissionRequest) error
-	Suspend(ctx context.Context, ref SessionRef) error
 	EndSession(ctx context.Context, req EndSessionRequest) error
-	DeleteWorkspace(ctx context.Context, ref SessionRef) error
 	GetSession(ctx context.Context, ref SessionRef) (SessionView, error)
 	ListSessions(ctx context.Context, req ListSessionsRequest) ([]SessionView, error)
 	ListTemplates(ctx context.Context, clientID string) ([]TemplateSummary, error)
-	ReissueApproval(ctx context.Context, ref SessionRef) (Approval, error)
 	ListEvents(ctx context.Context, req EventsRequest) ([]Event, error)
 	Subscribe(ctx context.Context, req SubscribeRequest) (Subscription, error)
-	SetSessionMetadata(ctx context.Context, req SetSessionMetadataRequest) error
 }
