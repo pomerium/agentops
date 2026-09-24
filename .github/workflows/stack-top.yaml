@@ -1,0 +1,46 @@
+name: Stack top
+# Reusable gate: is this run worth doing?
+#
+# A pull request is the top of its stack when no open pull request uses its head
+# branch as a base. Only the top runs the suites: its merge ref already contains
+# every layer beneath it, so running them on each lower layer as well would test
+# the same code once per layer. Anything other than a pull request (a push to
+# main, a tag, a release) always runs.
+#
+# Callers need `pull-requests: read` on the job that uses this.
+permissions:
+  contents: read
+on:
+  workflow_call:
+    outputs:
+      top:
+        description: "'true' when the calling run should do its work"
+        value: ${{ jobs.gate.outputs.top }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      top: ${{ steps.check.outputs.top }}
+    steps:
+      - name: Look for pull requests stacked on this one
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]; then
+            echo "top=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          above=$(gh pr list --repo "$GITHUB_REPOSITORY" --base "$HEAD_REF" --state open \
+            --json number --jq 'map("#\(.number)") | join(" ")')
+          if [[ -n "$above" ]]; then
+            echo "Stacked under $above; the top of the stack runs the checks."
+            echo "top=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "top=true" >> "$GITHUB_OUTPUT"
+          fi
