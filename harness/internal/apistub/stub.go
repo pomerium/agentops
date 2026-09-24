@@ -107,9 +107,14 @@ var _ api.API = (*Stub)(nil)
 
 // session is one scripted session: its view, its log, and whoever is listening.
 type session struct {
-	view   api.SessionView
-	events []api.Event
-	subs   map[*subscription]struct{}
+	view api.SessionView
+	// clientID, createdAt and updatedAt are what the stub scopes, orders and
+	// filters by. The view does not carry them: no client reads them back.
+	clientID  string
+	createdAt time.Time
+	updatedAt time.Time
+	events    []api.Event
+	subs      map[*subscription]struct{}
 	// finished marks a log that will never grow again, which is what closes a
 	// subscriber's channel and what makes a later Subscribe succeed with nothing
 	// to deliver rather than hang.
@@ -118,8 +123,6 @@ type session struct {
 	pending string
 	// turn is the turn a blocked permission request belongs to.
 	turn string
-	// idempotencyKey is what CreateSession recognizes a retry by.
-	idempotencyKey string
 	// turns counts completed turns, for naming the next one.
 	turns int
 }
@@ -140,20 +143,10 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// An idempotency key returns the session it already made rather than a second
-	// one, and a live conversation refuses a second session outright. Both are the
-	// service's semantics and both are things a client's retry path depends on.
+	// A live conversation refuses a second session outright, as the service does.
 	for _, sess := range s.sessions {
-		if sess.view.ClientID != req.ClientID {
+		if sess.clientID != req.ClientID {
 			continue
-		}
-		// The conversation has to match too, not just the key. A key identifies a
-		// retry of one call, and a client that reused one for a different
-		// conversation would otherwise be handed a session for the wrong thread —
-		// silently, which is the worst way to find out.
-		if req.IdempotencyKey != "" && sess.idempotencyKey == req.IdempotencyKey &&
-			sess.view.ConversationRef == req.ConversationRef {
-			return sess.view, nil
 		}
 		if sess.view.ConversationRef == req.ConversationRef && sess.view.State.Live() {
 			return api.SessionView{}, api.Errorf(api.ErrConflict,
@@ -167,17 +160,14 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	sess := &session{
 		view: api.SessionView{
 			ID:              id,
-			ClientID:        req.ClientID,
 			ConversationRef: req.ConversationRef,
 			State:           api.StatePending,
 			Template:        req.Template,
-			ParentSessionID: req.ParentSessionID,
-			Principal:       req.Principal,
-			CreatedAt:       now,
-			UpdatedAt:       now,
 		},
-		subs:           map[*subscription]struct{}{},
-		idempotencyKey: req.IdempotencyKey,
+		clientID:  req.ClientID,
+		createdAt: now,
+		updatedAt: now,
+		subs:      map[*subscription]struct{}{},
 	}
 	s.sessions[id] = sess
 
@@ -191,12 +181,10 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	// immediately so a suite can get to a turn without one.
 	s.transition(sess, api.StateLaunching, api.ReasonLaunch)
 	s.transition(sess, api.StateAwaitingApproval, "")
-	sess.view.ApprovalURL = "https://stub.invalid/approve/" + id
 	s.emit(sess, api.EventApprovalRequired, "", api.ApprovalRequired{
-		ApprovalURL: sess.view.ApprovalURL,
+		ApprovalURL: "https://stub.invalid/approve/" + id,
 		ExpiresAt:   s.peek().Add(10 * time.Minute),
 	})
-	sess.view.ApproverSubject = StubApproverSubject
 	s.emit(sess, api.EventApproved, "", api.Approved{ApproverSubject: StubApproverSubject})
 	s.transition(sess, api.StateRunning, "")
 
@@ -217,50 +205,13 @@ func (s *Stub) Prompt(_ context.Context, req api.PromptRequest) (api.PromptResul
 		return api.PromptResult{}, api.Errorf(api.ErrInvalidArgument, "a prompt needs content")
 	}
 
-	revived := false
-	switch sess.view.State {
-	case api.StateRunning:
-	case api.StateSuspended:
-		// Revive is a Prompt, not a verb of its own: same workspace, new pod, new
-		// run, and a fresh approval the client has to deliver again.
-		revived = true
-		s.transition(sess, api.StateRunning, api.ReasonRevive)
-		s.emit(sess, api.EventRevived, "", api.Revived{})
-		sess.view.ApprovalURL = "https://stub.invalid/approve/" + sess.view.ID
-		s.emit(sess, api.EventApprovalRequired, "", api.ApprovalRequired{
-			ApprovalURL: sess.view.ApprovalURL,
-			ExpiresAt:   s.peek().Add(10 * time.Minute),
-		})
-	default:
+	if sess.view.State != api.StateRunning {
 		return api.PromptResult{}, api.Errorf(api.ErrInvalidState,
 			"a prompt does not apply to a %s session", sess.view.State)
 	}
 
 	turn := s.runTurn(sess, req.Content)
-	return api.PromptResult{TurnID: turn, Revived: revived}, nil
-}
-
-func (s *Stub) CancelTurn(_ context.Context, req api.CancelTurnRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
-	if err != nil {
-		return err
-	}
-	turn := req.TurnID
-	if turn == "" {
-		turn = sess.turn
-	}
-	// A cancelled turn takes any outstanding permission request with it, which is
-	// what stops a client leaving buttons live forever.
-	if sess.pending != "" {
-		s.emit(sess, api.EventPermissionResolved, sess.turn, api.PermissionResolved{
-			RequestID: sess.pending, Resolution: api.ResolutionSuperseded,
-		})
-		sess.pending = ""
-	}
-	s.emit(sess, api.EventTurnCompleted, turn, api.TurnCompleted{StopReason: "cancelled"})
-	return nil
+	return api.PromptResult{TurnID: turn}, nil
 }
 
 func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionRequest) error {
@@ -290,24 +241,6 @@ func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionReq
 	return nil
 }
 
-func (s *Stub) Suspend(_ context.Context, ref api.SessionRef) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(ref)
-	if err != nil {
-		return err
-	}
-	if sess.view.State != api.StateRunning {
-		return api.Errorf(api.ErrInvalidState, "a %s session cannot be suspended", sess.view.State)
-	}
-	s.transition(sess, api.StateSuspended, api.ReasonClient)
-	sess.view.SuspendedAt = s.peek()
-	s.emit(sess, api.EventSuspended, "", api.Suspended{
-		Reason: api.ReasonClient, RetainedFor: time.Hour,
-	})
-	return nil
-}
-
 func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -328,18 +261,6 @@ func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
 	return nil
 }
 
-func (s *Stub) DeleteWorkspace(_ context.Context, ref api.SessionRef) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(ref)
-	if err != nil {
-		return err
-	}
-	s.finish(sess)
-	delete(s.sessions, sess.view.ID)
-	return nil
-}
-
 func (s *Stub) GetSession(_ context.Context, ref api.SessionRef) (api.SessionView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -355,13 +276,13 @@ func (s *Stub) ListSessions(_ context.Context, req api.ListSessionsRequest) ([]a
 	defer s.mu.Unlock()
 	var out []api.SessionView
 	for _, sess := range s.sessions {
-		if sess.view.ClientID != req.ClientID {
+		if sess.clientID != req.ClientID {
 			continue
 		}
 		if req.LiveOnly && !sess.view.State.Live() {
 			continue
 		}
-		if !req.UpdatedSince.IsZero() && sess.view.UpdatedAt.Before(req.UpdatedSince) {
+		if !req.UpdatedSince.IsZero() && sess.updatedAt.Before(req.UpdatedSince) {
 			continue
 		}
 		out = append(out, sess.view)
@@ -376,25 +297,6 @@ func (s *Stub) ListTemplates(_ context.Context, _ string) ([]api.TemplateSummary
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]api.TemplateSummary(nil), s.tmpls...), nil
-}
-
-func (s *Stub) ReissueApproval(_ context.Context, ref api.SessionRef) (api.Approval, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(ref)
-	if err != nil {
-		return api.Approval{}, err
-	}
-	if sess.view.State.Terminal() {
-		return api.Approval{}, api.Errorf(api.ErrInvalidState, "this session has ended")
-	}
-	url := "https://stub.invalid/approve/" + sess.view.ID + "?reissued=1"
-	expires := s.peek().Add(10 * time.Minute)
-	sess.view.ApprovalURL = url
-	s.emit(sess, api.EventApprovalRequired, "", api.ApprovalRequired{
-		ApprovalURL: url, ExpiresAt: expires, Reissued: true,
-	})
-	return api.Approval{ApprovalURL: url, ExpiresAt: expires}, nil
 }
 
 func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]api.Event, error) {
@@ -419,22 +321,6 @@ func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]api.Event
 		out = append(out, ev)
 	}
 	return out, nil
-}
-
-func (s *Stub) SetSessionMetadata(_ context.Context, req api.SetSessionMetadataRequest) error {
-	if len(req.Metadata) > api.MaxMetadataBytes {
-		return api.Errorf(api.ErrInvalidArgument,
-			"metadata is %d bytes, over the %d-byte cap", len(req.Metadata), api.MaxMetadataBytes)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
-	if err != nil {
-		return err
-	}
-	sess.view.Metadata = req.Metadata
-	sess.view.UpdatedAt = s.tick()
-	return nil
 }
 
 func (s *Stub) Subscribe(_ context.Context, req api.SubscribeRequest) (api.Subscription, error) {
@@ -581,7 +467,7 @@ func (s *Stub) emitRaw(sess *session, ev api.Event) {
 	ev.Seq = sess.view.LastSeq + 1
 	ev.At = s.tick()
 	sess.view.LastSeq = ev.Seq
-	sess.view.UpdatedAt = ev.At
+	sess.updatedAt = ev.At
 	sess.events = append(sess.events, ev)
 	s.broadcast(sess, ev)
 }
@@ -658,7 +544,7 @@ func (s *Stub) find(ref api.SessionRef) (*session, error) {
 
 	if ref.SessionID != "" {
 		sess, ok := s.sessions[ref.SessionID]
-		if !ok || sess.view.ClientID != ref.ClientID {
+		if !ok || sess.clientID != ref.ClientID {
 			return nil, api.Errorf(api.ErrNotFound, "no session %q", ref.SessionID)
 		}
 		return sess, nil
@@ -666,13 +552,13 @@ func (s *Stub) find(ref api.SessionRef) (*session, error) {
 
 	var best *session
 	for _, sess := range s.sessions {
-		if sess.view.ClientID != ref.ClientID || sess.view.ConversationRef != ref.ConversationRef {
+		if sess.clientID != ref.ClientID || sess.view.ConversationRef != ref.ConversationRef {
 			continue
 		}
 		if !ref.IncludeTerminal && sess.view.State.Terminal() {
 			continue
 		}
-		if best == nil || sess.view.CreatedAt.After(best.view.CreatedAt) {
+		if best == nil || sess.createdAt.After(best.createdAt) {
 			best = sess
 		}
 	}

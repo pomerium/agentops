@@ -45,13 +45,10 @@ func (h *handler) CreateSession(ctx context.Context, req *connect.Request[pb.Cre
 		ClientID:             id,
 		Template:             m.GetTemplate(),
 		ConversationRef:      m.GetConversationRef(),
-		Principal:            m.GetPrincipal(),
-		IdempotencyKey:       m.GetIdempotencyKey(),
 		ParentSessionID:      m.GetParentSessionId(),
 		ApprovalPrompt:       m.GetApprovalPrompt(),
 		InitialPrompt:        m.GetInitialPrompt(),
 		SystemPromptAppendix: m.GetSystemPromptAppendix(),
-		OriginKind:           m.GetOriginKind(),
 	})
 	if err != nil {
 		return nil, wire.ToConnect(err)
@@ -71,21 +68,7 @@ func (h *handler) Prompt(ctx context.Context, req *connect.Request[pb.PromptRequ
 	if err != nil {
 		return nil, wire.ToConnect(err)
 	}
-	return connect.NewResponse(&pb.PromptResponse{TurnId: res.TurnID, Revived: res.Revived}), nil
-}
-
-func (h *handler) CancelTurn(ctx context.Context, req *connect.Request[pb.CancelTurnRequest]) (*connect.Response[pb.CancelTurnResponse], error) {
-	id, err := clientID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.svc.CancelTurn(ctx, api.CancelTurnRequest{
-		Ref:    wire.RefFrom(req.Msg.GetRef(), id),
-		TurnID: req.Msg.GetTurnId(),
-	}); err != nil {
-		return nil, wire.ToConnect(err)
-	}
-	return connect.NewResponse(&pb.CancelTurnResponse{}), nil
+	return connect.NewResponse(&pb.PromptResponse{TurnId: res.TurnID}), nil
 }
 
 func (h *handler) RespondPermission(ctx context.Context, req *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error) {
@@ -103,17 +86,6 @@ func (h *handler) RespondPermission(ctx context.Context, req *connect.Request[pb
 	return connect.NewResponse(&pb.RespondPermissionResponse{}), nil
 }
 
-func (h *handler) Suspend(ctx context.Context, req *connect.Request[pb.SuspendRequest]) (*connect.Response[pb.SuspendResponse], error) {
-	id, err := clientID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.svc.Suspend(ctx, wire.RefFrom(req.Msg.GetRef(), id)); err != nil {
-		return nil, wire.ToConnect(err)
-	}
-	return connect.NewResponse(&pb.SuspendResponse{}), nil
-}
-
 func (h *handler) EndSession(ctx context.Context, req *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error) {
 	id, err := clientID(ctx)
 	if err != nil {
@@ -126,17 +98,6 @@ func (h *handler) EndSession(ctx context.Context, req *connect.Request[pb.EndSes
 		return nil, wire.ToConnect(err)
 	}
 	return connect.NewResponse(&pb.EndSessionResponse{}), nil
-}
-
-func (h *handler) DeleteWorkspace(ctx context.Context, req *connect.Request[pb.DeleteWorkspaceRequest]) (*connect.Response[pb.DeleteWorkspaceResponse], error) {
-	id, err := clientID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.svc.DeleteWorkspace(ctx, wire.RefFrom(req.Msg.GetRef(), id)); err != nil {
-		return nil, wire.ToConnect(err)
-	}
-	return connect.NewResponse(&pb.DeleteWorkspaceResponse{}), nil
 }
 
 func (h *handler) GetSession(ctx context.Context, req *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error) {
@@ -187,21 +148,6 @@ func (h *handler) ListTemplates(ctx context.Context, _ *connect.Request[pb.ListT
 	return connect.NewResponse(out), nil
 }
 
-func (h *handler) ReissueApproval(ctx context.Context, req *connect.Request[pb.ReissueApprovalRequest]) (*connect.Response[pb.ReissueApprovalResponse], error) {
-	id, err := clientID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	appr, err := h.svc.ReissueApproval(ctx, wire.RefFrom(req.Msg.GetRef(), id))
-	if err != nil {
-		return nil, wire.ToConnect(err)
-	}
-	return connect.NewResponse(&pb.ReissueApprovalResponse{
-		ApprovalUrl: appr.ApprovalURL,
-		ExpiresAt:   wire.Timestamp(appr.ExpiresAt),
-	}), nil
-}
-
 func (h *handler) ListEvents(ctx context.Context, req *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error) {
 	id, err := clientID(ctx)
 	if err != nil {
@@ -220,20 +166,6 @@ func (h *handler) ListEvents(ctx context.Context, req *connect.Request[pb.ListEv
 		out.Events = append(out.Events, wire.Event(ev))
 	}
 	return connect.NewResponse(out), nil
-}
-
-func (h *handler) SetSessionMetadata(ctx context.Context, req *connect.Request[pb.SetSessionMetadataRequest]) (*connect.Response[pb.SetSessionMetadataResponse], error) {
-	id, err := clientID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := h.svc.SetSessionMetadata(ctx, api.SetSessionMetadataRequest{
-		Ref:      wire.RefFrom(req.Msg.GetRef(), id),
-		Metadata: req.Msg.GetMetadata(),
-	}); err != nil {
-		return nil, wire.ToConnect(err)
-	}
-	return connect.NewResponse(&pb.SetSessionMetadataResponse{}), nil
 }
 
 func (h *handler) Subscribe(ctx context.Context, req *connect.Request[pb.SubscribeRequest], stream *connect.ServerStream[pb.SubscribeResponse]) error {
