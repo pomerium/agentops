@@ -39,21 +39,12 @@ const (
 	// HarnessAPIServicePromptProcedure is the fully-qualified name of the HarnessAPIService's Prompt
 	// RPC.
 	HarnessAPIServicePromptProcedure = "/harnessapi.v1.HarnessAPIService/Prompt"
-	// HarnessAPIServiceCancelTurnProcedure is the fully-qualified name of the HarnessAPIService's
-	// CancelTurn RPC.
-	HarnessAPIServiceCancelTurnProcedure = "/harnessapi.v1.HarnessAPIService/CancelTurn"
 	// HarnessAPIServiceRespondPermissionProcedure is the fully-qualified name of the
 	// HarnessAPIService's RespondPermission RPC.
 	HarnessAPIServiceRespondPermissionProcedure = "/harnessapi.v1.HarnessAPIService/RespondPermission"
-	// HarnessAPIServiceSuspendProcedure is the fully-qualified name of the HarnessAPIService's Suspend
-	// RPC.
-	HarnessAPIServiceSuspendProcedure = "/harnessapi.v1.HarnessAPIService/Suspend"
 	// HarnessAPIServiceEndSessionProcedure is the fully-qualified name of the HarnessAPIService's
 	// EndSession RPC.
 	HarnessAPIServiceEndSessionProcedure = "/harnessapi.v1.HarnessAPIService/EndSession"
-	// HarnessAPIServiceDeleteWorkspaceProcedure is the fully-qualified name of the HarnessAPIService's
-	// DeleteWorkspace RPC.
-	HarnessAPIServiceDeleteWorkspaceProcedure = "/harnessapi.v1.HarnessAPIService/DeleteWorkspace"
 	// HarnessAPIServiceGetSessionProcedure is the fully-qualified name of the HarnessAPIService's
 	// GetSession RPC.
 	HarnessAPIServiceGetSessionProcedure = "/harnessapi.v1.HarnessAPIService/GetSession"
@@ -63,15 +54,9 @@ const (
 	// HarnessAPIServiceListTemplatesProcedure is the fully-qualified name of the HarnessAPIService's
 	// ListTemplates RPC.
 	HarnessAPIServiceListTemplatesProcedure = "/harnessapi.v1.HarnessAPIService/ListTemplates"
-	// HarnessAPIServiceReissueApprovalProcedure is the fully-qualified name of the HarnessAPIService's
-	// ReissueApproval RPC.
-	HarnessAPIServiceReissueApprovalProcedure = "/harnessapi.v1.HarnessAPIService/ReissueApproval"
 	// HarnessAPIServiceListEventsProcedure is the fully-qualified name of the HarnessAPIService's
 	// ListEvents RPC.
 	HarnessAPIServiceListEventsProcedure = "/harnessapi.v1.HarnessAPIService/ListEvents"
-	// HarnessAPIServiceSetSessionMetadataProcedure is the fully-qualified name of the
-	// HarnessAPIService's SetSessionMetadata RPC.
-	HarnessAPIServiceSetSessionMetadataProcedure = "/harnessapi.v1.HarnessAPIService/SetSessionMetadata"
 	// HarnessAPIServiceSubscribeProcedure is the fully-qualified name of the HarnessAPIService's
 	// Subscribe RPC.
 	HarnessAPIServiceSubscribeProcedure = "/harnessapi.v1.HarnessAPIService/Subscribe"
@@ -84,29 +69,18 @@ type HarnessAPIServiceClient interface {
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
 	// Prompt sends one turn. On a suspended session it is the revive.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
-	// CancelTurn interrupts a running turn.
-	CancelTurn(context.Context, *connect.Request[pb.CancelTurnRequest]) (*connect.Response[pb.CancelTurnResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
-	// Suspend frees a session's pod and keeps its workspace.
-	Suspend(context.Context, *connect.Request[pb.SuspendRequest]) (*connect.Response[pb.SuspendResponse], error)
 	// EndSession ends a session and releases its workspace.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
-	// DeleteWorkspace erases a session, its workspace and its event log.
-	DeleteWorkspace(context.Context, *connect.Request[pb.DeleteWorkspaceRequest]) (*connect.Response[pb.DeleteWorkspaceResponse], error)
 	// GetSession returns one session, by id or by conversation ref.
 	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
 	// ListSessions enumerates the calling client's sessions and nobody else's.
 	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
 	// ListTemplates reports what this client may run.
 	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
-	// ReissueApproval hands back a consent page for a session still waiting on one.
-	ReissueApproval(context.Context, *connect.Request[pb.ReissueApprovalRequest]) (*connect.Response[pb.ReissueApprovalResponse], error)
 	// ListEvents reads a page of a session's event history.
 	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
-	// SetSessionMetadata stores the client's own presentation state against a
-	// session. The platform never reads inside it.
-	SetSessionMetadata(context.Context, *connect.Request[pb.SetSessionMetadataRequest]) (*connect.Response[pb.SetSessionMetadataResponse], error)
 	// Subscribe streams a session's events, replaying anything after after_seq
 	// first.
 	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest]) (*connect.ServerStreamForClient[pb.SubscribeResponse], error)
@@ -135,34 +109,16 @@ func NewHarnessAPIServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(harnessAPIServiceMethods.ByName("Prompt")),
 			connect.WithClientOptions(opts...),
 		),
-		cancelTurn: connect.NewClient[pb.CancelTurnRequest, pb.CancelTurnResponse](
-			httpClient,
-			baseURL+HarnessAPIServiceCancelTurnProcedure,
-			connect.WithSchema(harnessAPIServiceMethods.ByName("CancelTurn")),
-			connect.WithClientOptions(opts...),
-		),
 		respondPermission: connect.NewClient[pb.RespondPermissionRequest, pb.RespondPermissionResponse](
 			httpClient,
 			baseURL+HarnessAPIServiceRespondPermissionProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("RespondPermission")),
 			connect.WithClientOptions(opts...),
 		),
-		suspend: connect.NewClient[pb.SuspendRequest, pb.SuspendResponse](
-			httpClient,
-			baseURL+HarnessAPIServiceSuspendProcedure,
-			connect.WithSchema(harnessAPIServiceMethods.ByName("Suspend")),
-			connect.WithClientOptions(opts...),
-		),
 		endSession: connect.NewClient[pb.EndSessionRequest, pb.EndSessionResponse](
 			httpClient,
 			baseURL+HarnessAPIServiceEndSessionProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("EndSession")),
-			connect.WithClientOptions(opts...),
-		),
-		deleteWorkspace: connect.NewClient[pb.DeleteWorkspaceRequest, pb.DeleteWorkspaceResponse](
-			httpClient,
-			baseURL+HarnessAPIServiceDeleteWorkspaceProcedure,
-			connect.WithSchema(harnessAPIServiceMethods.ByName("DeleteWorkspace")),
 			connect.WithClientOptions(opts...),
 		),
 		getSession: connect.NewClient[pb.GetSessionRequest, pb.GetSessionResponse](
@@ -183,22 +139,10 @@ func NewHarnessAPIServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			connect.WithSchema(harnessAPIServiceMethods.ByName("ListTemplates")),
 			connect.WithClientOptions(opts...),
 		),
-		reissueApproval: connect.NewClient[pb.ReissueApprovalRequest, pb.ReissueApprovalResponse](
-			httpClient,
-			baseURL+HarnessAPIServiceReissueApprovalProcedure,
-			connect.WithSchema(harnessAPIServiceMethods.ByName("ReissueApproval")),
-			connect.WithClientOptions(opts...),
-		),
 		listEvents: connect.NewClient[pb.ListEventsRequest, pb.ListEventsResponse](
 			httpClient,
 			baseURL+HarnessAPIServiceListEventsProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("ListEvents")),
-			connect.WithClientOptions(opts...),
-		),
-		setSessionMetadata: connect.NewClient[pb.SetSessionMetadataRequest, pb.SetSessionMetadataResponse](
-			httpClient,
-			baseURL+HarnessAPIServiceSetSessionMetadataProcedure,
-			connect.WithSchema(harnessAPIServiceMethods.ByName("SetSessionMetadata")),
 			connect.WithClientOptions(opts...),
 		),
 		subscribe: connect.NewClient[pb.SubscribeRequest, pb.SubscribeResponse](
@@ -212,20 +156,15 @@ func NewHarnessAPIServiceClient(httpClient connect.HTTPClient, baseURL string, o
 
 // harnessAPIServiceClient implements HarnessAPIServiceClient.
 type harnessAPIServiceClient struct {
-	createSession      *connect.Client[pb.CreateSessionRequest, pb.CreateSessionResponse]
-	prompt             *connect.Client[pb.PromptRequest, pb.PromptResponse]
-	cancelTurn         *connect.Client[pb.CancelTurnRequest, pb.CancelTurnResponse]
-	respondPermission  *connect.Client[pb.RespondPermissionRequest, pb.RespondPermissionResponse]
-	suspend            *connect.Client[pb.SuspendRequest, pb.SuspendResponse]
-	endSession         *connect.Client[pb.EndSessionRequest, pb.EndSessionResponse]
-	deleteWorkspace    *connect.Client[pb.DeleteWorkspaceRequest, pb.DeleteWorkspaceResponse]
-	getSession         *connect.Client[pb.GetSessionRequest, pb.GetSessionResponse]
-	listSessions       *connect.Client[pb.ListSessionsRequest, pb.ListSessionsResponse]
-	listTemplates      *connect.Client[pb.ListTemplatesRequest, pb.ListTemplatesResponse]
-	reissueApproval    *connect.Client[pb.ReissueApprovalRequest, pb.ReissueApprovalResponse]
-	listEvents         *connect.Client[pb.ListEventsRequest, pb.ListEventsResponse]
-	setSessionMetadata *connect.Client[pb.SetSessionMetadataRequest, pb.SetSessionMetadataResponse]
-	subscribe          *connect.Client[pb.SubscribeRequest, pb.SubscribeResponse]
+	createSession     *connect.Client[pb.CreateSessionRequest, pb.CreateSessionResponse]
+	prompt            *connect.Client[pb.PromptRequest, pb.PromptResponse]
+	respondPermission *connect.Client[pb.RespondPermissionRequest, pb.RespondPermissionResponse]
+	endSession        *connect.Client[pb.EndSessionRequest, pb.EndSessionResponse]
+	getSession        *connect.Client[pb.GetSessionRequest, pb.GetSessionResponse]
+	listSessions      *connect.Client[pb.ListSessionsRequest, pb.ListSessionsResponse]
+	listTemplates     *connect.Client[pb.ListTemplatesRequest, pb.ListTemplatesResponse]
+	listEvents        *connect.Client[pb.ListEventsRequest, pb.ListEventsResponse]
+	subscribe         *connect.Client[pb.SubscribeRequest, pb.SubscribeResponse]
 }
 
 // CreateSession calls harnessapi.v1.HarnessAPIService.CreateSession.
@@ -238,29 +177,14 @@ func (c *harnessAPIServiceClient) Prompt(ctx context.Context, req *connect.Reque
 	return c.prompt.CallUnary(ctx, req)
 }
 
-// CancelTurn calls harnessapi.v1.HarnessAPIService.CancelTurn.
-func (c *harnessAPIServiceClient) CancelTurn(ctx context.Context, req *connect.Request[pb.CancelTurnRequest]) (*connect.Response[pb.CancelTurnResponse], error) {
-	return c.cancelTurn.CallUnary(ctx, req)
-}
-
 // RespondPermission calls harnessapi.v1.HarnessAPIService.RespondPermission.
 func (c *harnessAPIServiceClient) RespondPermission(ctx context.Context, req *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error) {
 	return c.respondPermission.CallUnary(ctx, req)
 }
 
-// Suspend calls harnessapi.v1.HarnessAPIService.Suspend.
-func (c *harnessAPIServiceClient) Suspend(ctx context.Context, req *connect.Request[pb.SuspendRequest]) (*connect.Response[pb.SuspendResponse], error) {
-	return c.suspend.CallUnary(ctx, req)
-}
-
 // EndSession calls harnessapi.v1.HarnessAPIService.EndSession.
 func (c *harnessAPIServiceClient) EndSession(ctx context.Context, req *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error) {
 	return c.endSession.CallUnary(ctx, req)
-}
-
-// DeleteWorkspace calls harnessapi.v1.HarnessAPIService.DeleteWorkspace.
-func (c *harnessAPIServiceClient) DeleteWorkspace(ctx context.Context, req *connect.Request[pb.DeleteWorkspaceRequest]) (*connect.Response[pb.DeleteWorkspaceResponse], error) {
-	return c.deleteWorkspace.CallUnary(ctx, req)
 }
 
 // GetSession calls harnessapi.v1.HarnessAPIService.GetSession.
@@ -278,19 +202,9 @@ func (c *harnessAPIServiceClient) ListTemplates(ctx context.Context, req *connec
 	return c.listTemplates.CallUnary(ctx, req)
 }
 
-// ReissueApproval calls harnessapi.v1.HarnessAPIService.ReissueApproval.
-func (c *harnessAPIServiceClient) ReissueApproval(ctx context.Context, req *connect.Request[pb.ReissueApprovalRequest]) (*connect.Response[pb.ReissueApprovalResponse], error) {
-	return c.reissueApproval.CallUnary(ctx, req)
-}
-
 // ListEvents calls harnessapi.v1.HarnessAPIService.ListEvents.
 func (c *harnessAPIServiceClient) ListEvents(ctx context.Context, req *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error) {
 	return c.listEvents.CallUnary(ctx, req)
-}
-
-// SetSessionMetadata calls harnessapi.v1.HarnessAPIService.SetSessionMetadata.
-func (c *harnessAPIServiceClient) SetSessionMetadata(ctx context.Context, req *connect.Request[pb.SetSessionMetadataRequest]) (*connect.Response[pb.SetSessionMetadataResponse], error) {
-	return c.setSessionMetadata.CallUnary(ctx, req)
 }
 
 // Subscribe calls harnessapi.v1.HarnessAPIService.Subscribe.
@@ -305,29 +219,18 @@ type HarnessAPIServiceHandler interface {
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
 	// Prompt sends one turn. On a suspended session it is the revive.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
-	// CancelTurn interrupts a running turn.
-	CancelTurn(context.Context, *connect.Request[pb.CancelTurnRequest]) (*connect.Response[pb.CancelTurnResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
-	// Suspend frees a session's pod and keeps its workspace.
-	Suspend(context.Context, *connect.Request[pb.SuspendRequest]) (*connect.Response[pb.SuspendResponse], error)
 	// EndSession ends a session and releases its workspace.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
-	// DeleteWorkspace erases a session, its workspace and its event log.
-	DeleteWorkspace(context.Context, *connect.Request[pb.DeleteWorkspaceRequest]) (*connect.Response[pb.DeleteWorkspaceResponse], error)
 	// GetSession returns one session, by id or by conversation ref.
 	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
 	// ListSessions enumerates the calling client's sessions and nobody else's.
 	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
 	// ListTemplates reports what this client may run.
 	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
-	// ReissueApproval hands back a consent page for a session still waiting on one.
-	ReissueApproval(context.Context, *connect.Request[pb.ReissueApprovalRequest]) (*connect.Response[pb.ReissueApprovalResponse], error)
 	// ListEvents reads a page of a session's event history.
 	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
-	// SetSessionMetadata stores the client's own presentation state against a
-	// session. The platform never reads inside it.
-	SetSessionMetadata(context.Context, *connect.Request[pb.SetSessionMetadataRequest]) (*connect.Response[pb.SetSessionMetadataResponse], error)
 	// Subscribe streams a session's events, replaying anything after after_seq
 	// first.
 	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest], *connect.ServerStream[pb.SubscribeResponse]) error
@@ -352,34 +255,16 @@ func NewHarnessAPIServiceHandler(svc HarnessAPIServiceHandler, opts ...connect.H
 		connect.WithSchema(harnessAPIServiceMethods.ByName("Prompt")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceCancelTurnHandler := connect.NewUnaryHandler(
-		HarnessAPIServiceCancelTurnProcedure,
-		svc.CancelTurn,
-		connect.WithSchema(harnessAPIServiceMethods.ByName("CancelTurn")),
-		connect.WithHandlerOptions(opts...),
-	)
 	harnessAPIServiceRespondPermissionHandler := connect.NewUnaryHandler(
 		HarnessAPIServiceRespondPermissionProcedure,
 		svc.RespondPermission,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("RespondPermission")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceSuspendHandler := connect.NewUnaryHandler(
-		HarnessAPIServiceSuspendProcedure,
-		svc.Suspend,
-		connect.WithSchema(harnessAPIServiceMethods.ByName("Suspend")),
-		connect.WithHandlerOptions(opts...),
-	)
 	harnessAPIServiceEndSessionHandler := connect.NewUnaryHandler(
 		HarnessAPIServiceEndSessionProcedure,
 		svc.EndSession,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("EndSession")),
-		connect.WithHandlerOptions(opts...),
-	)
-	harnessAPIServiceDeleteWorkspaceHandler := connect.NewUnaryHandler(
-		HarnessAPIServiceDeleteWorkspaceProcedure,
-		svc.DeleteWorkspace,
-		connect.WithSchema(harnessAPIServiceMethods.ByName("DeleteWorkspace")),
 		connect.WithHandlerOptions(opts...),
 	)
 	harnessAPIServiceGetSessionHandler := connect.NewUnaryHandler(
@@ -400,22 +285,10 @@ func NewHarnessAPIServiceHandler(svc HarnessAPIServiceHandler, opts ...connect.H
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListTemplates")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceReissueApprovalHandler := connect.NewUnaryHandler(
-		HarnessAPIServiceReissueApprovalProcedure,
-		svc.ReissueApproval,
-		connect.WithSchema(harnessAPIServiceMethods.ByName("ReissueApproval")),
-		connect.WithHandlerOptions(opts...),
-	)
 	harnessAPIServiceListEventsHandler := connect.NewUnaryHandler(
 		HarnessAPIServiceListEventsProcedure,
 		svc.ListEvents,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListEvents")),
-		connect.WithHandlerOptions(opts...),
-	)
-	harnessAPIServiceSetSessionMetadataHandler := connect.NewUnaryHandler(
-		HarnessAPIServiceSetSessionMetadataProcedure,
-		svc.SetSessionMetadata,
-		connect.WithSchema(harnessAPIServiceMethods.ByName("SetSessionMetadata")),
 		connect.WithHandlerOptions(opts...),
 	)
 	harnessAPIServiceSubscribeHandler := connect.NewServerStreamHandler(
@@ -430,28 +303,18 @@ func NewHarnessAPIServiceHandler(svc HarnessAPIServiceHandler, opts ...connect.H
 			harnessAPIServiceCreateSessionHandler.ServeHTTP(w, r)
 		case HarnessAPIServicePromptProcedure:
 			harnessAPIServicePromptHandler.ServeHTTP(w, r)
-		case HarnessAPIServiceCancelTurnProcedure:
-			harnessAPIServiceCancelTurnHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceRespondPermissionProcedure:
 			harnessAPIServiceRespondPermissionHandler.ServeHTTP(w, r)
-		case HarnessAPIServiceSuspendProcedure:
-			harnessAPIServiceSuspendHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceEndSessionProcedure:
 			harnessAPIServiceEndSessionHandler.ServeHTTP(w, r)
-		case HarnessAPIServiceDeleteWorkspaceProcedure:
-			harnessAPIServiceDeleteWorkspaceHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceGetSessionProcedure:
 			harnessAPIServiceGetSessionHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceListSessionsProcedure:
 			harnessAPIServiceListSessionsHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceListTemplatesProcedure:
 			harnessAPIServiceListTemplatesHandler.ServeHTTP(w, r)
-		case HarnessAPIServiceReissueApprovalProcedure:
-			harnessAPIServiceReissueApprovalHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceListEventsProcedure:
 			harnessAPIServiceListEventsHandler.ServeHTTP(w, r)
-		case HarnessAPIServiceSetSessionMetadataProcedure:
-			harnessAPIServiceSetSessionMetadataHandler.ServeHTTP(w, r)
 		case HarnessAPIServiceSubscribeProcedure:
 			harnessAPIServiceSubscribeHandler.ServeHTTP(w, r)
 		default:
@@ -471,24 +334,12 @@ func (UnimplementedHarnessAPIServiceHandler) Prompt(context.Context, *connect.Re
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.Prompt is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) CancelTurn(context.Context, *connect.Request[pb.CancelTurnRequest]) (*connect.Response[pb.CancelTurnResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.CancelTurn is not implemented"))
-}
-
 func (UnimplementedHarnessAPIServiceHandler) RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.RespondPermission is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) Suspend(context.Context, *connect.Request[pb.SuspendRequest]) (*connect.Response[pb.SuspendResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.Suspend is not implemented"))
-}
-
 func (UnimplementedHarnessAPIServiceHandler) EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.EndSession is not implemented"))
-}
-
-func (UnimplementedHarnessAPIServiceHandler) DeleteWorkspace(context.Context, *connect.Request[pb.DeleteWorkspaceRequest]) (*connect.Response[pb.DeleteWorkspaceResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.DeleteWorkspace is not implemented"))
 }
 
 func (UnimplementedHarnessAPIServiceHandler) GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error) {
@@ -503,16 +354,8 @@ func (UnimplementedHarnessAPIServiceHandler) ListTemplates(context.Context, *con
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.ListTemplates is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) ReissueApproval(context.Context, *connect.Request[pb.ReissueApprovalRequest]) (*connect.Response[pb.ReissueApprovalResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.ReissueApproval is not implemented"))
-}
-
 func (UnimplementedHarnessAPIServiceHandler) ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.ListEvents is not implemented"))
-}
-
-func (UnimplementedHarnessAPIServiceHandler) SetSessionMetadata(context.Context, *connect.Request[pb.SetSessionMetadataRequest]) (*connect.Response[pb.SetSessionMetadataResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.SetSessionMetadata is not implemented"))
 }
 
 func (UnimplementedHarnessAPIServiceHandler) Subscribe(context.Context, *connect.Request[pb.SubscribeRequest], *connect.ServerStream[pb.SubscribeResponse]) error {
