@@ -1,7 +1,7 @@
 # SDK conformance
 
 A client for this API is mostly easy and occasionally very hard. The easy part is
-the fourteen verbs. The hard part is a handful of conditions that a healthy
+the nine verbs. The hard part is a handful of conditions that a healthy
 server never produces, that a development laptop never shows you, and that
 production produces on the first bad afternoon: a proxy recycling a connection
 mid-stream, a hop that accepts a subscription and then goes quiet, a release that
@@ -125,7 +125,7 @@ Use `x-apistub-scenario-key` here, or the reconnect drops too.
 The two reference suites also cover, with no scenario header:
 
 - **the full lifecycle** — create, read the approval URL **off the log** (never
-  off the `createSession` response), prompt, set metadata, end;
+  off the `createSession` response), prompt, end;
 - **every published sentinel** — the suites assert their table covers the whole
   generated set, so an eleventh cannot slip in untested — including that the two
   pairs sharing a Connect code remain distinguishable by name;
@@ -145,12 +145,10 @@ The two reference suites also cover, with no scenario header:
 - **int64 as a JSON string** survives the round trip and stays an integer;
 - **the permission round trip**, including that answering twice is
   `ErrUnknownRequest` rather than a second decision;
-- **revive reports itself** — prompting a suspended session returns `revived`;
 - **conversation-ref addressing**, including `include_terminal` for "what ran
   here before?";
-- **conflict and idempotency** — a second live session on one conversation is
-  refused; a retry with the same key returns the first session;
-- **the 16 KiB metadata cap** and `ListEvents` paging;
+- **conflict** — a second live session on one conversation is refused;
+- **`ListEvents` paging**;
 - **the retry policy** — a retryable code is re-sent and then reported as the
   platform's own answer; a considered refusal is not retried at all (assert on
   elapsed time, or you are asserting nothing).

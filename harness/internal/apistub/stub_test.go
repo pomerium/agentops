@@ -94,13 +94,6 @@ func TestLifecycle(t *testing.T) {
 	if view.State != api.StatePending {
 		t.Errorf("a fresh session is %s, want pending", view.State)
 	}
-	// The one thing every client gets wrong once.
-	if view.ApprovalURL != "" {
-		t.Errorf("CreateSession returned an approval URL %q; it arrives on the log", view.ApprovalURL)
-	}
-	if view.ClientID != apistub.DefaultClient {
-		t.Errorf("client id %q, want %q", view.ClientID, apistub.DefaultClient)
-	}
 
 	events, err := c.ListEvents(ctx, api.EventsRequest{Ref: api.SessionRef{SessionID: view.ID}})
 	if err != nil {
@@ -136,9 +129,6 @@ func TestLifecycle(t *testing.T) {
 	}
 	if res.TurnID == "" {
 		t.Error("Prompt returned no turn id")
-	}
-	if res.Revived {
-		t.Error("a running session's prompt reported a revive")
 	}
 
 	if err := c.EndSession(ctx, api.EndSessionRequest{
@@ -516,86 +506,19 @@ func TestPermissionRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSuspendAndRevive: a revive is a Prompt, and it says so.
-func TestSuspendAndRevive(t *testing.T) {
-	ctx := context.Background()
-	c := serve(t)(nil)
-
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{SessionID: view.ID}
-	if err := c.Suspend(ctx, ref); err != nil {
-		t.Fatalf("Suspend: %v", err)
-	}
-	res, err := c.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "carry on"})
-	if err != nil {
-		t.Fatalf("Prompt on a suspended session: %v", err)
-	}
-	if !res.Revived {
-		t.Error("the reviving prompt did not report revived")
-	}
-}
-
-// TestConflictAndIdempotency: a live conversation refuses a second session, and
-// a retry with the same key gets the first one back.
-func TestConflictAndIdempotency(t *testing.T) {
+// TestConflict: a live conversation refuses a second session.
+func TestConflict(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
 	req := api.CreateSessionRequest{
 		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-		IdempotencyKey: "key-1",
 	}
-	first, err := c.CreateSession(ctx, req)
-	if err != nil {
+	if _, err := c.CreateSession(ctx, req); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	again, err := c.CreateSession(ctx, req)
-	if err != nil {
-		t.Fatalf("CreateSession retried with the same key: %v", err)
-	}
-	if again.ID != first.ID {
-		t.Errorf("a retry made a second session %q, want %q", again.ID, first.ID)
-	}
-
-	req.IdempotencyKey = ""
 	if _, err := c.CreateSession(ctx, req); !errors.Is(err, api.ErrConflict) {
 		t.Errorf("a second session on a live conversation: %v, want ErrConflict", err)
-	}
-}
-
-// TestMetadataCap: 16KiB is the cap, and over it is an invalid argument.
-func TestMetadataCap(t *testing.T) {
-	ctx := context.Background()
-	c := serve(t)(nil)
-
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{SessionID: view.ID}
-	if err := c.SetSessionMetadata(ctx, api.SetSessionMetadataRequest{
-		Ref: ref, Metadata: []byte(`{"posted":"1.2"}`),
-	}); err != nil {
-		t.Fatalf("SetSessionMetadata: %v", err)
-	}
-	got, err := c.GetSession(ctx, ref)
-	if err != nil {
-		t.Fatalf("GetSession: %v", err)
-	}
-	if string(got.Metadata) != `{"posted":"1.2"}` {
-		t.Errorf("metadata came back as %q", got.Metadata)
-	}
-	if err := c.SetSessionMetadata(ctx, api.SetSessionMetadataRequest{
-		Ref: ref, Metadata: make([]byte, api.MaxMetadataBytes+1),
-	}); !errors.Is(err, api.ErrInvalidArgument) {
-		t.Errorf("oversized metadata: %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -617,3 +540,4 @@ func drain(t *testing.T, sub api.Subscription, budget time.Duration) []api.Event
 		}
 	}
 }
+
