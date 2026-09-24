@@ -1,0 +1,276 @@
+syntax = "proto3";
+
+package harnessapi.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/pomerium/agentops/harness/api/pb;harnessapipb";
+
+// HarnessAPIService is the client-facing Session/Turn/Event API, served by the
+// harness behind a Pomerium route and dialed BY a client (the Slack bot, a web
+// app, a CI bot). It is the wire form of the Go interface in the api package,
+// and the two are kept in step deliberately: a caller written against the
+// interface runs unchanged in-process or over this.
+//
+// Identity is NEVER taken from message fields. The caller's client_id comes from
+// the X-Pomerium-Jwt-Assertion header the route stamps, and the handler puts it
+// on every request it builds. That is why no request message below carries one —
+// a field a client could set would be a field a client could lie in.
+service HarnessAPIService {
+  // CreateSession opens a session and starts its launch. It returns as soon as
+  // the row exists; the launch reports itself on the event log.
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  // Prompt sends one turn. On a suspended session it is the revive.
+  rpc Prompt(PromptRequest) returns (PromptResponse);
+  // CancelTurn interrupts a running turn.
+  rpc CancelTurn(CancelTurnRequest) returns (CancelTurnResponse);
+  // RespondPermission answers an outstanding tool-call permission request.
+  rpc RespondPermission(RespondPermissionRequest) returns (RespondPermissionResponse);
+  // Suspend frees a session's pod and keeps its workspace.
+  rpc Suspend(SuspendRequest) returns (SuspendResponse);
+  // EndSession ends a session and releases its workspace.
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  // DeleteWorkspace erases a session, its workspace and its event log.
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteWorkspaceResponse);
+  // GetSession returns one session, by id or by conversation ref.
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  // ListSessions enumerates the calling client's sessions and nobody else's.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // ListTemplates reports what this client may run.
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  // ReissueApproval hands back a consent page for a session still waiting on one.
+  rpc ReissueApproval(ReissueApprovalRequest) returns (ReissueApprovalResponse);
+  // ListEvents reads a page of a session's event history.
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  // SetSessionMetadata stores the client's own presentation state against a
+  // session. The platform never reads inside it.
+  rpc SetSessionMetadata(SetSessionMetadataRequest) returns (SetSessionMetadataResponse);
+  // Subscribe streams a session's events, replaying anything after after_seq
+  // first.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+// ErrorInfo travels as a Connect error detail and names the typed error the
+// platform actually raised.
+//
+// The Connect code alone is not enough: several sentinels map onto the same code
+// (a not-found session and an unknown permission request are both NotFound-ish,
+// forbidden and quota-exceeded are both refusals), and a client that branches on
+// errors.Is needs the sentinel back, not an approximation of it. Carrying the
+// name makes the mapping injective, so an error round-trips through the wire
+// and still matches the same errors.Is check on the far side.
+message ErrorInfo {
+  // sentinel is the Go sentinel's name, e.g. "ErrNotRevivable". Unknown names
+  // are tolerated: a client that does not recognize one falls back to the code.
+  string sentinel = 1;
+  // detail is the human-readable elaboration the sentinel was wrapped with.
+  string detail = 2;
+}
+
+// SessionRef addresses a session by id or by conversation, always within the
+// calling client. Exactly one of session_id/conversation_ref must be set.
+//
+// It carries no client_id: the caller's identity is the verified assertion's,
+// and a field here would only ever be a lie waiting to be believed.
+message SessionRef {
+  string session_id = 1;
+  string conversation_ref = 2;
+  // include_terminal makes a lookup by conversation_ref return the most recent
+  // session the conversation had even if it has ended. Verbs that act on a
+  // session ignore it.
+  bool include_terminal = 3;
+}
+
+// SessionView is what a client sees of a session. State and reason-shaped fields
+// are strings, not enums: the vocabularies are additive and a client must
+// tolerate a value it does not know rather than fail to parse the message.
+message SessionView {
+  string id = 1;
+  // client_id is the verified owner, reported back so a client can confirm which
+  // identity the platform saw. It is response-only; nothing reads it inbound.
+  string client_id = 2;
+  string conversation_ref = 3;
+  string state = 4;
+  string template = 5;
+  string parent_session_id = 6;
+  string principal = 7;
+  string approver_subject = 8;
+  string approval_url = 9;
+  string run_id = 10;
+  google.protobuf.Timestamp run_expires_at = 11;
+  int64 last_seq = 12;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp updated_at = 14;
+  google.protobuf.Timestamp suspended_at = 15;
+  // metadata is the client's own opaque presentation state, as last written by
+  // SetSessionMetadata. The platform stores and returns the bytes and never
+  // looks inside them.
+  bytes metadata = 16;
+}
+
+// Event is one entry on a session's durable, ordered log.
+//
+// type is a string and payload is the raw JSON body — deliberately, and this is
+// load-bearing. The event set is additive-only with unknown-type tolerance, and
+// the log promises byte-identical replay; a proto enum would reject a type this
+// build has not heard of, and a oneof would re-encode a payload the store holds
+// verbatim. Both would break the contract at the transport, which is the one
+// place it must not break.
+message Event {
+  string session_id = 1;
+  int64 seq = 2;
+  string type = 3;
+  string turn_id = 4;
+  google.protobuf.Timestamp timestamp = 5;
+  bytes payload = 6;
+}
+
+// TemplateSummary is one entry of ListTemplates: what a client may run.
+message TemplateSummary {
+  string name = 1;
+  string description = 2;
+}
+
+message CreateSessionRequest {
+  string template = 1;
+  string conversation_ref = 2;
+  string principal = 3;
+  string idempotency_key = 4;
+  string parent_session_id = 5;
+  string approval_prompt = 6;
+  string initial_prompt = 7;
+  string system_prompt_appendix = 8;
+  string origin_kind = 9;
+}
+
+message CreateSessionResponse {
+  SessionView session = 1;
+}
+
+message PromptRequest {
+  SessionRef ref = 1;
+  string content = 2;
+}
+
+message PromptResponse {
+  string turn_id = 1;
+  // revived is true when this prompt is what brought a suspended session back.
+  bool revived = 2;
+}
+
+message CancelTurnRequest {
+  SessionRef ref = 1;
+  string turn_id = 2;
+}
+
+message CancelTurnResponse {}
+
+message RespondPermissionRequest {
+  SessionRef ref = 1;
+  string request_id = 2;
+  string option_id = 3;
+}
+
+message RespondPermissionResponse {}
+
+message SuspendRequest {
+  SessionRef ref = 1;
+}
+
+message SuspendResponse {}
+
+message EndSessionRequest {
+  SessionRef ref = 1;
+  string reason = 2;
+}
+
+message EndSessionResponse {}
+
+message DeleteWorkspaceRequest {
+  SessionRef ref = 1;
+}
+
+message DeleteWorkspaceResponse {}
+
+message GetSessionRequest {
+  SessionRef ref = 1;
+}
+
+message GetSessionResponse {
+  SessionView session = 1;
+}
+
+message ListSessionsRequest {
+  // live_only drops ended and interrupted sessions.
+  bool live_only = 1;
+  // updated_since returns only sessions touched at or after this instant. It is
+  // what a client's own reconciliation sweep pages on: "which of my sessions
+  // moved since I last looked", which live_only cannot express because a session
+  // that just went terminal is exactly the one worth hearing about.
+  google.protobuf.Timestamp updated_since = 2;
+}
+
+message ListSessionsResponse {
+  repeated SessionView sessions = 1;
+}
+
+message ListTemplatesRequest {}
+
+message ListTemplatesResponse {
+  repeated TemplateSummary templates = 1;
+}
+
+message ReissueApprovalRequest {
+  SessionRef ref = 1;
+}
+
+message ReissueApprovalResponse {
+  string approval_url = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message ListEventsRequest {
+  SessionRef ref = 1;
+  // after_seq returns events strictly after this sequence; 0 starts at the
+  // beginning.
+  int64 after_seq = 2;
+  // limit caps the page; 0 means the server default.
+  int32 limit = 3;
+}
+
+message ListEventsResponse {
+  repeated Event events = 1;
+}
+
+message SetSessionMetadataRequest {
+  SessionRef ref = 1;
+  bytes metadata = 2;
+}
+
+message SetSessionMetadataResponse {}
+
+message SubscribeRequest {
+  SessionRef ref = 1;
+  // after_seq resumes: history at or before it is not replayed, history after it
+  // is, so a reconnecting client picks up exactly where it stopped.
+  int64 after_seq = 2;
+}
+
+// SubscribeResponse carries either a session event or a keepalive.
+//
+// The FIRST message of every subscription is a keepalive, sent as soon as the
+// server has accepted the subscription. That is what makes opening one a
+// synchronous operation: a server-streaming call returns before the server has
+// done anything, so without an opening message a client cannot tell "subscribed"
+// from "refused" until an event happens to arrive — which for a quiet session is
+// never, and for another client's session would be silence instead of a denial.
+//
+// The keepalive is not decoration. HTTP/2 PINGs terminate at each hop, so a
+// proxy in the path can hold a subscription open that has been dead upstream for
+// minutes; an application-level tick is the only liveness signal that traverses
+// the whole path. Clients discard keepalives and treat several missed intervals
+// as a dead stream worth reconnecting with after_seq.
+message SubscribeResponse {
+  Event event = 1;
+  bool keepalive = 2;
+}

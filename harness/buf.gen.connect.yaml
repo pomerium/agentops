@@ -1,0 +1,15 @@
+# Code generation for the client-facing Harness API, which is served over
+# Connect (see proto/harnessapi/v1). Separate from buf.gen.yaml so the gRPC
+# services do not gain Connect stubs and this one does not gain gRPC stubs.
+version: v2
+plugins:
+  - local: [go, tool, protoc-gen-go]
+    out: .
+    opt: module=github.com/pomerium/agentops/harness
+  - local: [go, tool, protoc-gen-connect-go]
+    out: .
+    opt: module=github.com/pomerium/agentops/harness
+inputs:
+  - directory: ../proto
+    paths:
+      - ../proto/harnessapi

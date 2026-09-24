@@ -17,6 +17,12 @@ CONTROLLER_GEN ?= go tool controller-gen
 SQLC           ?= go tool sqlc
 BUF            ?= go tool buf
 
+# The harness module (harness/): the client-facing Harness API. A separate Go
+# module, so every target that walks packages visits it too; GOWORK=off keeps a
+# local go.work from resolving one module against the other.
+HARNESS_DIR ?= harness
+HARNESS_GO  ?= cd $(HARNESS_DIR) && GOWORK=off go
+
 # Kustomize overlay to render/apply: dev or prod.
 OVERLAY ?= dev
 
@@ -24,16 +30,18 @@ OVERLAY ?= dev
 HELM      ?= helm
 CHART_DIR ?= deploy/helm
 
-.PHONY: build test test-e2e vet generate proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
+.PHONY: build test test-e2e vet generate generate-harness-api proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
         helm-sync-crds helm-lint helm-template helm-package
 
 ## build: compile all packages.
 build:
 	go build ./...
+	$(HARNESS_GO) build ./...
 
 ## test: run the test suite.
 test:
 	go test ./...
+	$(HARNESS_GO) test ./...
 
 ## test-e2e: run the opt-in end-to-end harness tests (needs Docker + an
 ## Anthropic key in ANTHROPIC_API_KEY or ~/tmp/keys/claude_api_key.txt). These
@@ -45,16 +53,24 @@ test-e2e:
 ## vet: run go vet over all packages.
 vet:
 	go vet ./...
+	$(HARNESS_GO) vet ./...
 
 ## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
 ## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
-## and the sidecar control protocol stubs (buf, from proto/).
-generate:
+## the sidecar control protocol stubs (buf, from proto/sidecar), and the Harness
+## API's Connect stubs (generate-harness-api).
+generate: generate-harness-api
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	cd internal/chatops/db && $(SQLC) generate
 	$(BUF) generate
 	$(MAKE) helm-sync-crds
+
+## generate-harness-api: regenerate the Harness API's Go and Connect stubs
+## (harness/api/pb) from proto/harnessapi, with the harness module's own
+## pinned buf and plugins.
+generate-harness-api:
+	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
 
 ## helm-sync-crds: copy the generated CRDs into the Helm chart, wrapped in an
 ## `installCRDs` toggle. Kept in sync via `generate`; the kustomize base reads
@@ -76,6 +92,7 @@ proto-lint:
 ## tidy: prune and verify go.mod / go.sum.
 tidy:
 	go mod tidy
+	$(HARNESS_GO) mod tidy
 
 ## docker-build: build the app container image (local tag).
 docker-build:
