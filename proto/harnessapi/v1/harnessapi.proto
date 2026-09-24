@@ -22,29 +22,18 @@ service HarnessAPIService {
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   // Prompt sends one turn. On a suspended session it is the revive.
   rpc Prompt(PromptRequest) returns (PromptResponse);
-  // CancelTurn interrupts a running turn.
-  rpc CancelTurn(CancelTurnRequest) returns (CancelTurnResponse);
   // RespondPermission answers an outstanding tool-call permission request.
   rpc RespondPermission(RespondPermissionRequest) returns (RespondPermissionResponse);
-  // Suspend frees a session's pod and keeps its workspace.
-  rpc Suspend(SuspendRequest) returns (SuspendResponse);
   // EndSession ends a session and releases its workspace.
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
-  // DeleteWorkspace erases a session, its workspace and its event log.
-  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteWorkspaceResponse);
   // GetSession returns one session, by id or by conversation ref.
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   // ListSessions enumerates the calling client's sessions and nobody else's.
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   // ListTemplates reports what this client may run.
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
-  // ReissueApproval hands back a consent page for a session still waiting on one.
-  rpc ReissueApproval(ReissueApprovalRequest) returns (ReissueApprovalResponse);
   // ListEvents reads a page of a session's event history.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
-  // SetSessionMetadata stores the client's own presentation state against a
-  // session. The platform never reads inside it.
-  rpc SetSessionMetadata(SetSessionMetadataRequest) returns (SetSessionMetadataResponse);
   // Subscribe streams a session's events, replaying anything after after_seq
   // first.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
@@ -86,26 +75,12 @@ message SessionRef {
 // tolerate a value it does not know rather than fail to parse the message.
 message SessionView {
   string id = 1;
-  // client_id is the verified owner, reported back so a client can confirm which
-  // identity the platform saw. It is response-only; nothing reads it inbound.
-  string client_id = 2;
-  string conversation_ref = 3;
-  string state = 4;
-  string template = 5;
-  string parent_session_id = 6;
-  string principal = 7;
-  string approver_subject = 8;
-  string approval_url = 9;
-  string run_id = 10;
-  google.protobuf.Timestamp run_expires_at = 11;
-  int64 last_seq = 12;
-  google.protobuf.Timestamp created_at = 13;
-  google.protobuf.Timestamp updated_at = 14;
-  google.protobuf.Timestamp suspended_at = 15;
-  // metadata is the client's own opaque presentation state, as last written by
-  // SetSessionMetadata. The platform stores and returns the bytes and never
-  // looks inside them.
-  bytes metadata = 16;
+  string conversation_ref = 2;
+  string state = 3;
+  string template = 4;
+  // last_seq is the newest event on the session's log: where a client that has
+  // rendered nothing yet starts reading, so it does not replay the conversation.
+  int64 last_seq = 5;
 }
 
 // Event is one entry on a session's durable, ordered log.
@@ -134,13 +109,10 @@ message TemplateSummary {
 message CreateSessionRequest {
   string template = 1;
   string conversation_ref = 2;
-  string principal = 3;
-  string idempotency_key = 4;
-  string parent_session_id = 5;
-  string approval_prompt = 6;
-  string initial_prompt = 7;
-  string system_prompt_appendix = 8;
-  string origin_kind = 9;
+  string parent_session_id = 3;
+  string approval_prompt = 4;
+  string initial_prompt = 5;
+  string system_prompt_appendix = 6;
 }
 
 message CreateSessionResponse {
@@ -154,16 +126,7 @@ message PromptRequest {
 
 message PromptResponse {
   string turn_id = 1;
-  // revived is true when this prompt is what brought a suspended session back.
-  bool revived = 2;
 }
-
-message CancelTurnRequest {
-  SessionRef ref = 1;
-  string turn_id = 2;
-}
-
-message CancelTurnResponse {}
 
 message RespondPermissionRequest {
   SessionRef ref = 1;
@@ -173,24 +136,12 @@ message RespondPermissionRequest {
 
 message RespondPermissionResponse {}
 
-message SuspendRequest {
-  SessionRef ref = 1;
-}
-
-message SuspendResponse {}
-
 message EndSessionRequest {
   SessionRef ref = 1;
   string reason = 2;
 }
 
 message EndSessionResponse {}
-
-message DeleteWorkspaceRequest {
-  SessionRef ref = 1;
-}
-
-message DeleteWorkspaceResponse {}
 
 message GetSessionRequest {
   SessionRef ref = 1;
@@ -220,15 +171,6 @@ message ListTemplatesResponse {
   repeated TemplateSummary templates = 1;
 }
 
-message ReissueApprovalRequest {
-  SessionRef ref = 1;
-}
-
-message ReissueApprovalResponse {
-  string approval_url = 1;
-  google.protobuf.Timestamp expires_at = 2;
-}
-
 message ListEventsRequest {
   SessionRef ref = 1;
   // after_seq returns events strictly after this sequence; 0 starts at the
@@ -241,13 +183,6 @@ message ListEventsRequest {
 message ListEventsResponse {
   repeated Event events = 1;
 }
-
-message SetSessionMetadataRequest {
-  SessionRef ref = 1;
-  bytes metadata = 2;
-}
-
-message SetSessionMetadataResponse {}
 
 message SubscribeRequest {
   SessionRef ref = 1;

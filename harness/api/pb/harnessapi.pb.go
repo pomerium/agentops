@@ -158,28 +158,14 @@ func (x *SessionRef) GetIncludeTerminal() bool {
 // are strings, not enums: the vocabularies are additive and a client must
 // tolerate a value it does not know rather than fail to parse the message.
 type SessionView struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// client_id is the verified owner, reported back so a client can confirm which
-	// identity the platform saw. It is response-only; nothing reads it inbound.
-	ClientId        string                 `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	ConversationRef string                 `protobuf:"bytes,3,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
-	State           string                 `protobuf:"bytes,4,opt,name=state,proto3" json:"state,omitempty"`
-	Template        string                 `protobuf:"bytes,5,opt,name=template,proto3" json:"template,omitempty"`
-	ParentSessionId string                 `protobuf:"bytes,6,opt,name=parent_session_id,json=parentSessionId,proto3" json:"parent_session_id,omitempty"`
-	Principal       string                 `protobuf:"bytes,7,opt,name=principal,proto3" json:"principal,omitempty"`
-	ApproverSubject string                 `protobuf:"bytes,8,opt,name=approver_subject,json=approverSubject,proto3" json:"approver_subject,omitempty"`
-	ApprovalUrl     string                 `protobuf:"bytes,9,opt,name=approval_url,json=approvalUrl,proto3" json:"approval_url,omitempty"`
-	RunId           string                 `protobuf:"bytes,10,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	RunExpiresAt    *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=run_expires_at,json=runExpiresAt,proto3" json:"run_expires_at,omitempty"`
-	LastSeq         int64                  `protobuf:"varint,12,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
-	CreatedAt       *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt       *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	SuspendedAt     *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=suspended_at,json=suspendedAt,proto3" json:"suspended_at,omitempty"`
-	// metadata is the client's own opaque presentation state, as last written by
-	// SetSessionMetadata. The platform stores and returns the bytes and never
-	// looks inside them.
-	Metadata      []byte `protobuf:"bytes,16,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	ConversationRef string                 `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
+	State           string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	Template        string                 `protobuf:"bytes,4,opt,name=template,proto3" json:"template,omitempty"`
+	// last_seq is the newest event on the session's log: where a client that has
+	// rendered nothing yet starts reading, so it does not replay the conversation.
+	LastSeq       int64 `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -221,13 +207,6 @@ func (x *SessionView) GetId() string {
 	return ""
 }
 
-func (x *SessionView) GetClientId() string {
-	if x != nil {
-		return x.ClientId
-	}
-	return ""
-}
-
 func (x *SessionView) GetConversationRef() string {
 	if x != nil {
 		return x.ConversationRef
@@ -249,81 +228,11 @@ func (x *SessionView) GetTemplate() string {
 	return ""
 }
 
-func (x *SessionView) GetParentSessionId() string {
-	if x != nil {
-		return x.ParentSessionId
-	}
-	return ""
-}
-
-func (x *SessionView) GetPrincipal() string {
-	if x != nil {
-		return x.Principal
-	}
-	return ""
-}
-
-func (x *SessionView) GetApproverSubject() string {
-	if x != nil {
-		return x.ApproverSubject
-	}
-	return ""
-}
-
-func (x *SessionView) GetApprovalUrl() string {
-	if x != nil {
-		return x.ApprovalUrl
-	}
-	return ""
-}
-
-func (x *SessionView) GetRunId() string {
-	if x != nil {
-		return x.RunId
-	}
-	return ""
-}
-
-func (x *SessionView) GetRunExpiresAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.RunExpiresAt
-	}
-	return nil
-}
-
 func (x *SessionView) GetLastSeq() int64 {
 	if x != nil {
 		return x.LastSeq
 	}
 	return 0
-}
-
-func (x *SessionView) GetCreatedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.CreatedAt
-	}
-	return nil
-}
-
-func (x *SessionView) GetUpdatedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.UpdatedAt
-	}
-	return nil
-}
-
-func (x *SessionView) GetSuspendedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.SuspendedAt
-	}
-	return nil
-}
-
-func (x *SessionView) GetMetadata() []byte {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
 }
 
 // Event is one entry on a session's durable, ordered log.
@@ -475,13 +384,10 @@ type CreateSessionRequest struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	Template             string                 `protobuf:"bytes,1,opt,name=template,proto3" json:"template,omitempty"`
 	ConversationRef      string                 `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
-	Principal            string                 `protobuf:"bytes,3,opt,name=principal,proto3" json:"principal,omitempty"`
-	IdempotencyKey       string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
-	ParentSessionId      string                 `protobuf:"bytes,5,opt,name=parent_session_id,json=parentSessionId,proto3" json:"parent_session_id,omitempty"`
-	ApprovalPrompt       string                 `protobuf:"bytes,6,opt,name=approval_prompt,json=approvalPrompt,proto3" json:"approval_prompt,omitempty"`
-	InitialPrompt        string                 `protobuf:"bytes,7,opt,name=initial_prompt,json=initialPrompt,proto3" json:"initial_prompt,omitempty"`
-	SystemPromptAppendix string                 `protobuf:"bytes,8,opt,name=system_prompt_appendix,json=systemPromptAppendix,proto3" json:"system_prompt_appendix,omitempty"`
-	OriginKind           string                 `protobuf:"bytes,9,opt,name=origin_kind,json=originKind,proto3" json:"origin_kind,omitempty"`
+	ParentSessionId      string                 `protobuf:"bytes,3,opt,name=parent_session_id,json=parentSessionId,proto3" json:"parent_session_id,omitempty"`
+	ApprovalPrompt       string                 `protobuf:"bytes,4,opt,name=approval_prompt,json=approvalPrompt,proto3" json:"approval_prompt,omitempty"`
+	InitialPrompt        string                 `protobuf:"bytes,5,opt,name=initial_prompt,json=initialPrompt,proto3" json:"initial_prompt,omitempty"`
+	SystemPromptAppendix string                 `protobuf:"bytes,6,opt,name=system_prompt_appendix,json=systemPromptAppendix,proto3" json:"system_prompt_appendix,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -530,20 +436,6 @@ func (x *CreateSessionRequest) GetConversationRef() string {
 	return ""
 }
 
-func (x *CreateSessionRequest) GetPrincipal() string {
-	if x != nil {
-		return x.Principal
-	}
-	return ""
-}
-
-func (x *CreateSessionRequest) GetIdempotencyKey() string {
-	if x != nil {
-		return x.IdempotencyKey
-	}
-	return ""
-}
-
 func (x *CreateSessionRequest) GetParentSessionId() string {
 	if x != nil {
 		return x.ParentSessionId
@@ -568,13 +460,6 @@ func (x *CreateSessionRequest) GetInitialPrompt() string {
 func (x *CreateSessionRequest) GetSystemPromptAppendix() string {
 	if x != nil {
 		return x.SystemPromptAppendix
-	}
-	return ""
-}
-
-func (x *CreateSessionRequest) GetOriginKind() string {
-	if x != nil {
-		return x.OriginKind
 	}
 	return ""
 }
@@ -676,10 +561,8 @@ func (x *PromptRequest) GetContent() string {
 }
 
 type PromptResponse struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	TurnId string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
-	// revived is true when this prompt is what brought a suspended session back.
-	Revived       bool `protobuf:"varint,2,opt,name=revived,proto3" json:"revived,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TurnId        string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -721,101 +604,6 @@ func (x *PromptResponse) GetTurnId() string {
 	return ""
 }
 
-func (x *PromptResponse) GetRevived() bool {
-	if x != nil {
-		return x.Revived
-	}
-	return false
-}
-
-type CancelTurnRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	TurnId        string                 `protobuf:"bytes,2,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CancelTurnRequest) Reset() {
-	*x = CancelTurnRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CancelTurnRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CancelTurnRequest) ProtoMessage() {}
-
-func (x *CancelTurnRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CancelTurnRequest.ProtoReflect.Descriptor instead.
-func (*CancelTurnRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *CancelTurnRequest) GetRef() *SessionRef {
-	if x != nil {
-		return x.Ref
-	}
-	return nil
-}
-
-func (x *CancelTurnRequest) GetTurnId() string {
-	if x != nil {
-		return x.TurnId
-	}
-	return ""
-}
-
-type CancelTurnResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *CancelTurnResponse) Reset() {
-	*x = CancelTurnResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *CancelTurnResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*CancelTurnResponse) ProtoMessage() {}
-
-func (x *CancelTurnResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use CancelTurnResponse.ProtoReflect.Descriptor instead.
-func (*CancelTurnResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{10}
-}
-
 type RespondPermissionRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
@@ -827,7 +615,7 @@ type RespondPermissionRequest struct {
 
 func (x *RespondPermissionRequest) Reset() {
 	*x = RespondPermissionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -839,7 +627,7 @@ func (x *RespondPermissionRequest) String() string {
 func (*RespondPermissionRequest) ProtoMessage() {}
 
 func (x *RespondPermissionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -852,7 +640,7 @@ func (x *RespondPermissionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RespondPermissionRequest.ProtoReflect.Descriptor instead.
 func (*RespondPermissionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{11}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RespondPermissionRequest) GetRef() *SessionRef {
@@ -884,7 +672,7 @@ type RespondPermissionResponse struct {
 
 func (x *RespondPermissionResponse) Reset() {
 	*x = RespondPermissionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -896,7 +684,7 @@ func (x *RespondPermissionResponse) String() string {
 func (*RespondPermissionResponse) ProtoMessage() {}
 
 func (x *RespondPermissionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -909,87 +697,7 @@ func (x *RespondPermissionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RespondPermissionResponse.ProtoReflect.Descriptor instead.
 func (*RespondPermissionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{12}
-}
-
-type SuspendRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SuspendRequest) Reset() {
-	*x = SuspendRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SuspendRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SuspendRequest) ProtoMessage() {}
-
-func (x *SuspendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SuspendRequest.ProtoReflect.Descriptor instead.
-func (*SuspendRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *SuspendRequest) GetRef() *SessionRef {
-	if x != nil {
-		return x.Ref
-	}
-	return nil
-}
-
-type SuspendResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SuspendResponse) Reset() {
-	*x = SuspendResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SuspendResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SuspendResponse) ProtoMessage() {}
-
-func (x *SuspendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SuspendResponse.ProtoReflect.Descriptor instead.
-func (*SuspendResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{14}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{10}
 }
 
 type EndSessionRequest struct {
@@ -1002,7 +710,7 @@ type EndSessionRequest struct {
 
 func (x *EndSessionRequest) Reset() {
 	*x = EndSessionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1014,7 +722,7 @@ func (x *EndSessionRequest) String() string {
 func (*EndSessionRequest) ProtoMessage() {}
 
 func (x *EndSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1027,7 +735,7 @@ func (x *EndSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EndSessionRequest.ProtoReflect.Descriptor instead.
 func (*EndSessionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{15}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *EndSessionRequest) GetRef() *SessionRef {
@@ -1052,7 +760,7 @@ type EndSessionResponse struct {
 
 func (x *EndSessionResponse) Reset() {
 	*x = EndSessionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1064,7 +772,7 @@ func (x *EndSessionResponse) String() string {
 func (*EndSessionResponse) ProtoMessage() {}
 
 func (x *EndSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1077,87 +785,7 @@ func (x *EndSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EndSessionResponse.ProtoReflect.Descriptor instead.
 func (*EndSessionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{16}
-}
-
-type DeleteWorkspaceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DeleteWorkspaceRequest) Reset() {
-	*x = DeleteWorkspaceRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DeleteWorkspaceRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DeleteWorkspaceRequest) ProtoMessage() {}
-
-func (x *DeleteWorkspaceRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DeleteWorkspaceRequest.ProtoReflect.Descriptor instead.
-func (*DeleteWorkspaceRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{17}
-}
-
-func (x *DeleteWorkspaceRequest) GetRef() *SessionRef {
-	if x != nil {
-		return x.Ref
-	}
-	return nil
-}
-
-type DeleteWorkspaceResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DeleteWorkspaceResponse) Reset() {
-	*x = DeleteWorkspaceResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DeleteWorkspaceResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DeleteWorkspaceResponse) ProtoMessage() {}
-
-func (x *DeleteWorkspaceResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DeleteWorkspaceResponse.ProtoReflect.Descriptor instead.
-func (*DeleteWorkspaceResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{18}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{12}
 }
 
 type GetSessionRequest struct {
@@ -1169,7 +797,7 @@ type GetSessionRequest struct {
 
 func (x *GetSessionRequest) Reset() {
 	*x = GetSessionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1181,7 +809,7 @@ func (x *GetSessionRequest) String() string {
 func (*GetSessionRequest) ProtoMessage() {}
 
 func (x *GetSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1194,7 +822,7 @@ func (x *GetSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSessionRequest.ProtoReflect.Descriptor instead.
 func (*GetSessionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{19}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetSessionRequest) GetRef() *SessionRef {
@@ -1213,7 +841,7 @@ type GetSessionResponse struct {
 
 func (x *GetSessionResponse) Reset() {
 	*x = GetSessionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1225,7 +853,7 @@ func (x *GetSessionResponse) String() string {
 func (*GetSessionResponse) ProtoMessage() {}
 
 func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1238,7 +866,7 @@ func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSessionResponse.ProtoReflect.Descriptor instead.
 func (*GetSessionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{20}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetSessionResponse) GetSession() *SessionView {
@@ -1263,7 +891,7 @@ type ListSessionsRequest struct {
 
 func (x *ListSessionsRequest) Reset() {
 	*x = ListSessionsRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1275,7 +903,7 @@ func (x *ListSessionsRequest) String() string {
 func (*ListSessionsRequest) ProtoMessage() {}
 
 func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1288,7 +916,7 @@ func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
 func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{21}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ListSessionsRequest) GetLiveOnly() bool {
@@ -1314,7 +942,7 @@ type ListSessionsResponse struct {
 
 func (x *ListSessionsResponse) Reset() {
 	*x = ListSessionsResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1326,7 +954,7 @@ func (x *ListSessionsResponse) String() string {
 func (*ListSessionsResponse) ProtoMessage() {}
 
 func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1339,7 +967,7 @@ func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
 func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{22}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListSessionsResponse) GetSessions() []*SessionView {
@@ -1357,7 +985,7 @@ type ListTemplatesRequest struct {
 
 func (x *ListTemplatesRequest) Reset() {
 	*x = ListTemplatesRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[23]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1369,7 +997,7 @@ func (x *ListTemplatesRequest) String() string {
 func (*ListTemplatesRequest) ProtoMessage() {}
 
 func (x *ListTemplatesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[23]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1382,7 +1010,7 @@ func (x *ListTemplatesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTemplatesRequest.ProtoReflect.Descriptor instead.
 func (*ListTemplatesRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{23}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{17}
 }
 
 type ListTemplatesResponse struct {
@@ -1394,7 +1022,7 @@ type ListTemplatesResponse struct {
 
 func (x *ListTemplatesResponse) Reset() {
 	*x = ListTemplatesResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[24]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1406,7 +1034,7 @@ func (x *ListTemplatesResponse) String() string {
 func (*ListTemplatesResponse) ProtoMessage() {}
 
 func (x *ListTemplatesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[24]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1419,108 +1047,12 @@ func (x *ListTemplatesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTemplatesResponse.ProtoReflect.Descriptor instead.
 func (*ListTemplatesResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{24}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ListTemplatesResponse) GetTemplates() []*TemplateSummary {
 	if x != nil {
 		return x.Templates
-	}
-	return nil
-}
-
-type ReissueApprovalRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ReissueApprovalRequest) Reset() {
-	*x = ReissueApprovalRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[25]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ReissueApprovalRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ReissueApprovalRequest) ProtoMessage() {}
-
-func (x *ReissueApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[25]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ReissueApprovalRequest.ProtoReflect.Descriptor instead.
-func (*ReissueApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{25}
-}
-
-func (x *ReissueApprovalRequest) GetRef() *SessionRef {
-	if x != nil {
-		return x.Ref
-	}
-	return nil
-}
-
-type ReissueApprovalResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ApprovalUrl   string                 `protobuf:"bytes,1,opt,name=approval_url,json=approvalUrl,proto3" json:"approval_url,omitempty"`
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ReissueApprovalResponse) Reset() {
-	*x = ReissueApprovalResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[26]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ReissueApprovalResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ReissueApprovalResponse) ProtoMessage() {}
-
-func (x *ReissueApprovalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[26]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ReissueApprovalResponse.ProtoReflect.Descriptor instead.
-func (*ReissueApprovalResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{26}
-}
-
-func (x *ReissueApprovalResponse) GetApprovalUrl() string {
-	if x != nil {
-		return x.ApprovalUrl
-	}
-	return ""
-}
-
-func (x *ReissueApprovalResponse) GetExpiresAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.ExpiresAt
 	}
 	return nil
 }
@@ -1539,7 +1071,7 @@ type ListEventsRequest struct {
 
 func (x *ListEventsRequest) Reset() {
 	*x = ListEventsRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[27]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1551,7 +1083,7 @@ func (x *ListEventsRequest) String() string {
 func (*ListEventsRequest) ProtoMessage() {}
 
 func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[27]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1564,7 +1096,7 @@ func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEventsRequest.ProtoReflect.Descriptor instead.
 func (*ListEventsRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{27}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ListEventsRequest) GetRef() *SessionRef {
@@ -1597,7 +1129,7 @@ type ListEventsResponse struct {
 
 func (x *ListEventsResponse) Reset() {
 	*x = ListEventsResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[28]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1609,7 +1141,7 @@ func (x *ListEventsResponse) String() string {
 func (*ListEventsResponse) ProtoMessage() {}
 
 func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[28]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1622,7 +1154,7 @@ func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEventsResponse.ProtoReflect.Descriptor instead.
 func (*ListEventsResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{28}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListEventsResponse) GetEvents() []*Event {
@@ -1630,94 +1162,6 @@ func (x *ListEventsResponse) GetEvents() []*Event {
 		return x.Events
 	}
 	return nil
-}
-
-type SetSessionMetadataRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Metadata      []byte                 `protobuf:"bytes,2,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetSessionMetadataRequest) Reset() {
-	*x = SetSessionMetadataRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[29]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetSessionMetadataRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetSessionMetadataRequest) ProtoMessage() {}
-
-func (x *SetSessionMetadataRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[29]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetSessionMetadataRequest.ProtoReflect.Descriptor instead.
-func (*SetSessionMetadataRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{29}
-}
-
-func (x *SetSessionMetadataRequest) GetRef() *SessionRef {
-	if x != nil {
-		return x.Ref
-	}
-	return nil
-}
-
-func (x *SetSessionMetadataRequest) GetMetadata() []byte {
-	if x != nil {
-		return x.Metadata
-	}
-	return nil
-}
-
-type SetSessionMetadataResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetSessionMetadataResponse) Reset() {
-	*x = SetSessionMetadataResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[30]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetSessionMetadataResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetSessionMetadataResponse) ProtoMessage() {}
-
-func (x *SetSessionMetadataResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[30]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetSessionMetadataResponse.ProtoReflect.Descriptor instead.
-func (*SetSessionMetadataResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{30}
 }
 
 type SubscribeRequest struct {
@@ -1732,7 +1176,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[31]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1744,7 +1188,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[31]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1757,7 +1201,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{31}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SubscribeRequest) GetRef() *SessionRef {
@@ -1798,7 +1242,7 @@ type SubscribeResponse struct {
 
 func (x *SubscribeResponse) Reset() {
 	*x = SubscribeResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[32]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1810,7 +1254,7 @@ func (x *SubscribeResponse) String() string {
 func (*SubscribeResponse) ProtoMessage() {}
 
 func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[32]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1823,7 +1267,7 @@ func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeResponse.ProtoReflect.Descriptor instead.
 func (*SubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{32}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SubscribeResponse) GetEvent() *Event {
@@ -1853,27 +1297,13 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12)\n" +
 	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x12)\n" +
-	"\x10include_terminal\x18\x03 \x01(\bR\x0fincludeTerminal\"\xf4\x04\n" +
+	"\x10include_terminal\x18\x03 \x01(\bR\x0fincludeTerminal\"\x95\x01\n" +
 	"\vSessionView\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
-	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12)\n" +
-	"\x10conversation_ref\x18\x03 \x01(\tR\x0fconversationRef\x12\x14\n" +
-	"\x05state\x18\x04 \x01(\tR\x05state\x12\x1a\n" +
-	"\btemplate\x18\x05 \x01(\tR\btemplate\x12*\n" +
-	"\x11parent_session_id\x18\x06 \x01(\tR\x0fparentSessionId\x12\x1c\n" +
-	"\tprincipal\x18\a \x01(\tR\tprincipal\x12)\n" +
-	"\x10approver_subject\x18\b \x01(\tR\x0fapproverSubject\x12!\n" +
-	"\fapproval_url\x18\t \x01(\tR\vapprovalUrl\x12\x15\n" +
-	"\x06run_id\x18\n" +
-	" \x01(\tR\x05runId\x12@\n" +
-	"\x0erun_expires_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\frunExpiresAt\x12\x19\n" +
-	"\blast_seq\x18\f \x01(\x03R\alastSeq\x129\n" +
-	"\n" +
-	"created_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
-	"\n" +
-	"updated_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12=\n" +
-	"\fsuspended_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\vsuspendedAt\x12\x1a\n" +
-	"\bmetadata\x18\x10 \x01(\fR\bmetadata\"\xb9\x01\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12)\n" +
+	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x12\x14\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1a\n" +
+	"\btemplate\x18\x04 \x01(\tR\btemplate\x12\x19\n" +
+	"\blast_seq\x18\x05 \x01(\x03R\alastSeq\"\xb9\x01\n" +
 	"\x05Event\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +
@@ -1884,46 +1314,31 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\apayload\x18\x06 \x01(\fR\apayload\"G\n" +
 	"\x0fTemplateSummary\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\"\xf7\x02\n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\"\x8f\x02\n" +
 	"\x14CreateSessionRequest\x12\x1a\n" +
 	"\btemplate\x18\x01 \x01(\tR\btemplate\x12)\n" +
-	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x12\x1c\n" +
-	"\tprincipal\x18\x03 \x01(\tR\tprincipal\x12'\n" +
-	"\x0fidempotency_key\x18\x04 \x01(\tR\x0eidempotencyKey\x12*\n" +
-	"\x11parent_session_id\x18\x05 \x01(\tR\x0fparentSessionId\x12'\n" +
-	"\x0fapproval_prompt\x18\x06 \x01(\tR\x0eapprovalPrompt\x12%\n" +
-	"\x0einitial_prompt\x18\a \x01(\tR\rinitialPrompt\x124\n" +
-	"\x16system_prompt_appendix\x18\b \x01(\tR\x14systemPromptAppendix\x12\x1f\n" +
-	"\vorigin_kind\x18\t \x01(\tR\n" +
-	"originKind\"M\n" +
+	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x12*\n" +
+	"\x11parent_session_id\x18\x03 \x01(\tR\x0fparentSessionId\x12'\n" +
+	"\x0fapproval_prompt\x18\x04 \x01(\tR\x0eapprovalPrompt\x12%\n" +
+	"\x0einitial_prompt\x18\x05 \x01(\tR\rinitialPrompt\x124\n" +
+	"\x16system_prompt_appendix\x18\x06 \x01(\tR\x14systemPromptAppendix\"M\n" +
 	"\x15CreateSessionResponse\x124\n" +
 	"\asession\x18\x01 \x01(\v2\x1a.harnessapi.v1.SessionViewR\asession\"V\n" +
 	"\rPromptRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\tR\acontent\"C\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\")\n" +
 	"\x0ePromptResponse\x12\x17\n" +
-	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x12\x18\n" +
-	"\arevived\x18\x02 \x01(\bR\arevived\"Y\n" +
-	"\x11CancelTurnRequest\x12+\n" +
-	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x17\n" +
-	"\aturn_id\x18\x02 \x01(\tR\x06turnId\"\x14\n" +
-	"\x12CancelTurnResponse\"\x83\x01\n" +
+	"\aturn_id\x18\x01 \x01(\tR\x06turnId\"\x83\x01\n" +
 	"\x18RespondPermissionRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x1b\n" +
 	"\toption_id\x18\x03 \x01(\tR\boptionId\"\x1b\n" +
-	"\x19RespondPermissionResponse\"=\n" +
-	"\x0eSuspendRequest\x12+\n" +
-	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\"\x11\n" +
-	"\x0fSuspendResponse\"X\n" +
+	"\x19RespondPermissionResponse\"X\n" +
 	"\x11EndSessionRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x14\n" +
-	"\x12EndSessionResponse\"E\n" +
-	"\x16DeleteWorkspaceRequest\x12+\n" +
-	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\"\x19\n" +
-	"\x17DeleteWorkspaceResponse\"@\n" +
+	"\x12EndSessionResponse\"@\n" +
 	"\x11GetSessionRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\"J\n" +
 	"\x12GetSessionResponse\x124\n" +
@@ -1935,47 +1350,31 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\bsessions\x18\x01 \x03(\v2\x1a.harnessapi.v1.SessionViewR\bsessions\"\x16\n" +
 	"\x14ListTemplatesRequest\"U\n" +
 	"\x15ListTemplatesResponse\x12<\n" +
-	"\ttemplates\x18\x01 \x03(\v2\x1e.harnessapi.v1.TemplateSummaryR\ttemplates\"E\n" +
-	"\x16ReissueApprovalRequest\x12+\n" +
-	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\"w\n" +
-	"\x17ReissueApprovalResponse\x12!\n" +
-	"\fapproval_url\x18\x01 \x01(\tR\vapprovalUrl\x129\n" +
-	"\n" +
-	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"s\n" +
+	"\ttemplates\x18\x01 \x03(\v2\x1e.harnessapi.v1.TemplateSummaryR\ttemplates\"s\n" +
 	"\x11ListEventsRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x1b\n" +
 	"\tafter_seq\x18\x02 \x01(\x03R\bafterSeq\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\x05R\x05limit\"B\n" +
 	"\x12ListEventsResponse\x12,\n" +
-	"\x06events\x18\x01 \x03(\v2\x14.harnessapi.v1.EventR\x06events\"d\n" +
-	"\x19SetSessionMetadataRequest\x12+\n" +
-	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x1a\n" +
-	"\bmetadata\x18\x02 \x01(\fR\bmetadata\"\x1c\n" +
-	"\x1aSetSessionMetadataResponse\"\\\n" +
+	"\x06events\x18\x01 \x03(\v2\x14.harnessapi.v1.EventR\x06events\"\\\n" +
 	"\x10SubscribeRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x1b\n" +
 	"\tafter_seq\x18\x02 \x01(\x03R\bafterSeq\"]\n" +
 	"\x11SubscribeResponse\x12*\n" +
 	"\x05event\x18\x01 \x01(\v2\x14.harnessapi.v1.EventR\x05event\x12\x1c\n" +
-	"\tkeepalive\x18\x02 \x01(\bR\tkeepalive2\xea\t\n" +
+	"\tkeepalive\x18\x02 \x01(\bR\tkeepalive2\x9e\x06\n" +
 	"\x11HarnessAPIService\x12Z\n" +
 	"\rCreateSession\x12#.harnessapi.v1.CreateSessionRequest\x1a$.harnessapi.v1.CreateSessionResponse\x12E\n" +
-	"\x06Prompt\x12\x1c.harnessapi.v1.PromptRequest\x1a\x1d.harnessapi.v1.PromptResponse\x12Q\n" +
+	"\x06Prompt\x12\x1c.harnessapi.v1.PromptRequest\x1a\x1d.harnessapi.v1.PromptResponse\x12f\n" +
+	"\x11RespondPermission\x12'.harnessapi.v1.RespondPermissionRequest\x1a(.harnessapi.v1.RespondPermissionResponse\x12Q\n" +
 	"\n" +
-	"CancelTurn\x12 .harnessapi.v1.CancelTurnRequest\x1a!.harnessapi.v1.CancelTurnResponse\x12f\n" +
-	"\x11RespondPermission\x12'.harnessapi.v1.RespondPermissionRequest\x1a(.harnessapi.v1.RespondPermissionResponse\x12H\n" +
-	"\aSuspend\x12\x1d.harnessapi.v1.SuspendRequest\x1a\x1e.harnessapi.v1.SuspendResponse\x12Q\n" +
-	"\n" +
-	"EndSession\x12 .harnessapi.v1.EndSessionRequest\x1a!.harnessapi.v1.EndSessionResponse\x12`\n" +
-	"\x0fDeleteWorkspace\x12%.harnessapi.v1.DeleteWorkspaceRequest\x1a&.harnessapi.v1.DeleteWorkspaceResponse\x12Q\n" +
+	"EndSession\x12 .harnessapi.v1.EndSessionRequest\x1a!.harnessapi.v1.EndSessionResponse\x12Q\n" +
 	"\n" +
 	"GetSession\x12 .harnessapi.v1.GetSessionRequest\x1a!.harnessapi.v1.GetSessionResponse\x12W\n" +
 	"\fListSessions\x12\".harnessapi.v1.ListSessionsRequest\x1a#.harnessapi.v1.ListSessionsResponse\x12Z\n" +
-	"\rListTemplates\x12#.harnessapi.v1.ListTemplatesRequest\x1a$.harnessapi.v1.ListTemplatesResponse\x12`\n" +
-	"\x0fReissueApproval\x12%.harnessapi.v1.ReissueApprovalRequest\x1a&.harnessapi.v1.ReissueApprovalResponse\x12Q\n" +
+	"\rListTemplates\x12#.harnessapi.v1.ListTemplatesRequest\x1a$.harnessapi.v1.ListTemplatesResponse\x12Q\n" +
 	"\n" +
-	"ListEvents\x12 .harnessapi.v1.ListEventsRequest\x1a!.harnessapi.v1.ListEventsResponse\x12i\n" +
-	"\x12SetSessionMetadata\x12(.harnessapi.v1.SetSessionMetadataRequest\x1a).harnessapi.v1.SetSessionMetadataResponse\x12P\n" +
+	"ListEvents\x12 .harnessapi.v1.ListEventsRequest\x1a!.harnessapi.v1.ListEventsResponse\x12P\n" +
 	"\tSubscribe\x12\x1f.harnessapi.v1.SubscribeRequest\x1a .harnessapi.v1.SubscribeResponse0\x01B:Z8github.com/pomerium/agentops/harness/api/pb;harnessapipbb\x06proto3"
 
 var (
@@ -1990,101 +1389,71 @@ func file_harnessapi_v1_harnessapi_proto_rawDescGZIP() []byte {
 	return file_harnessapi_v1_harnessapi_proto_rawDescData
 }
 
-var file_harnessapi_v1_harnessapi_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_harnessapi_v1_harnessapi_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_harnessapi_v1_harnessapi_proto_goTypes = []any{
-	(*ErrorInfo)(nil),                  // 0: harnessapi.v1.ErrorInfo
-	(*SessionRef)(nil),                 // 1: harnessapi.v1.SessionRef
-	(*SessionView)(nil),                // 2: harnessapi.v1.SessionView
-	(*Event)(nil),                      // 3: harnessapi.v1.Event
-	(*TemplateSummary)(nil),            // 4: harnessapi.v1.TemplateSummary
-	(*CreateSessionRequest)(nil),       // 5: harnessapi.v1.CreateSessionRequest
-	(*CreateSessionResponse)(nil),      // 6: harnessapi.v1.CreateSessionResponse
-	(*PromptRequest)(nil),              // 7: harnessapi.v1.PromptRequest
-	(*PromptResponse)(nil),             // 8: harnessapi.v1.PromptResponse
-	(*CancelTurnRequest)(nil),          // 9: harnessapi.v1.CancelTurnRequest
-	(*CancelTurnResponse)(nil),         // 10: harnessapi.v1.CancelTurnResponse
-	(*RespondPermissionRequest)(nil),   // 11: harnessapi.v1.RespondPermissionRequest
-	(*RespondPermissionResponse)(nil),  // 12: harnessapi.v1.RespondPermissionResponse
-	(*SuspendRequest)(nil),             // 13: harnessapi.v1.SuspendRequest
-	(*SuspendResponse)(nil),            // 14: harnessapi.v1.SuspendResponse
-	(*EndSessionRequest)(nil),          // 15: harnessapi.v1.EndSessionRequest
-	(*EndSessionResponse)(nil),         // 16: harnessapi.v1.EndSessionResponse
-	(*DeleteWorkspaceRequest)(nil),     // 17: harnessapi.v1.DeleteWorkspaceRequest
-	(*DeleteWorkspaceResponse)(nil),    // 18: harnessapi.v1.DeleteWorkspaceResponse
-	(*GetSessionRequest)(nil),          // 19: harnessapi.v1.GetSessionRequest
-	(*GetSessionResponse)(nil),         // 20: harnessapi.v1.GetSessionResponse
-	(*ListSessionsRequest)(nil),        // 21: harnessapi.v1.ListSessionsRequest
-	(*ListSessionsResponse)(nil),       // 22: harnessapi.v1.ListSessionsResponse
-	(*ListTemplatesRequest)(nil),       // 23: harnessapi.v1.ListTemplatesRequest
-	(*ListTemplatesResponse)(nil),      // 24: harnessapi.v1.ListTemplatesResponse
-	(*ReissueApprovalRequest)(nil),     // 25: harnessapi.v1.ReissueApprovalRequest
-	(*ReissueApprovalResponse)(nil),    // 26: harnessapi.v1.ReissueApprovalResponse
-	(*ListEventsRequest)(nil),          // 27: harnessapi.v1.ListEventsRequest
-	(*ListEventsResponse)(nil),         // 28: harnessapi.v1.ListEventsResponse
-	(*SetSessionMetadataRequest)(nil),  // 29: harnessapi.v1.SetSessionMetadataRequest
-	(*SetSessionMetadataResponse)(nil), // 30: harnessapi.v1.SetSessionMetadataResponse
-	(*SubscribeRequest)(nil),           // 31: harnessapi.v1.SubscribeRequest
-	(*SubscribeResponse)(nil),          // 32: harnessapi.v1.SubscribeResponse
-	(*timestamppb.Timestamp)(nil),      // 33: google.protobuf.Timestamp
+	(*ErrorInfo)(nil),                 // 0: harnessapi.v1.ErrorInfo
+	(*SessionRef)(nil),                // 1: harnessapi.v1.SessionRef
+	(*SessionView)(nil),               // 2: harnessapi.v1.SessionView
+	(*Event)(nil),                     // 3: harnessapi.v1.Event
+	(*TemplateSummary)(nil),           // 4: harnessapi.v1.TemplateSummary
+	(*CreateSessionRequest)(nil),      // 5: harnessapi.v1.CreateSessionRequest
+	(*CreateSessionResponse)(nil),     // 6: harnessapi.v1.CreateSessionResponse
+	(*PromptRequest)(nil),             // 7: harnessapi.v1.PromptRequest
+	(*PromptResponse)(nil),            // 8: harnessapi.v1.PromptResponse
+	(*RespondPermissionRequest)(nil),  // 9: harnessapi.v1.RespondPermissionRequest
+	(*RespondPermissionResponse)(nil), // 10: harnessapi.v1.RespondPermissionResponse
+	(*EndSessionRequest)(nil),         // 11: harnessapi.v1.EndSessionRequest
+	(*EndSessionResponse)(nil),        // 12: harnessapi.v1.EndSessionResponse
+	(*GetSessionRequest)(nil),         // 13: harnessapi.v1.GetSessionRequest
+	(*GetSessionResponse)(nil),        // 14: harnessapi.v1.GetSessionResponse
+	(*ListSessionsRequest)(nil),       // 15: harnessapi.v1.ListSessionsRequest
+	(*ListSessionsResponse)(nil),      // 16: harnessapi.v1.ListSessionsResponse
+	(*ListTemplatesRequest)(nil),      // 17: harnessapi.v1.ListTemplatesRequest
+	(*ListTemplatesResponse)(nil),     // 18: harnessapi.v1.ListTemplatesResponse
+	(*ListEventsRequest)(nil),         // 19: harnessapi.v1.ListEventsRequest
+	(*ListEventsResponse)(nil),        // 20: harnessapi.v1.ListEventsResponse
+	(*SubscribeRequest)(nil),          // 21: harnessapi.v1.SubscribeRequest
+	(*SubscribeResponse)(nil),         // 22: harnessapi.v1.SubscribeResponse
+	(*timestamppb.Timestamp)(nil),     // 23: google.protobuf.Timestamp
 }
 var file_harnessapi_v1_harnessapi_proto_depIdxs = []int32{
-	33, // 0: harnessapi.v1.SessionView.run_expires_at:type_name -> google.protobuf.Timestamp
-	33, // 1: harnessapi.v1.SessionView.created_at:type_name -> google.protobuf.Timestamp
-	33, // 2: harnessapi.v1.SessionView.updated_at:type_name -> google.protobuf.Timestamp
-	33, // 3: harnessapi.v1.SessionView.suspended_at:type_name -> google.protobuf.Timestamp
-	33, // 4: harnessapi.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
-	2,  // 5: harnessapi.v1.CreateSessionResponse.session:type_name -> harnessapi.v1.SessionView
-	1,  // 6: harnessapi.v1.PromptRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 7: harnessapi.v1.CancelTurnRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 8: harnessapi.v1.RespondPermissionRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 9: harnessapi.v1.SuspendRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 10: harnessapi.v1.EndSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 11: harnessapi.v1.DeleteWorkspaceRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 12: harnessapi.v1.GetSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
-	2,  // 13: harnessapi.v1.GetSessionResponse.session:type_name -> harnessapi.v1.SessionView
-	33, // 14: harnessapi.v1.ListSessionsRequest.updated_since:type_name -> google.protobuf.Timestamp
-	2,  // 15: harnessapi.v1.ListSessionsResponse.sessions:type_name -> harnessapi.v1.SessionView
-	4,  // 16: harnessapi.v1.ListTemplatesResponse.templates:type_name -> harnessapi.v1.TemplateSummary
-	1,  // 17: harnessapi.v1.ReissueApprovalRequest.ref:type_name -> harnessapi.v1.SessionRef
-	33, // 18: harnessapi.v1.ReissueApprovalResponse.expires_at:type_name -> google.protobuf.Timestamp
-	1,  // 19: harnessapi.v1.ListEventsRequest.ref:type_name -> harnessapi.v1.SessionRef
-	3,  // 20: harnessapi.v1.ListEventsResponse.events:type_name -> harnessapi.v1.Event
-	1,  // 21: harnessapi.v1.SetSessionMetadataRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 22: harnessapi.v1.SubscribeRequest.ref:type_name -> harnessapi.v1.SessionRef
-	3,  // 23: harnessapi.v1.SubscribeResponse.event:type_name -> harnessapi.v1.Event
-	5,  // 24: harnessapi.v1.HarnessAPIService.CreateSession:input_type -> harnessapi.v1.CreateSessionRequest
-	7,  // 25: harnessapi.v1.HarnessAPIService.Prompt:input_type -> harnessapi.v1.PromptRequest
-	9,  // 26: harnessapi.v1.HarnessAPIService.CancelTurn:input_type -> harnessapi.v1.CancelTurnRequest
-	11, // 27: harnessapi.v1.HarnessAPIService.RespondPermission:input_type -> harnessapi.v1.RespondPermissionRequest
-	13, // 28: harnessapi.v1.HarnessAPIService.Suspend:input_type -> harnessapi.v1.SuspendRequest
-	15, // 29: harnessapi.v1.HarnessAPIService.EndSession:input_type -> harnessapi.v1.EndSessionRequest
-	17, // 30: harnessapi.v1.HarnessAPIService.DeleteWorkspace:input_type -> harnessapi.v1.DeleteWorkspaceRequest
-	19, // 31: harnessapi.v1.HarnessAPIService.GetSession:input_type -> harnessapi.v1.GetSessionRequest
-	21, // 32: harnessapi.v1.HarnessAPIService.ListSessions:input_type -> harnessapi.v1.ListSessionsRequest
-	23, // 33: harnessapi.v1.HarnessAPIService.ListTemplates:input_type -> harnessapi.v1.ListTemplatesRequest
-	25, // 34: harnessapi.v1.HarnessAPIService.ReissueApproval:input_type -> harnessapi.v1.ReissueApprovalRequest
-	27, // 35: harnessapi.v1.HarnessAPIService.ListEvents:input_type -> harnessapi.v1.ListEventsRequest
-	29, // 36: harnessapi.v1.HarnessAPIService.SetSessionMetadata:input_type -> harnessapi.v1.SetSessionMetadataRequest
-	31, // 37: harnessapi.v1.HarnessAPIService.Subscribe:input_type -> harnessapi.v1.SubscribeRequest
-	6,  // 38: harnessapi.v1.HarnessAPIService.CreateSession:output_type -> harnessapi.v1.CreateSessionResponse
-	8,  // 39: harnessapi.v1.HarnessAPIService.Prompt:output_type -> harnessapi.v1.PromptResponse
-	10, // 40: harnessapi.v1.HarnessAPIService.CancelTurn:output_type -> harnessapi.v1.CancelTurnResponse
-	12, // 41: harnessapi.v1.HarnessAPIService.RespondPermission:output_type -> harnessapi.v1.RespondPermissionResponse
-	14, // 42: harnessapi.v1.HarnessAPIService.Suspend:output_type -> harnessapi.v1.SuspendResponse
-	16, // 43: harnessapi.v1.HarnessAPIService.EndSession:output_type -> harnessapi.v1.EndSessionResponse
-	18, // 44: harnessapi.v1.HarnessAPIService.DeleteWorkspace:output_type -> harnessapi.v1.DeleteWorkspaceResponse
-	20, // 45: harnessapi.v1.HarnessAPIService.GetSession:output_type -> harnessapi.v1.GetSessionResponse
-	22, // 46: harnessapi.v1.HarnessAPIService.ListSessions:output_type -> harnessapi.v1.ListSessionsResponse
-	24, // 47: harnessapi.v1.HarnessAPIService.ListTemplates:output_type -> harnessapi.v1.ListTemplatesResponse
-	26, // 48: harnessapi.v1.HarnessAPIService.ReissueApproval:output_type -> harnessapi.v1.ReissueApprovalResponse
-	28, // 49: harnessapi.v1.HarnessAPIService.ListEvents:output_type -> harnessapi.v1.ListEventsResponse
-	30, // 50: harnessapi.v1.HarnessAPIService.SetSessionMetadata:output_type -> harnessapi.v1.SetSessionMetadataResponse
-	32, // 51: harnessapi.v1.HarnessAPIService.Subscribe:output_type -> harnessapi.v1.SubscribeResponse
-	38, // [38:52] is the sub-list for method output_type
-	24, // [24:38] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	23, // 0: harnessapi.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
+	2,  // 1: harnessapi.v1.CreateSessionResponse.session:type_name -> harnessapi.v1.SessionView
+	1,  // 2: harnessapi.v1.PromptRequest.ref:type_name -> harnessapi.v1.SessionRef
+	1,  // 3: harnessapi.v1.RespondPermissionRequest.ref:type_name -> harnessapi.v1.SessionRef
+	1,  // 4: harnessapi.v1.EndSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
+	1,  // 5: harnessapi.v1.GetSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
+	2,  // 6: harnessapi.v1.GetSessionResponse.session:type_name -> harnessapi.v1.SessionView
+	23, // 7: harnessapi.v1.ListSessionsRequest.updated_since:type_name -> google.protobuf.Timestamp
+	2,  // 8: harnessapi.v1.ListSessionsResponse.sessions:type_name -> harnessapi.v1.SessionView
+	4,  // 9: harnessapi.v1.ListTemplatesResponse.templates:type_name -> harnessapi.v1.TemplateSummary
+	1,  // 10: harnessapi.v1.ListEventsRequest.ref:type_name -> harnessapi.v1.SessionRef
+	3,  // 11: harnessapi.v1.ListEventsResponse.events:type_name -> harnessapi.v1.Event
+	1,  // 12: harnessapi.v1.SubscribeRequest.ref:type_name -> harnessapi.v1.SessionRef
+	3,  // 13: harnessapi.v1.SubscribeResponse.event:type_name -> harnessapi.v1.Event
+	5,  // 14: harnessapi.v1.HarnessAPIService.CreateSession:input_type -> harnessapi.v1.CreateSessionRequest
+	7,  // 15: harnessapi.v1.HarnessAPIService.Prompt:input_type -> harnessapi.v1.PromptRequest
+	9,  // 16: harnessapi.v1.HarnessAPIService.RespondPermission:input_type -> harnessapi.v1.RespondPermissionRequest
+	11, // 17: harnessapi.v1.HarnessAPIService.EndSession:input_type -> harnessapi.v1.EndSessionRequest
+	13, // 18: harnessapi.v1.HarnessAPIService.GetSession:input_type -> harnessapi.v1.GetSessionRequest
+	15, // 19: harnessapi.v1.HarnessAPIService.ListSessions:input_type -> harnessapi.v1.ListSessionsRequest
+	17, // 20: harnessapi.v1.HarnessAPIService.ListTemplates:input_type -> harnessapi.v1.ListTemplatesRequest
+	19, // 21: harnessapi.v1.HarnessAPIService.ListEvents:input_type -> harnessapi.v1.ListEventsRequest
+	21, // 22: harnessapi.v1.HarnessAPIService.Subscribe:input_type -> harnessapi.v1.SubscribeRequest
+	6,  // 23: harnessapi.v1.HarnessAPIService.CreateSession:output_type -> harnessapi.v1.CreateSessionResponse
+	8,  // 24: harnessapi.v1.HarnessAPIService.Prompt:output_type -> harnessapi.v1.PromptResponse
+	10, // 25: harnessapi.v1.HarnessAPIService.RespondPermission:output_type -> harnessapi.v1.RespondPermissionResponse
+	12, // 26: harnessapi.v1.HarnessAPIService.EndSession:output_type -> harnessapi.v1.EndSessionResponse
+	14, // 27: harnessapi.v1.HarnessAPIService.GetSession:output_type -> harnessapi.v1.GetSessionResponse
+	16, // 28: harnessapi.v1.HarnessAPIService.ListSessions:output_type -> harnessapi.v1.ListSessionsResponse
+	18, // 29: harnessapi.v1.HarnessAPIService.ListTemplates:output_type -> harnessapi.v1.ListTemplatesResponse
+	20, // 30: harnessapi.v1.HarnessAPIService.ListEvents:output_type -> harnessapi.v1.ListEventsResponse
+	22, // 31: harnessapi.v1.HarnessAPIService.Subscribe:output_type -> harnessapi.v1.SubscribeResponse
+	23, // [23:32] is the sub-list for method output_type
+	14, // [14:23] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_harnessapi_v1_harnessapi_proto_init() }
@@ -2098,7 +1467,7 @@ func file_harnessapi_v1_harnessapi_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_harnessapi_v1_harnessapi_proto_rawDesc), len(file_harnessapi_v1_harnessapi_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
