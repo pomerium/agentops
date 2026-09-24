@@ -142,8 +142,6 @@ vocabularies:
         doc: a session starting, as opposed to one coming back.
       - value: revive
         doc: a session coming back on the same workspace.
-      - value: client
-        doc: a client asked for this transition.
       - value: idle
         doc: the session was quiet past its idle TTL. It is both a suspend reason
           and, when the suspend itself failed, an end reason.
@@ -293,13 +291,6 @@ sentinels:
       message: "harnessapi: invalid argument"
       doc: a malformed or missing field.
       code: invalid_argument
-    - value: ErrNotImplemented
-      message: "harnessapi: not implemented"
-      doc: the verb is part of the published shape but has no implementation yet.
-        It is returned, never panicked, so a client can code against the final API
-        today.
-      code: unimplemented
-      means: published, not built yet
     - value: ErrUnavailable
       message: "harnessapi: temporarily unavailable"
       doc: a dependency (the orchestrator, the authorization server) failed.

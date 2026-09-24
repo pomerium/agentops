@@ -30,7 +30,6 @@ var published = []struct {
 	{"ErrInvalidState", api.ErrInvalidState, connect.CodeFailedPrecondition},
 	{"ErrNotRevivable", api.ErrNotRevivable, connect.CodeFailedPrecondition},
 	{"ErrInvalidArgument", api.ErrInvalidArgument, connect.CodeInvalidArgument},
-	{"ErrNotImplemented", api.ErrNotImplemented, connect.CodeUnimplemented},
 	{"ErrUnavailable", api.ErrUnavailable, connect.CodeUnavailable},
 	{"ErrQuotaExceeded", api.ErrQuotaExceeded, connect.CodeResourceExhausted},
 }

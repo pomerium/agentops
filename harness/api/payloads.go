@@ -31,10 +31,6 @@ type ApprovalRequired struct {
 	// written, so an absent expiry reads as the zero time rather than as a
 	// missing key.
 	ExpiresAt time.Time `json:"expires_at"`
-	// Reissued: marks an approval solicited by ReissueApproval rather than by
-	// the launch itself, so a client can tell "approve this" from "approve this
-	// again".
-	Reissued bool `json:"reissued,omitempty"`
 }
 
 // Approved is the verified identity that let the run start.
