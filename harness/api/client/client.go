@@ -48,7 +48,8 @@ type Config struct {
 	DialAddress string
 	// CAFile optionally trusts a private PEM CA bundle.
 	CAFile string
-	// RequestTimeout bounds a unary call. It is deliberately NOT applied to
+	// RequestTimeout bounds each attempt of a unary call, whatever HTTPClient is
+	// configured. It is deliberately NOT applied to
 	// subscriptions; see the two transports below.
 	RequestTimeout time.Duration
 	// Retries is how many times a retryable unary call is re-sent. Zero means the
@@ -226,14 +227,35 @@ func setBearer(h http.Header, tokenFile string) error {
 func call[Req, Res any](ctx context.Context, c *Client,
 	do func(context.Context, *connect.Request[Req]) (*connect.Response[Res], error), msg *Req,
 ) (*Res, error) {
+	return send(ctx, c, c.cfg.Retries, do, msg)
+}
+
+// callOnce is call for a verb that must not be re-sent. A Prompt the server
+// accepted but whose response was lost has already started a turn, and nothing
+// on the wire could tell a resent one from a new one: retrying it would run the
+// same instruction twice.
+func callOnce[Req, Res any](ctx context.Context, c *Client,
+	do func(context.Context, *connect.Request[Req]) (*connect.Response[Res], error), msg *Req,
+) (*Res, error) {
+	return send(ctx, c, 0, do, msg)
+}
+
+// send runs a unary request, re-sending up to retries times on a failure a retry
+// can fix. Each attempt is bounded by RequestTimeout through its context, so the
+// bound holds whatever transport the caller configured.
+func send[Req, Res any](ctx context.Context, c *Client, retries int,
+	do func(context.Context, *connect.Request[Req]) (*connect.Response[Res], error), msg *Req,
+) (*Res, error) {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		res, err := do(ctx, connect.NewRequest(msg))
+		actx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
+		res, err := do(actx, connect.NewRequest(msg))
+		cancel()
 		if err == nil {
 			return res.Msg, nil
 		}
 		lastErr = err
-		if attempt >= c.cfg.Retries || !retryable(err) || ctx.Err() != nil {
+		if attempt >= retries || !retryable(err) || ctx.Err() != nil {
 			return nil, wire.FromConnect(lastErr)
 		}
 		select {
@@ -281,7 +303,7 @@ func (c *Client) CreateSession(ctx context.Context, req api.CreateSessionRequest
 }
 
 func (c *Client) Prompt(ctx context.Context, req api.PromptRequest) (api.PromptResult, error) {
-	res, err := call(ctx, c, c.unary.Prompt, &pb.PromptRequest{
+	res, err := callOnce(ctx, c, c.unary.Prompt, &pb.PromptRequest{
 		Ref: wire.Ref(req.Ref), Content: req.Content,
 	})
 	if err != nil {

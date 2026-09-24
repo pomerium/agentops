@@ -296,7 +296,9 @@ transport failure with no Connect error at all; back off `(attempt+1) × 200 ms`
 Everything else is the platform's considered answer, and asking again only asks
 again. `CreateSession` is safe to retry: a conversation holds one live session,
 so retrying a create that did succeed is refused as `ErrConflict` rather than
-making a second one.
+making a second one. **Never retry `Prompt`:** a prompt the platform accepted but
+whose response was lost has already started a turn, and a resent one would start
+another — nothing on the wire tells the two apart. Surface the error instead.
 
 ### Events
 
