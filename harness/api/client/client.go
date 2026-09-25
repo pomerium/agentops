@@ -221,19 +221,18 @@ func setBearer(h http.Header, tokenFile string) error {
 // Retryable means the platform said it was unavailable, or the transport never
 // got an answer. Everything else — a refusal, a conflict, a bad argument — is
 // the platform's considered answer and re-sending it would only ask again.
-// CreateSession is safe to retry because a client that supplies an idempotency
-// key gets the session it already made rather than a second pod; one that does
-// not has said it does not care.
+// CreateSession is safe to retry because a conversation holds one live session:
+// a retry of a create that succeeded is ErrConflict, not a second pod.
 func call[Req, Res any](ctx context.Context, c *Client,
 	do func(context.Context, *connect.Request[Req]) (*connect.Response[Res], error), msg *Req,
 ) (*Res, error) {
 	return send(ctx, c, c.cfg.Retries, do, msg)
 }
 
-// callOnce is call for a verb that must not be re-sent. A Prompt the server
-// accepted but whose response was lost has already started a turn, and nothing
-// on the wire could tell a resent one from a new one: retrying it would run the
-// same instruction twice.
+// callOnce is call for a request that must not be re-sent: a Prompt without an
+// idempotency key. One the server accepted but whose response was lost has
+// already started a turn, and nothing on the wire could tell a resent one from a
+// new one: retrying it would run the same instruction twice.
 func callOnce[Req, Res any](ctx context.Context, c *Client,
 	do func(context.Context, *connect.Request[Req]) (*connect.Response[Res], error), msg *Req,
 ) (*Res, error) {
@@ -303,9 +302,15 @@ func (c *Client) CreateSession(ctx context.Context, req api.CreateSessionRequest
 }
 
 func (c *Client) Prompt(ctx context.Context, req api.PromptRequest) (api.PromptResult, error) {
-	res, err := callOnce(ctx, c, c.unary.Prompt, &pb.PromptRequest{
-		Ref: wire.Ref(req.Ref), Content: req.Content,
-	})
+	msg := &pb.PromptRequest{
+		Ref: wire.Ref(req.Ref), Content: req.Content, IdempotencyKey: req.IdempotencyKey,
+	}
+	send := callOnce[pb.PromptRequest, pb.PromptResponse]
+	if req.IdempotencyKey != "" {
+		// The key is what makes a resend recognizable as the same prompt.
+		send = call[pb.PromptRequest, pb.PromptResponse]
+	}
+	res, err := send(ctx, c, c.unary.Prompt, msg)
 	if err != nil {
 		return api.PromptResult{}, err
 	}
