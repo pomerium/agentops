@@ -134,7 +134,8 @@ type PermissionOption struct {
 	Kind string `json:"kind,omitempty"`
 }
 
-// PermissionRequest asks the client's principal to authorize a tool call.
+// PermissionRequest asks for a decision on a tool call, which the client
+// puts to a person (usually the user) and relays with RespondPermission.
 // The agent is blocked until RespondPermission answers it or the deadline
 // passes.
 type PermissionRequest struct {

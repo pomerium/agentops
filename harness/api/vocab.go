@@ -32,8 +32,9 @@ const (
 	EventAgentThought EventType = "agent_thought"
 	// EventToolCall: announces or updates a tool call. Payload: ToolCall.
 	EventToolCall EventType = "tool_call"
-	// EventPermissionRequest: asks the client's principal to authorize a tool
-	// call. Payload: PermissionRequest.
+	// EventPermissionRequest: asks for a decision on a tool call, which the
+	// client puts to a person (usually the user) and relays with
+	// RespondPermission. Payload: PermissionRequest.
 	EventPermissionRequest EventType = "permission_request"
 	// EventPermissionResolved: closes a permission request, however it ended.
 	// Payload: PermissionResolved.
