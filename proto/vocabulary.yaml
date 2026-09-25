@@ -66,7 +66,8 @@ vocabularies:
         doc: announces or updates a tool call.
         payload: ToolCall
       - value: permission_request
-        doc: asks the client's principal to authorize a tool call.
+        doc: asks for a decision on a tool call, which the client puts to a person
+          (usually the user) and relays with RespondPermission.
         payload: PermissionRequest
       - value: permission_resolved
         doc: closes a permission request, however it ended.
