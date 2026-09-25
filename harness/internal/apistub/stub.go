@@ -125,6 +125,10 @@ type session struct {
 	turn string
 	// turns counts completed turns, for naming the next one.
 	turns int
+	// keyed maps each idempotency key a prompt was accepted with to the turn it
+	// started. The platform forgets a key after ten minutes; the stub keeps it for
+	// its lifetime, which a suite never outlasts.
+	keyed map[string]string
 }
 
 // --- verbs -------------------------------------------------------------------
@@ -204,6 +208,12 @@ func (s *Stub) Prompt(_ context.Context, req api.PromptRequest) (api.PromptResul
 	if strings.TrimSpace(req.Content) == "" {
 		return api.PromptResult{}, api.Errorf(api.ErrInvalidArgument, "a prompt needs content")
 	}
+	// A repeated key is answered before the state is checked, as on the platform:
+	// the retry of an accepted prompt gets its turn back whatever that turn has
+	// since done to the session.
+	if turn, ok := sess.keyed[req.IdempotencyKey]; ok {
+		return api.PromptResult{TurnID: turn}, nil
+	}
 
 	if sess.view.State != api.StateRunning {
 		return api.PromptResult{}, api.Errorf(api.ErrInvalidState,
@@ -211,6 +221,12 @@ func (s *Stub) Prompt(_ context.Context, req api.PromptRequest) (api.PromptResul
 	}
 
 	turn := s.runTurn(sess, req.Content)
+	if req.IdempotencyKey != "" {
+		if sess.keyed == nil {
+			sess.keyed = map[string]string{}
+		}
+		sess.keyed[req.IdempotencyKey] = turn
+	}
 	return api.PromptResult{TurnID: turn}, nil
 }
 

@@ -62,8 +62,9 @@ func (h *handler) Prompt(ctx context.Context, req *connect.Request[pb.PromptRequ
 		return nil, err
 	}
 	res, err := h.svc.Prompt(ctx, api.PromptRequest{
-		Ref:     wire.RefFrom(req.Msg.GetRef(), id),
-		Content: req.Msg.GetContent(),
+		Ref:            wire.RefFrom(req.Msg.GetRef(), id),
+		Content:        req.Msg.GetContent(),
+		IdempotencyKey: req.Msg.GetIdempotencyKey(),
 	})
 	if err != nil {
 		return nil, wire.ToConnect(err)

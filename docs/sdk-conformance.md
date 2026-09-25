@@ -150,8 +150,11 @@ The two reference suites also cover, with no scenario header:
 - **conflict** — a second live session on one conversation is refused;
 - **`ListEvents` paging**;
 - **the retry policy** — a retryable code is re-sent and then reported as the
-  platform's own answer; a considered refusal is not retried at all (assert on
-  elapsed time, or you are asserting nothing).
+  platform's own answer; a considered refusal is not retried at all, and neither
+  is a prompt without an idempotency key (assert on elapsed time, or you are
+  asserting nothing);
+- **idempotency keys** — a keyed prompt is re-sent, and a repeated key gets the
+  first prompt's turn back rather than a second turn.
 
 ## If you are writing an SDK in another language
 

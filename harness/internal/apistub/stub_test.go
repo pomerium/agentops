@@ -602,6 +602,47 @@ func TestALostPromptResponseIsNotRetried(t *testing.T) {
 	}
 }
 
+// TestALostKeyedPromptIsRetriedOnce: with an idempotency key the client does
+// resend a prompt whose response was lost, and the resend gets the first turn
+// back instead of starting a second one.
+func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
+	ctx := context.Background()
+	newClient := serve(t)
+	driver := newClient(nil)
+	lossy := newClient(nil, func(cfg *apiclient.Config) {
+		cfg.HTTPClient = &lossyHTTPClient{}
+	})
+
+	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
+		Template: "runid", ConversationRef: "lossy", ApprovalPrompt: "ship it",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ref := api.SessionRef{SessionID: view.ID}
+	res, err := lossy.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "deploy", IdempotencyKey: "msg-1"})
+	if err != nil {
+		t.Fatalf("Prompt with a key was not retried past a lost response: %v", err)
+	}
+
+	events, err := driver.ListEvents(ctx, api.EventsRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var turns []string
+	for _, ev := range events {
+		if ev.Type == api.EventTurnCompleted {
+			turns = append(turns, ev.TurnID)
+		}
+	}
+	if len(turns) != 1 {
+		t.Fatalf("one keyed prompt ran %d turns", len(turns))
+	}
+	if turns[0] != res.TurnID {
+		t.Errorf("the retry returned turn %q; the turn that ran is %q", res.TurnID, turns[0])
+	}
+}
+
 // TestActingVerbsIgnoreIncludeTerminal: a verb that acts on a session operates
 // on the live one or on nothing, as SessionRef says, so an ended conversation is
 // not found rather than acted on.
