@@ -4,6 +4,48 @@
 // 	protoc        (unknown)
 // source: harnessapi/v1/harnessapi.proto
 
+// The Harness API: the client-facing contract of the agentops harness.
+//
+// A client (a Slack bot, a web app, a CI job) uses it to start an agent session,
+// have a human approve it, talk to the agent turn by turn, and read everything
+// the session does back off one durable, ordered event log. This file is the
+// source of truth for that contract. docs/clients.md is the guide to writing a
+// client against it, and `make apistub` builds a conformance server that speaks
+// it with no cluster and no credentials.
+//
+// # Transport
+//
+// Connect (https://connectrpc.com), over HTTP/2 or HTTP/1.1, with either the
+// binary protobuf or the JSON codec. The service is served behind a Pomerium
+// route; a client reaches it at that route's URL and presents the credential the
+// route asks for (for a workload, its projected ServiceAccount token).
+//
+// # Identity
+//
+// Identity is NEVER taken from message fields. The caller's client id comes from
+// the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is scoped
+// to it: a client sees, and can act on, only the sessions it created. That is why
+// no request message carries a client id — a field a client could set would be a
+// field a client could lie in. Another client's session is always reported as
+// not found, never as forbidden, because saying it exists would disclose it.
+//
+// # Errors
+//
+// A failed call returns a Connect error whose code classifies it, with an
+// ErrorInfo detail naming the exact sentinel. Branch on the sentinel; fall back to
+// the code when the detail is absent or names something this client does not
+// know. See ErrorInfo for the full list. Every verb returns ErrForbidden when the
+// calling client has no ClientBinding, i.e. has not been registered to use the
+// platform; the per-verb lists below leave that out.
+//
+// # Stability
+//
+// The contract grows only by addition. A client must ignore a field it does not
+// know, tolerate a string value it does not know in every vocabulary field
+// (SessionView.state, Event.type, and the enumerated strings inside payloads),
+// and tolerate an event payload key it does not know. Those fields are strings
+// rather than enums precisely so that a new value never breaks an old client.
+
 package harnessapipb
 
 import (
@@ -26,17 +68,59 @@ const (
 // platform actually raised.
 //
 // The Connect code alone is not enough: several sentinels map onto the same code
-// (a not-found session and an unknown permission request are both NotFound-ish,
-// forbidden and quota-exceeded are both refusals), and a client that branches on
-// errors.Is needs the sentinel back, not an approximation of it. Carrying the
-// name makes the mapping injective, so an error round-trips through the wire
-// and still matches the same errors.Is check on the far side.
+// (a missing session and an unknown permission request are both not_found), and
+// a client that branches on the error needs the sentinel back, not an
+// approximation of it. Carrying the name makes the mapping injective, so an error
+// round-trips through the wire and still matches the same check on the far side.
 type ErrorInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// sentinel is the Go sentinel's name, e.g. "ErrNotRevivable". Unknown names
-	// are tolerated: a client that does not recognize one falls back to the code.
+	// sentinel is the error's name, one of the values below with the Connect code
+	// it travels under. A name this client does not know must be tolerated: fall
+	// back to the code.
+	//
+	// BEGIN GENERATED: sentinels (make vocab)
+	// "ErrNotFound" (not_found): no such session, or none this client may see.
+	// "ErrUnknownRequest" (not_found): an unknown or already-resolved permission
+	//
+	//	request.
+	//
+	// "ErrForbidden" (permission_denied): this client has no ClientBinding, or the
+	//
+	//	template is not in its binding. Another client's session is never
+	//	Forbidden; it is NotFound.
+	//
+	// "ErrConflict" (already_exists): the conversation ref already has a live
+	//
+	//	session.
+	//
+	// "ErrInvalidState" (failed_precondition): the verb does not apply in this
+	//
+	//	session's state. Notably a prompt at a state that is neither running nor
+	//	suspended: consent must cover exactly what the approver read, so there
+	//	is no queue.
+	//
+	// "ErrNotRevivable" (failed_precondition): the session is suspended but cannot
+	//
+	//	be continued — no recorded conversation, no workspace, or no approver
+	//	to pin a fresh approval to. A client is expected to start a new session
+	//	instead.
+	//
+	// "ErrInvalidArgument" (invalid_argument): a malformed or missing field.
+	// "ErrUnavailable" (unavailable): a dependency (the orchestrator, the
+	//
+	//	authorization server) failed. Retryable.
+	//
+	// "ErrQuotaExceeded" (resource_exhausted): the client's ClientBinding caps
+	//
+	//	what it may hold at once, or how fast it may open sessions, and this
+	//	call would exceed it. Distinct from ErrForbidden because it is a "not
+	//	now", not a "not ever": the detail names which quota, and a client can
+	//	retry or end something first.
+	//
+	// END GENERATED: sentinels
 	Sentinel string `protobuf:"bytes,1,opt,name=sentinel,proto3" json:"sentinel,omitempty"`
-	// detail is the human-readable elaboration the sentinel was wrapped with.
+	// detail is the human-readable elaboration of this particular failure, for a
+	// log or a person. Never branch on it: its wording is not part of the contract.
 	Detail        string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -86,18 +170,27 @@ func (x *ErrorInfo) GetDetail() string {
 	return ""
 }
 
-// SessionRef addresses a session by id or by conversation, always within the
-// calling client. Exactly one of session_id/conversation_ref must be set.
+// SessionRef addresses one session within the calling client, either by the id
+// the platform gave it or by the client's own conversation ref. Exactly one of
+// session_id and conversation_ref must be set; neither or both is
+// ErrInvalidArgument.
 //
-// It carries no client_id: the caller's identity is the verified assertion's,
+// It carries no client id: the caller's identity is the verified assertion's,
 // and a field here would only ever be a lie waiting to be believed.
 type SessionRef struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	SessionId       string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	ConversationRef string                 `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session_id is SessionView.id, as CreateSession returned it.
+	SessionId string `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// conversation_ref is the client's own ref, as given to CreateSession. It
+	// matches the conversation's live session; with include_terminal, its most
+	// recent one.
+	ConversationRef string `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
 	// include_terminal makes a lookup by conversation_ref return the most recent
-	// session the conversation had even if it has ended. Verbs that act on a
-	// session ignore it.
+	// session the conversation had, even one that has ended — the answer to "what
+	// ran here before?", which a client seeding a successor needs. Only the reading
+	// verbs honor it (GetSession, ListEvents, Subscribe). The verbs that act on a
+	// session (Prompt, RespondPermission, EndSession) ignore it: they operate on
+	// the live session or on nothing. Ignored with session_id.
 	IncludeTerminal bool `protobuf:"varint,3,opt,name=include_terminal,json=includeTerminal,proto3" json:"include_terminal,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -154,17 +247,53 @@ func (x *SessionRef) GetIncludeTerminal() bool {
 	return false
 }
 
-// SessionView is what a client sees of a session. State and reason-shaped fields
-// are strings, not enums: the vocabularies are additive and a client must
-// tolerate a value it does not know rather than fail to parse the message.
+// SessionView is what a client sees of a session.
 type SessionView struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	ConversationRef string                 `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
-	State           string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
-	Template        string                 `protobuf:"bytes,4,opt,name=template,proto3" json:"template,omitempty"`
-	// last_seq is the newest event on the session's log: where a client that has
-	// rendered nothing yet starts reading, so it does not replay the conversation.
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the session's platform-assigned id: opaque, stable for the session's
+	// life, and what SessionRef.session_id takes.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// conversation_ref is the client's own ref, exactly as given to CreateSession.
+	ConversationRef string `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
+	// state is where the session is in its life. A string, not an enum: tolerate a
+	// value you do not know.
+	//
+	// BEGIN GENERATED: vocab:SessionState (make vocab)
+	// "pending": the session row exists; nothing has been launched yet. (live: the
+	//
+	//	session still holds cluster resources.)
+	//
+	// "launching": a workspace is being prepared, or a run created. (live: the
+	//
+	//	session still holds cluster resources.)
+	//
+	// "awaiting_approval": a run exists and a human has been asked to approve it.
+	//
+	//	(live: the session still holds cluster resources.)
+	//
+	// "running": an agent is attached and can take turns. (live: the session still
+	//
+	//	holds cluster resources.)
+	//
+	// "suspended": the pod is freed, the workspace and conversation kept. The next
+	//
+	//	prompt revives it. (live: the session still holds cluster resources.)
+	//
+	// "ended": terminal.
+	// "interrupted": terminal for this episode — the harness restarted under a
+	//
+	//	live session. The workspace may still be revivable.
+	//
+	// END GENERATED: vocab:SessionState
+	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	// template is the agent template the session runs, as named at creation. The
+	// template's spec was snapshotted then, and every run of this session —
+	// including a revive — uses that snapshot, so an edit to the template later
+	// cannot widen what an approver consented to.
+	Template string `protobuf:"bytes,4,opt,name=template,proto3" json:"template,omitempty"`
+	// last_seq is the seq of the newest event on the session's log, 0 before the
+	// first. A client that has rendered nothing yet subscribes from here, so it
+	// does not replay the whole conversation.
 	LastSeq       int64 `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -244,13 +373,276 @@ func (x *SessionView) GetLastSeq() int64 {
 // verbatim. Both would break the contract at the transport, which is the one
 // place it must not break.
 type Event struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Seq           int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
-	Type          string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
-	TurnId        string                 `protobuf:"bytes,4,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Payload       []byte                 `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session_id is the session the event belongs to.
+	SessionId string `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// seq is the event's position on the session's log: 1 for the first event,
+	// then dense and strictly increasing, surviving suspend, revive and platform
+	// restarts. It is the deduplication key for at-least-once delivery and the
+	// cursor for ListEvents and Subscribe (after_seq).
+	Seq int64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// type names what happened, and fixes the shape of payload. A string, not an
+	// enum: ignore a type you do not know. The types, each with its payload keys:
+	//
+	// BEGIN GENERATED: vocab:EventType (make vocab)
+	// "state_changed": a session-state transition.
+	//
+	//	payload:
+	//	  old (SessionState): the state the session left.
+	//	  new (SessionState): the state the session is now in; the same value a
+	//	      GetSession would report.
+	//	  reason (Reason, absent when zero): one of the [Reason] values, empty
+	//	      for an ordinary transition.
+	//
+	// "approval_required": the consent-page URL the client must deliver to the
+	//
+	//	person it believes should approve.
+	//	payload:
+	//	  approval_url (string): the consent page to deliver to the approver.
+	//	      Opening it lets the person who follows it approve this run, so
+	//	      hand it only to that person, and render it as chrome rather than
+	//	      as anything the agent said.
+	//	  expires_at (timestamp): when the approval window closes. A timestamp
+	//	      is always written, so an absent expiry reads as the zero time
+	//	      rather than as a missing key.
+	//
+	// "approved": the verified IdP subject that approved the run.
+	//
+	//	payload:
+	//	  approver_subject (string): the raw IdP subject reported by the
+	//	      authorization server — email/name enrichment is a directory
+	//	      concern and deliberately not an AS field.
+	//
+	// "launch_stalled": an approved run whose workspace has not connected back
+	//
+	//	when it should have.
+	//	payload:
+	//	  waited_ns (duration): how long the approved run has gone without its
+	//	      workspace connecting back.
+	//
+	// "agent_message": one addressable segment of the agent's visible output.
+	//
+	//	payload:
+	//	  part_id (string): addresses this segment within the turn. A later
+	//	      agent_message with the same part_id replaces the text of the one
+	//	      before, so a client updates the rendered part in place.
+	//	  text (string): the segment's text, verbatim from the agent. Untrusted;
+	//	      render it as inert content.
+	//	  final (bool): true on the turn's last segment, false on one a tool
+	//	      call interrupted.
+	//
+	// "agent_thought": the agent's reasoning, when it discloses any.
+	//
+	//	payload:
+	//	  text (string): the reasoning, verbatim from the agent. Untrusted, like
+	//	      agent text.
+	//
+	// "tool_call": announces or updates a tool call.
+	//
+	//	payload:
+	//	  id (string): identifies the call within the session; an update carries
+	//	      the id of the call it updates, and a permission_request names it
+	//	      as tool_call_id.
+	//	  title (string, absent when zero): a short human-readable name for the
+	//	      call, as the agent gives it.
+	//	  kind (string, absent when zero): what sort of tool it is (read, edit,
+	//	      execute, fetch, …), passed through from the agent's protocol
+	//	      unchanged.
+	//	  status (ToolCallStatus): where the call is, one of the
+	//	      [ToolCallStatus] values.
+	//	  invocation_message (string, absent when zero): the agent's own
+	//	      description of what it is doing, when it supplies one.
+	//	  tool_input (json, absent when zero): the raw tool input as the agent
+	//	      sent it, when the agent discloses it. Untrusted, like agent text.
+	//	  update (bool, absent when zero): false when this announces a new call,
+	//	      true for a status or result update to one already announced.
+	//
+	// "permission_request": asks the client's principal to authorize a tool call.
+	//
+	//	payload:
+	//	  request_id (string): identifies the request; RespondPermission takes
+	//	      it, and the permission_resolved event that closes it carries it.
+	//	  summary (string): what the agent is asking to do, in its own words,
+	//	      for the person deciding. Untrusted, like agent text.
+	//	  options ([]PermissionOption): the choices on offer. Answer with one of
+	//	      their ids.
+	//	  deadline (timestamp): when the request lapses unanswered; the agent is
+	//	      then told no, and a permission_resolved event records it as
+	//	      expired.
+	//	  tool_call_id (string, absent when zero): the call the request belongs
+	//	      to.
+	//
+	// "permission_resolved": closes a permission request, however it ended.
+	//
+	//	payload:
+	//	  request_id (string): the request this closes, as permission_request
+	//	      named it.
+	//	  resolution (Resolution): the chosen option id, or one of the
+	//	      [Resolution] values.
+	//
+	// "turn_completed": a turn that finished.
+	//
+	//	payload:
+	//	  stop_reason (string): the ACP stop reason ("end_turn", "max_tokens",
+	//	      "cancelled", …).
+	//
+	// "turn_failed": a turn that died.
+	//
+	//	payload:
+	//	  reason (string): why the turn died, as a human-readable explanation
+	//	      for a person or a log.
+	//
+	// "usage": the turn's token and cost counters.
+	//
+	//	payload:
+	//	  input_tokens (int, absent when zero): prompt tokens the turn consumed.
+	//	  output_tokens (int, absent when zero): tokens the agent generated.
+	//	  cached_input_tokens (int, absent when zero): prompt tokens served from
+	//	      the model's cache.
+	//	  cache_creation_tokens (int, absent when zero): prompt tokens written
+	//	      to the model's cache.
+	//	  thought_tokens (int, absent when zero): tokens spent on reasoning,
+	//	      when the model reports them separately.
+	//	  total_tokens (int, absent when zero): all tokens the turn used, as the
+	//	      agent counts them.
+	//	  cost_usd (float, absent when zero): what the turn cost, in US dollars,
+	//	      as the agent reports it.
+	//	  context_window (int, absent when zero): how much context the agent
+	//	      has, when it says.
+	//	  context_used (int, absent when zero): how much of it this turn left
+	//	      occupied, when it says.
+	//
+	// "idle_warning": a quiet session about to be suspended.
+	//
+	//	payload:
+	//	  lead_ns (duration): how long until the session is suspended; a Prompt
+	//	      before then keeps it running.
+	//
+	// "suspended": the pod was freed and the workspace kept.
+	//
+	//	payload:
+	//	  reason (Reason, absent when zero): one of the [Reason] values.
+	//	  retained_for_ns (duration, absent when zero): how long the workspace
+	//	      is kept before it is released.
+	//
+	// "revived": a suspended session came back on a new pod.
+	//
+	//	payload: {} (no keys)
+	//
+	// "released": a suspended session's workspace was reclaimed.
+	//
+	//	payload:
+	//	  retained_for_ns (duration, absent when zero): how long the workspace
+	//	      was kept.
+	//
+	// "session_ended": the last event a session ever emits.
+	//
+	//	payload:
+	//	  reason (EndReason): one of the [EndReason] values.
+	//	  detail (string, absent when zero): a human-readable elaboration, empty
+	//	      when the reason says it all. It is for a person reading a log,
+	//	      never for a client to branch on — that is what reason is for.
+	//
+	// END GENERATED: vocab:EventType
+	//
+	// Shapes nested inside those payloads:
+	//
+	// BEGIN GENERATED: payloads:nested (make vocab)
+	// PermissionOption: PermissionOption is one choice on a permission request.
+	//
+	//	payload:
+	//	  id (string): the option's id, which RespondPermission takes as
+	//	      option_id.
+	//	  name (string): the option's label, as the agent offers it, for the
+	//	      person choosing.
+	//	  kind (string, absent when zero): what choosing it means (allow_once,
+	//	      allow_always, reject_once, reject_always, …), passed through
+	//	      from the agent's protocol unchanged.
+	//
+	// END GENERATED: payloads:nested
+	//
+	// The reasons a state_changed or suspended event gives:
+	//
+	// BEGIN GENERATED: vocab:Reason (make vocab)
+	// "launch": a session starting, as opposed to one coming back.
+	// "revive": a session coming back on the same workspace.
+	// "idle": the session was quiet past its idle TTL. It is both a suspend reason
+	//
+	//	and, when the suspend itself failed, an end reason.
+	//
+	// "revive_failed": a continuation could not happen and the session went back
+	//
+	//	to suspended with its workspace intact. The turn that asked for it gets
+	//	a turn_failed carrying the specifics.
+	//
+	// END GENERATED: vocab:Reason
+	//
+	// The reasons a session_ended event gives:
+	//
+	// BEGIN GENERATED: vocab:EndReason (make vocab)
+	// "revoked": the run was revoked at the authorization server.
+	// "expired": a running session's run window ran out.
+	// "never_approved": the approval window closed with nothing approved. The
+	//
+	//	authorization server exposes no denial signal, so "refused" and
+	//	"ignored" are indistinguishable and a client must not claim to know
+	//	which.
+	//
+	// "agent_exit": the agent process ended.
+	// "tunnel_lost": the sandbox's tunnel died and did not come back.
+	// "ended": a client (or an operator) ended it deliberately.
+	// "interrupted": the harness restarted under a live session. Live ACP state is
+	//
+	//	in memory, so the session cannot continue — but the workspace survives
+	//	and the conversation can be revived.
+	//
+	// "prepare_failed": no workspace could be made ready.
+	// "run_create_failed": the authorization server would not create a run, so
+	//
+	//	there was nothing for anyone to approve.
+	//
+	// "attach_timeout": the workspace started but never connected back. The place
+	//
+	//	to look is the network path, not the app or the agent.
+	//
+	// "launch_failed": the launch failed some other way.
+	// END GENERATED: vocab:EndReason
+	//
+	// A tool_call's status:
+	//
+	// BEGIN GENERATED: vocab:ToolCallStatus (make vocab)
+	// "pending": announced; not started yet.
+	// "in_progress": running.
+	// "completed": finished successfully.
+	// "failed": finished with an error.
+	// END GENERATED: vocab:ToolCallStatus
+	//
+	// How a permission_resolved event records a request nobody answered:
+	//
+	// BEGIN GENERATED: vocab:Resolution (make vocab)
+	// "expired": the deadline passed with no answer; the agent was told the call
+	//
+	//	was cancelled.
+	//
+	// "superseded": the session ended, or the turn was cancelled, with the request
+	//
+	//	outstanding.
+	//
+	// END GENERATED: vocab:Resolution
+	Type string `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
+	// turn_id is the turn this event belongs to, as Prompt returned it (or the
+	// opening turn's id, for initial_prompt). Set on the events a turn produces —
+	// agent_message, agent_thought, tool_call, permission_request,
+	// permission_resolved, usage, turn_completed, turn_failed — and empty on the
+	// session-level ones.
+	TurnId string `protobuf:"bytes,4,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	// timestamp is when the platform recorded the event, by its own clock.
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// payload is the event's body: a UTF-8 JSON object whose keys type fixes (see
+	// above). A key marked "absent when zero" is omitted when its value is the
+	// zero value; a key this client does not know must be ignored. It is the exact
+	// bytes the platform recorded, so a replay is byte-identical.
+	Payload       []byte `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -327,11 +719,16 @@ func (x *Event) GetPayload() []byte {
 	return nil
 }
 
-// TemplateSummary is one entry of ListTemplates: what a client may run.
+// TemplateSummary is one entry of ListTemplates: an agent template this client
+// may run.
 type TemplateSummary struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the template's name, which is what CreateSessionRequest.template
+	// takes.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// description is the template's own one-line description, for a person
+	// choosing between templates. May be empty.
+	Description   string `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -380,14 +777,38 @@ func (x *TemplateSummary) GetDescription() string {
 	return ""
 }
 
+// CreateSessionRequest opens a session.
 type CreateSessionRequest struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	Template             string                 `protobuf:"bytes,1,opt,name=template,proto3" json:"template,omitempty"`
-	ConversationRef      string                 `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
-	ParentSessionId      string                 `protobuf:"bytes,3,opt,name=parent_session_id,json=parentSessionId,proto3" json:"parent_session_id,omitempty"`
-	ApprovalPrompt       string                 `protobuf:"bytes,4,opt,name=approval_prompt,json=approvalPrompt,proto3" json:"approval_prompt,omitempty"`
-	InitialPrompt        string                 `protobuf:"bytes,5,opt,name=initial_prompt,json=initialPrompt,proto3" json:"initial_prompt,omitempty"`
-	SystemPromptAppendix string                 `protobuf:"bytes,6,opt,name=system_prompt_appendix,json=systemPromptAppendix,proto3" json:"system_prompt_appendix,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// template is the agent template to run: one of the names ListTemplates
+	// returns. Required. Its spec is snapshotted onto the session now.
+	Template string `protobuf:"bytes,1,opt,name=template,proto3" json:"template,omitempty"`
+	// conversation_ref is the client's own name for the conversation this session
+	// serves: a chat thread, a pull request, a job id. Required, opaque to the
+	// platform, and unique per client among live sessions — a second live session
+	// for the same ref is ErrConflict. Once the session has ended the ref is free
+	// again, and a lookup with include_terminal still finds the old one.
+	ConversationRef string `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
+	// parent_session_id records lineage: the id of the session this one was
+	// derived from (a handoff, a fork). Optional. The platform records it and does
+	// not interpret it; it is not returned on the view.
+	ParentSessionId string `protobuf:"bytes,3,opt,name=parent_session_id,json=parentSessionId,proto3" json:"parent_session_id,omitempty"`
+	// approval_prompt is what the human approver reads on the consent page: the
+	// request this session will carry out, in words the approver can judge.
+	// Required and non-blank, because an empty consent page asks a person to
+	// authorize a blank. It is shown to the approver, not sent to the agent. A
+	// client seeding the agent from an earlier conversation says so in a bounded
+	// clause here rather than pasting the conversation in.
+	ApprovalPrompt string `protobuf:"bytes,4,opt,name=approval_prompt,json=approvalPrompt,proto3" json:"approval_prompt,omitempty"`
+	// initial_prompt is the agent's first turn, run as soon as the session is
+	// approved and its agent is attached. Optional: empty opens the session idle,
+	// waiting for a Prompt.
+	InitialPrompt string `protobuf:"bytes,5,opt,name=initial_prompt,json=initialPrompt,proto3" json:"initial_prompt,omitempty"`
+	// system_prompt_appendix is the client's own guidance about how answers should
+	// be written — mrkdwn for Slack, plain text for a terminal — appended to the
+	// template's system prompt. Optional. It is snapshotted with the template, so a
+	// revive keeps it.
+	SystemPromptAppendix string `protobuf:"bytes,6,opt,name=system_prompt_appendix,json=systemPromptAppendix,proto3" json:"system_prompt_appendix,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -464,6 +885,8 @@ func (x *CreateSessionRequest) GetSystemPromptAppendix() string {
 	return ""
 }
 
+// CreateSessionResponse is the session as it stands the moment it is created:
+// in state "pending", with the launch just started.
 type CreateSessionResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Session       *SessionView           `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
@@ -508,10 +931,14 @@ func (x *CreateSessionResponse) GetSession() *SessionView {
 	return nil
 }
 
+// PromptRequest sends one turn.
 type PromptRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Content       string                 `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ref is the session to prompt: its live session, or a suspended one to revive.
+	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	// content is the person's message to the agent, passed through verbatim.
+	// Required and non-empty.
+	Content       string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -560,9 +987,12 @@ func (x *PromptRequest) GetContent() string {
 	return ""
 }
 
+// PromptResponse identifies the turn the prompt opened.
 type PromptResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TurnId        string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// turn_id stamps every event the turn produces (Event.turn_id), so a client can
+	// tell which answer belongs to which prompt when turns overlap.
+	TurnId        string `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -604,11 +1034,16 @@ func (x *PromptResponse) GetTurnId() string {
 	return ""
 }
 
+// RespondPermissionRequest answers a permission_request event.
 type RespondPermissionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	RequestId     string                 `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	OptionId      string                 `protobuf:"bytes,3,opt,name=option_id,json=optionId,proto3" json:"option_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ref is the session the request was raised on.
+	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	// request_id is the permission_request payload's "request_id". Required.
+	RequestId string `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// option_id is the chosen option: the "id" of one entry in the request's
+	// "options" list.
+	OptionId      string `protobuf:"bytes,3,opt,name=option_id,json=optionId,proto3" json:"option_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -664,6 +1099,8 @@ func (x *RespondPermissionRequest) GetOptionId() string {
 	return ""
 }
 
+// RespondPermissionResponse is empty: the outcome is the permission_resolved
+// event on the log.
 type RespondPermissionResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -700,10 +1137,15 @@ func (*RespondPermissionResponse) Descriptor() ([]byte, []int) {
 	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{10}
 }
 
+// EndSessionRequest ends a session.
 type EndSessionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ref is the session to end.
+	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	// reason is recorded on the session_ended event. Optional: empty records
+	// "ended", which is the reason a client ending its own session should give.
+	// The other end reasons (see Event.type) name causes on the platform's side.
+	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -752,6 +1194,7 @@ func (x *EndSessionRequest) GetReason() string {
 	return ""
 }
 
+// EndSessionResponse is empty: the ending is on the log.
 type EndSessionResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -788,9 +1231,11 @@ func (*EndSessionResponse) Descriptor() ([]byte, []int) {
 	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{12}
 }
 
+// GetSessionRequest reads one session.
 type GetSessionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ref is the session to read. include_terminal is honored here.
+	Ref           *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -832,6 +1277,7 @@ func (x *GetSessionRequest) GetRef() *SessionRef {
 	return nil
 }
 
+// GetSessionResponse carries the session as it stands now.
 type GetSessionResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Session       *SessionView           `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
@@ -876,14 +1322,17 @@ func (x *GetSessionResponse) GetSession() *SessionView {
 	return nil
 }
 
+// ListSessionsRequest enumerates the calling client's sessions. Both filters are
+// optional and combine.
 type ListSessionsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// live_only drops ended and interrupted sessions.
 	LiveOnly bool `protobuf:"varint,1,opt,name=live_only,json=liveOnly,proto3" json:"live_only,omitempty"`
-	// updated_since returns only sessions touched at or after this instant. It is
-	// what a client's own reconciliation sweep pages on: "which of my sessions
-	// moved since I last looked", which live_only cannot express because a session
-	// that just went terminal is exactly the one worth hearing about.
+	// updated_since returns only sessions that changed at or after this instant,
+	// compared at one-second granularity. It is what a client's own reconciliation
+	// sweep pages on — "which of my sessions moved since I last looked" — which
+	// live_only cannot express, because a session that has just ended is exactly
+	// the one worth hearing about. Unset means no lower bound.
 	UpdatedSince  *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=updated_since,json=updatedSince,proto3" json:"updated_since,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -933,6 +1382,7 @@ func (x *ListSessionsRequest) GetUpdatedSince() *timestamppb.Timestamp {
 	return nil
 }
 
+// ListSessionsResponse lists sessions newest first, by creation time.
 type ListSessionsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Sessions      []*SessionView         `protobuf:"bytes,1,rep,name=sessions,proto3" json:"sessions,omitempty"`
@@ -977,6 +1427,7 @@ func (x *ListSessionsResponse) GetSessions() []*SessionView {
 	return nil
 }
 
+// ListTemplatesRequest has no fields: the answer depends only on who is asking.
 type ListTemplatesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1013,6 +1464,7 @@ func (*ListTemplatesRequest) Descriptor() ([]byte, []int) {
 	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{17}
 }
 
+// ListTemplatesResponse lists the templates this client may run.
 type ListTemplatesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Templates     []*TemplateSummary     `protobuf:"bytes,1,rep,name=templates,proto3" json:"templates,omitempty"`
@@ -1057,13 +1509,16 @@ func (x *ListTemplatesResponse) GetTemplates() []*TemplateSummary {
 	return nil
 }
 
+// ListEventsRequest reads one page of a session's log.
 type ListEventsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Ref   *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	// ref is the session to read. include_terminal is honored here.
+	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	// after_seq returns events strictly after this sequence; 0 starts at the
 	// beginning.
 	AfterSeq int64 `protobuf:"varint,2,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
-	// limit caps the page; 0 means the server default.
+	// limit caps the page. 0 means the server default, and anything above the
+	// server's maximum is clamped to it; both are 500 today.
 	Limit         int32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1120,6 +1575,9 @@ func (x *ListEventsRequest) GetLimit() int32 {
 	return 0
 }
 
+// ListEventsResponse is one page of events, in seq order. Fewer than the limit
+// does not mean the log is finished — only that nothing more has been recorded
+// yet; the session_ended event is what says the log is done.
 type ListEventsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Events        []*Event               `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
@@ -1164,11 +1622,15 @@ func (x *ListEventsResponse) GetEvents() []*Event {
 	return nil
 }
 
+// SubscribeRequest opens a live feed of one session's events.
 type SubscribeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Ref   *SessionRef            `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// after_seq resumes: history at or before it is not replayed, history after it
-	// is, so a reconnecting client picks up exactly where it stopped.
+	// ref is the session to follow. include_terminal is honored here.
+	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	// after_seq is where the feed starts: events strictly after it are replayed,
+	// then live ones follow, so a reconnecting client resumes exactly where it
+	// stopped by passing the last seq it received. 0 replays the whole log;
+	// SessionView.last_seq skips straight to what happens next.
 	AfterSeq      int64 `protobuf:"varint,2,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1218,7 +1680,7 @@ func (x *SubscribeRequest) GetAfterSeq() int64 {
 	return 0
 }
 
-// SubscribeResponse carries either a session event or a keepalive.
+// SubscribeResponse carries either one event or a keepalive, never both.
 //
 // The FIRST message of every subscription is a keepalive, sent as soon as the
 // server has accepted the subscription. That is what makes opening one a
@@ -1233,9 +1695,13 @@ func (x *SubscribeRequest) GetAfterSeq() int64 {
 // the whole path. Clients discard keepalives and treat several missed intervals
 // as a dead stream worth reconnecting with after_seq.
 type SubscribeResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Event         *Event                 `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
-	Keepalive     bool                   `protobuf:"varint,2,opt,name=keepalive,proto3" json:"keepalive,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// event is the next event on the log. Unset on a keepalive.
+	Event *Event `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
+	// keepalive is true on a liveness tick, which carries no event and is never
+	// surfaced to the application. Sent first on every subscription, then every 20
+	// seconds while nothing else is.
+	Keepalive     bool `protobuf:"varint,2,opt,name=keepalive,proto3" json:"keepalive,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
