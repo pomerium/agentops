@@ -161,10 +161,14 @@ const (
 type ToolCallStatus string
 
 const (
-	ToolCallPending    ToolCallStatus = "pending"
+	// ToolCallPending: announced; not started yet.
+	ToolCallPending ToolCallStatus = "pending"
+	// ToolCallInProgress: running.
 	ToolCallInProgress ToolCallStatus = "in_progress"
-	ToolCallCompleted  ToolCallStatus = "completed"
-	ToolCallFailed     ToolCallStatus = "failed"
+	// ToolCallCompleted: finished successfully.
+	ToolCallCompleted ToolCallStatus = "completed"
+	// ToolCallFailed: finished with an error.
+	ToolCallFailed ToolCallStatus = "failed"
 )
 
 // Resolution is how a permission request ended, besides by an option id.
@@ -192,8 +196,8 @@ var (
 	ErrNotFound = errors.New("harnessapi: session not found")
 	// ErrUnknownRequest: an unknown or already-resolved permission request.
 	ErrUnknownRequest = errors.New("harnessapi: unknown or expired permission request")
-	// ErrForbidden: the session belongs to another client, or the template is
-	// not in this client's binding.
+	// ErrForbidden: this client has no ClientBinding, or the template is not in
+	// its binding. Another client's session is never Forbidden; it is NotFound.
 	ErrForbidden = errors.New("harnessapi: forbidden")
 	// ErrConflict: the conversation ref already has a live session.
 	ErrConflict = errors.New("harnessapi: conversation already has a live session")

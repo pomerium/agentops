@@ -58,9 +58,10 @@ vet:
 ## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
 ## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
 ## the sidecar control protocol stubs (buf, from proto/sidecar), and the Harness
-## API's Connect stubs (generate-harness-api), and its string vocabularies and
-## event payload shapes (vocab).
-generate: generate-harness-api vocab
+## API's string vocabularies and event payload shapes (vocab, which also fills
+## the value lists in the .proto's comments), then its Connect stubs
+## (generate-harness-api), so those comments reach the generated code.
+generate: vocab generate-harness-api
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	cd internal/chatops/db && $(SQLC) generate
