@@ -296,9 +296,12 @@ transport failure with no Connect error at all; back off `(attempt+1) × 200 ms`
 Everything else is the platform's considered answer, and asking again only asks
 again. `CreateSession` is safe to retry: a conversation holds one live session,
 so retrying a create that did succeed is refused as `ErrConflict` rather than
-making a second one. **Never retry `Prompt`:** a prompt the platform accepted but
-whose response was lost has already started a turn, and a resent one would start
-another — nothing on the wire tells the two apart. Surface the error instead.
+making a second one. **Retry `Prompt` only with an `idempotency_key`**, unique per
+prompt (the id of the message you are relaying makes a good one): a prompt that
+repeats a key the session accepted in the last ten minutes starts nothing and
+returns the first one's `turn_id`. Without a key, never retry it — a prompt the
+platform accepted but whose response was lost has already started a turn, and a
+resent one would start another. Surface the error instead.
 
 ### Events
 

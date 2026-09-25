@@ -150,6 +150,12 @@ type SessionRef struct {
 type PromptRequest struct {
 	Ref     SessionRef `json:"ref"`
 	Content string     `json:"content"`
+	// IdempotencyKey makes the prompt safe to retry: a prompt repeating a key the
+	// session accepted in the last ten minutes starts nothing and returns the first
+	// one's turn id. Only the key is compared, not the content. Optional; without
+	// one a prompt must not be retried, because one whose response was lost may
+	// already have started its turn.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 // PromptResult reports the turn the prompt opened.
