@@ -14,7 +14,10 @@ import (
 
 // StateChanged is a session-state transition.
 type StateChanged struct {
+	// Old: the state the session left.
 	Old SessionState `json:"old"`
+	// New: the state the session is now in; the same value a GetSession would
+	// report.
 	New SessionState `json:"new"`
 	// Reason: one of the Reason values, empty for an ordinary transition.
 	Reason string `json:"reason,omitempty"`
@@ -26,6 +29,9 @@ type StateChanged struct {
 // The URL is platform-authoritative: a client renders it as chrome the
 // agent cannot imitate, never as agent-supplied content.
 type ApprovalRequired struct {
+	// ApprovalURL: the consent page to deliver to the approver. Opening it lets
+	// the person who follows it approve this run, so hand it only to that
+	// person, and render it as chrome rather than as anything the agent said.
 	ApprovalURL string `json:"approval_url"`
 	// ExpiresAt: when the approval window closes. A timestamp is always
 	// written, so an absent expiry reads as the zero time rather than as a
@@ -52,6 +58,8 @@ type Approved struct {
 // is still open and the sandbox keeps retrying, so it reports rather than
 // concludes.
 type LaunchStalled struct {
+	// Waited: how long the approved run has gone without its workspace
+	// connecting back.
 	Waited time.Duration `json:"waited_ns"`
 }
 
@@ -69,13 +77,21 @@ type LaunchStalled struct {
 // inert content — no link unfurling, no mention syntax — is the client's
 // half of the contract.
 type AgentMessage struct {
+	// PartID: addresses this segment within the turn. A later agent_message
+	// with the same part_id replaces the text of the one before, so a client
+	// updates the rendered part in place.
 	PartID string `json:"part_id"`
-	Text   string `json:"text"`
-	Final  bool   `json:"final"`
+	// Text: the segment's text, verbatim from the agent. Untrusted; render it
+	// as inert content.
+	Text string `json:"text"`
+	// Final: true on the turn's last segment, false on one a tool call
+	// interrupted.
+	Final bool `json:"final"`
 }
 
 // AgentThought is the agent's reasoning, when it discloses any.
 type AgentThought struct {
+	// Text: the reasoning, verbatim from the agent. Untrusted, like agent text.
 	Text string `json:"text"`
 }
 
@@ -85,9 +101,15 @@ type AgentThought struct {
 // these, which is why they are on the log rather than only in the
 // application trace.
 type ToolCall struct {
-	ID     string         `json:"id"`
-	Title  string         `json:"title,omitempty"`
-	Kind   string         `json:"kind,omitempty"`
+	// ID: identifies the call within the session; an update carries the id of
+	// the call it updates, and a permission_request names it as tool_call_id.
+	ID string `json:"id"`
+	// Title: a short human-readable name for the call, as the agent gives it.
+	Title string `json:"title,omitempty"`
+	// Kind: what sort of tool it is (read, edit, execute, fetch, …), passed
+	// through from the agent's protocol unchanged.
+	Kind string `json:"kind,omitempty"`
+	// Status: where the call is, one of the ToolCallStatus values.
 	Status ToolCallStatus `json:"status"`
 	// InvocationMessage: the agent's own description of what it is doing, when
 	// it supplies one.
@@ -102,8 +124,13 @@ type ToolCall struct {
 
 // PermissionOption is one choice on a permission request.
 type PermissionOption struct {
-	ID   string `json:"id"`
+	// ID: the option's id, which RespondPermission takes as option_id.
+	ID string `json:"id"`
+	// Name: the option's label, as the agent offers it, for the person
+	// choosing.
 	Name string `json:"name"`
+	// Kind: what choosing it means (allow_once, allow_always, reject_once,
+	// reject_always, …), passed through from the agent's protocol unchanged.
 	Kind string `json:"kind,omitempty"`
 }
 
@@ -111,10 +138,17 @@ type PermissionOption struct {
 // The agent is blocked until RespondPermission answers it or the deadline
 // passes.
 type PermissionRequest struct {
-	RequestID string             `json:"request_id"`
-	Summary   string             `json:"summary"`
-	Options   []PermissionOption `json:"options"`
-	Deadline  time.Time          `json:"deadline"`
+	// RequestID: identifies the request; RespondPermission takes it, and the
+	// permission_resolved event that closes it carries it.
+	RequestID string `json:"request_id"`
+	// Summary: what the agent is asking to do, in its own words, for the person
+	// deciding. Untrusted, like agent text.
+	Summary string `json:"summary"`
+	// Options: the choices on offer. Answer with one of their ids.
+	Options []PermissionOption `json:"options"`
+	// Deadline: when the request lapses unanswered; the agent is then told no,
+	// and a permission_resolved event records it as expired.
+	Deadline time.Time `json:"deadline"`
 	// ToolCallID: the call the request belongs to.
 	ToolCallID string `json:"tool_call_id,omitempty"`
 }
@@ -124,6 +158,7 @@ type PermissionRequest struct {
 // It closes the loop after a reconnect too: a client that missed the answer
 // learns it from here rather than leaving buttons live forever.
 type PermissionResolved struct {
+	// RequestID: the request this closes, as permission_request named it.
 	RequestID string `json:"request_id"`
 	// Resolution: the chosen option id, or one of the Resolution values.
 	Resolution string `json:"resolution"`
@@ -139,6 +174,8 @@ type TurnCompleted struct {
 // TurnFailed is a turn that died. "Why did this turn die" is a first-class
 // answer, not something to reconstruct from logs.
 type TurnFailed struct {
+	// Reason: why the turn died, as a human-readable explanation for a person
+	// or a log.
 	Reason string `json:"reason"`
 }
 
@@ -146,13 +183,21 @@ type TurnFailed struct {
 // Chargeback is the second question every platform team asks, so these are
 // on the log from day one.
 type Usage struct {
-	InputTokens         int64   `json:"input_tokens,omitempty"`
-	OutputTokens        int64   `json:"output_tokens,omitempty"`
-	CachedInputTokens   int64   `json:"cached_input_tokens,omitempty"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens,omitempty"`
-	ThoughtTokens       int64   `json:"thought_tokens,omitempty"`
-	TotalTokens         int64   `json:"total_tokens,omitempty"`
-	CostUSD             float64 `json:"cost_usd,omitempty"`
+	// InputTokens: prompt tokens the turn consumed.
+	InputTokens int64 `json:"input_tokens,omitempty"`
+	// OutputTokens: tokens the agent generated.
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+	// CachedInputTokens: prompt tokens served from the model's cache.
+	CachedInputTokens int64 `json:"cached_input_tokens,omitempty"`
+	// CacheCreationTokens: prompt tokens written to the model's cache.
+	CacheCreationTokens int64 `json:"cache_creation_tokens,omitempty"`
+	// ThoughtTokens: tokens spent on reasoning, when the model reports them
+	// separately.
+	ThoughtTokens int64 `json:"thought_tokens,omitempty"`
+	// TotalTokens: all tokens the turn used, as the agent counts them.
+	TotalTokens int64 `json:"total_tokens,omitempty"`
+	// CostUSD: what the turn cost, in US dollars, as the agent reports it.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 	// ContextWindow: how much context the agent has, when it says.
 	ContextWindow int64 `json:"context_window,omitempty"`
 	// ContextUsed: how much of it this turn left occupied, when it says.
@@ -162,6 +207,8 @@ type Usage struct {
 // IdleWarning is a quiet session, to be suspended in lead_ns unless
 // something happens.
 type IdleWarning struct {
+	// Lead: how long until the session is suspended; a Prompt before then keeps
+	// it running.
 	Lead time.Duration `json:"lead_ns"`
 }
 

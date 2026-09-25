@@ -199,9 +199,13 @@ vocabularies:
       through, so a client can switch exhaustively.
     values:
       - value: pending
+        doc: announced; not started yet.
       - value: in_progress
+        doc: running.
       - value: completed
+        doc: finished successfully.
       - value: failed
+        doc: finished with an error.
 
   - name: Resolution
     go_prefix: Resolution
@@ -266,8 +270,8 @@ sentinels:
       code: not_found
     - value: ErrForbidden
       message: "harnessapi: forbidden"
-      doc: the session belongs to another client, or the template is not in this
-        client's binding.
+      doc: this client has no ClientBinding, or the template is not in its
+        binding. Another client's session is never Forbidden; it is NotFound.
       code: permission_denied
       means: not your session, or template not in your binding
     - value: ErrConflict

@@ -52,8 +52,10 @@ payloads:
     fields:
       - name: old
         type: SessionState
+        doc: the state the session left.
       - name: new
         type: SessionState
+        doc: the state the session is now in; the same value a GetSession would report.
       - name: reason
         type: Reason
         optional: true
@@ -69,6 +71,9 @@ payloads:
     fields:
       - name: approval_url
         type: string
+        doc: the consent page to deliver to the approver. Opening it lets the person
+          who follows it approve this run, so hand it only to that person, and
+          render it as chrome rather than as anything the agent said.
       - name: expires_at
         type: timestamp
         doc: when the approval window closes. A timestamp is always written, so
@@ -97,6 +102,7 @@ payloads:
     fields:
       - name: waited_ns
         type: duration
+        doc: how long the approved run has gone without its workspace connecting back.
 
   - name: AgentMessage
     doc: |
@@ -116,16 +122,23 @@ payloads:
     fields:
       - name: part_id
         type: string
+        doc: addresses this segment within the turn. A later agent_message with the
+          same part_id replaces the text of the one before, so a client updates the
+          rendered part in place.
       - name: text
         type: string
+        doc: the segment's text, verbatim from the agent. Untrusted; render it as inert
+          content.
       - name: final
         type: bool
+        doc: true on the turn's last segment, false on one a tool call interrupted.
 
   - name: AgentThought
     doc: AgentThought is the agent's reasoning, when it discloses any.
     fields:
       - name: text
         type: string
+        doc: the reasoning, verbatim from the agent. Untrusted, like agent text.
 
   - name: ToolCall
     doc: |
@@ -137,14 +150,20 @@ payloads:
     fields:
       - name: id
         type: string
+        doc: identifies the call within the session; an update carries the id of the
+          call it updates, and a permission_request names it as tool_call_id.
       - name: title
         type: string
         optional: true
+        doc: a short human-readable name for the call, as the agent gives it.
       - name: kind
         type: string
         optional: true
+        doc: what sort of tool it is (read, edit, execute, fetch, …), passed through
+          from the agent's protocol unchanged.
       - name: status
         type: ToolCallStatus
+        doc: where the call is, one of the [ToolCallStatus] values.
       - name: invocation_message
         type: string
         optional: true
@@ -166,11 +185,15 @@ payloads:
     fields:
       - name: id
         type: string
+        doc: the option's id, which RespondPermission takes as option_id.
       - name: name
         type: string
+        doc: the option's label, as the agent offers it, for the person choosing.
       - name: kind
         type: string
         optional: true
+        doc: what choosing it means (allow_once, allow_always, reject_once,
+          reject_always, …), passed through from the agent's protocol unchanged.
 
   - name: PermissionRequest
     doc: |
@@ -179,12 +202,19 @@ payloads:
     fields:
       - name: request_id
         type: string
+        doc: identifies the request; RespondPermission takes it, and the
+          permission_resolved event that closes it carries it.
       - name: summary
         type: string
+        doc: what the agent is asking to do, in its own words, for the person deciding.
+          Untrusted, like agent text.
       - name: options
         type: "[]PermissionOption"
+        doc: the choices on offer. Answer with one of their ids.
       - name: deadline
         type: timestamp
+        doc: when the request lapses unanswered; the agent is then told no, and a
+          permission_resolved event records it as expired.
       - name: tool_call_id
         type: string
         optional: true
@@ -199,6 +229,7 @@ payloads:
     fields:
       - name: request_id
         type: string
+        doc: the request this closes, as permission_request named it.
       - name: resolution
         type: Resolution
         doc: the chosen option id, or one of the [Resolution] values.
@@ -217,6 +248,7 @@ payloads:
     fields:
       - name: reason
         type: string
+        doc: why the turn died, as a human-readable explanation for a person or a log.
 
   - name: Usage
     doc: |
@@ -227,24 +259,31 @@ payloads:
       - name: input_tokens
         type: int
         optional: true
+        doc: prompt tokens the turn consumed.
       - name: output_tokens
         type: int
         optional: true
+        doc: tokens the agent generated.
       - name: cached_input_tokens
         type: int
         optional: true
+        doc: prompt tokens served from the model's cache.
       - name: cache_creation_tokens
         type: int
         optional: true
+        doc: prompt tokens written to the model's cache.
       - name: thought_tokens
         type: int
         optional: true
+        doc: tokens spent on reasoning, when the model reports them separately.
       - name: total_tokens
         type: int
         optional: true
+        doc: all tokens the turn used, as the agent counts them.
       - name: cost_usd
         type: float
         optional: true
+        doc: what the turn cost, in US dollars, as the agent reports it.
       - name: context_window
         type: int
         optional: true
@@ -260,6 +299,8 @@ payloads:
     fields:
       - name: lead_ns
         type: duration
+        doc: how long until the session is suspended; a Prompt before then keeps it
+          running.
 
   - name: Suspended
     doc: Suspended is a session whose pod is gone. The workspace and the

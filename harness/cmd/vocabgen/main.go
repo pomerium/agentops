@@ -122,6 +122,7 @@ var artifacts = []struct {
 	{"harness/api/wire/vocab.go", renderGoWire},
 	{"harness/api/payloads.go", renderGoPayloads},
 	{"docs/clients.md", renderDocs},
+	{"proto/harnessapi/v1/harnessapi.proto", renderProto},
 }
 
 func run(root string, check bool) error {
@@ -207,6 +208,23 @@ func readSchema(root, name string, into any) error {
 // validate rejects a source the renderers would otherwise turn into something
 // that does not compile, or into a comment that quietly says nothing.
 func validate(src source) error {
+	// Every value and every payload key is documented. These are rendered into
+	// the .proto, which is what a client in any language reads first, and an
+	// undocumented key there is a field a client has to reverse-engineer.
+	for _, v := range src.Vocabularies {
+		for _, val := range v.Values {
+			if strings.TrimSpace(val.Doc) == "" {
+				return fmt.Errorf("%s.%s: every value needs a doc", v.Name, val.Value)
+			}
+		}
+	}
+	for _, p := range src.Payloads {
+		for _, f := range p.Fields {
+			if strings.TrimSpace(f.Doc) == "" {
+				return fmt.Errorf("payload %s.%s: every field needs a doc", p.Name, f.Name)
+			}
+		}
+	}
 	for _, v := range src.Vocabularies {
 		for _, val := range v.Values {
 			if val.Payload != "" && src.findPayload(val.Payload) == nil {
