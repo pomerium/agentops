@@ -20,14 +20,54 @@
 // route; a client reaches it at that route's URL and presents the credential the
 // route asks for (for a workload, its projected ServiceAccount token).
 //
+// # Terms
+//
+// These words mean one thing each, everywhere in this file.
+//
+// client: an application that calls this API — a Slack bot deployment, a web
+//   app's backend, a CI job. Not a person. One client serves many people.
+//
+// client id: the identity of a client: the subject of the workload credential
+//   Pomerium verified on the route (for a Kubernetes workload, its
+//   ServiceAccount, e.g. "cluster/system:serviceaccount:agentops:agentops-slackbot").
+//   It names the application, never anyone using it.
+//
+// ClientBinding: the operator's registration of a client id: which agent
+//   templates it may run and the quotas it runs under. A client without one is
+//   refused every verb.
+//
+// user: a person using an agent through a client — the Slack member who
+//   mentioned the bot, say. The API never learns who a user is. The client acts
+//   on the user's behalf: it relays their words (Prompt.content), their tool-call
+//   decisions (RespondPermission), and its own account of what they asked for
+//   (CreateSessionRequest.approval_prompt). Which user a conversation belongs to
+//   is the client's to track, typically in its conversation_ref.
+//
+// approver: the person who approves a run on the consent page. The one person
+//   the platform does identify, by the IdP subject Pomerium authenticates on
+//   that page (the approved event's approver_subject). Often the user, but the
+//   platform does not assume it: the client decides whom to send the page to.
+//   A revive is pinned to the session's first approver.
+//
+// agent: the AI a session runs, in its own sandbox, as its template defines.
+//
+// session: one agent working for one conversation, from CreateSession until it
+//   ends. conversation: whatever the client says the session serves, named by
+//   its conversation_ref. turn: one prompt and everything the agent does in
+//   answer to it. run: one approved launch — the authorization the approver
+//   granted, which the sandbox's credentials derive from; a revive is a new run.
+//   workspace: the session's persistent files and transcript, which survive a
+//   suspend.
+//
 // # Identity
 //
-// Identity is NEVER taken from message fields. The caller's client id comes from
-// the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is scoped
-// to it: a client sees, and can act on, only the sessions it created. That is why
-// no request message carries a client id — a field a client could set would be a
-// field a client could lie in. Another client's session is always reported as
-// not found, never as forbidden, because saying it exists would disclose it.
+// Identity is NEVER taken from message fields. The calling client's id comes
+// from the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is
+// scoped to it: a client sees, and can act on, only the sessions it created. That
+// is why no request message carries a client id — a field a client could set
+// would be a field a client could lie in. Another client's session is always
+// reported as not found, never as forbidden, because saying it exists would
+// disclose it. No verb carries a user's identity either; see Terms.
 //
 // # Errors
 //
@@ -175,8 +215,8 @@ func (x *ErrorInfo) GetDetail() string {
 // session_id and conversation_ref must be set; neither or both is
 // ErrInvalidArgument.
 //
-// It carries no client id: the caller's identity is the verified assertion's,
-// and a field here would only ever be a lie waiting to be believed.
+// It carries no client id: the calling client's identity is the verified
+// assertion's, and a field here would only ever be a lie waiting to be believed.
 type SessionRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// session_id is SessionView.id, as CreateSession returned it.
@@ -457,8 +497,9 @@ type Event struct {
 	//	  update (bool, absent when zero): false when this announces a new call,
 	//	      true for a status or result update to one already announced.
 	//
-	// "permission_request": asks the client's principal to authorize a tool call.
+	// "permission_request": asks for a decision on a tool call, which the client
 	//
+	//	puts to a person (usually the user) and relays with RespondPermission.
 	//	payload:
 	//	  request_id (string): identifies the request; RespondPermission takes
 	//	      it, and the permission_resolved event that closes it carries it.
@@ -936,8 +977,8 @@ type PromptRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// ref is the session to prompt: its live session, or a suspended one to revive.
 	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// content is the person's message to the agent, passed through verbatim.
-	// Required and non-empty.
+	// content is the user's message to the agent, as the client relays it; passed
+	// to the agent verbatim. Required and non-empty.
 	Content       string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1427,7 +1468,8 @@ func (x *ListSessionsResponse) GetSessions() []*SessionView {
 	return nil
 }
 
-// ListTemplatesRequest has no fields: the answer depends only on who is asking.
+// ListTemplatesRequest has no fields: the answer depends only on which client is
+// asking.
 type ListTemplatesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

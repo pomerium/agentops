@@ -18,14 +18,60 @@
 // route; a client reaches it at that route's URL and presents the credential the
 // route asks for (for a workload, its projected ServiceAccount token).
 //
+// # Terms
+//
+// These words mean one thing each, everywhere in this file.
+//
+// client: an application that calls this API — a Slack bot deployment, a web
+//
+//	app's backend, a CI job. Not a person. One client serves many people.
+//
+// client id: the identity of a client: the subject of the workload credential
+//
+//	Pomerium verified on the route (for a Kubernetes workload, its
+//	ServiceAccount, e.g. "cluster/system:serviceaccount:agentops:agentops-slackbot").
+//	It names the application, never anyone using it.
+//
+// ClientBinding: the operator's registration of a client id: which agent
+//
+//	templates it may run and the quotas it runs under. A client without one is
+//	refused every verb.
+//
+// user: a person using an agent through a client — the Slack member who
+//
+//	mentioned the bot, say. The API never learns who a user is. The client acts
+//	on the user's behalf: it relays their words (Prompt.content), their tool-call
+//	decisions (RespondPermission), and its own account of what they asked for
+//	(CreateSessionRequest.approval_prompt). Which user a conversation belongs to
+//	is the client's to track, typically in its conversation_ref.
+//
+// approver: the person who approves a run on the consent page. The one person
+//
+//	the platform does identify, by the IdP subject Pomerium authenticates on
+//	that page (the approved event's approver_subject). Often the user, but the
+//	platform does not assume it: the client decides whom to send the page to.
+//	A revive is pinned to the session's first approver.
+//
+// agent: the AI a session runs, in its own sandbox, as its template defines.
+//
+// session: one agent working for one conversation, from CreateSession until it
+//
+//	ends. conversation: whatever the client says the session serves, named by
+//	its conversation_ref. turn: one prompt and everything the agent does in
+//	answer to it. run: one approved launch — the authorization the approver
+//	granted, which the sandbox's credentials derive from; a revive is a new run.
+//	workspace: the session's persistent files and transcript, which survive a
+//	suspend.
+//
 // # Identity
 //
-// Identity is NEVER taken from message fields. The caller's client id comes from
-// the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is scoped
-// to it: a client sees, and can act on, only the sessions it created. That is why
-// no request message carries a client id — a field a client could set would be a
-// field a client could lie in. Another client's session is always reported as
-// not found, never as forbidden, because saying it exists would disclose it.
+// Identity is NEVER taken from message fields. The calling client's id comes
+// from the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is
+// scoped to it: a client sees, and can act on, only the sessions it created. That
+// is why no request message carries a client id — a field a client could set
+// would be a field a client could lie in. Another client's session is always
+// reported as not found, never as forbidden, because saying it exists would
+// disclose it. No verb carries a user's identity either; see Terms.
 //
 // # Errors
 //
@@ -147,9 +193,12 @@ type HarnessAPIServiceClient interface {
 	// the wire tells the two apart. Report the error instead.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request: the
-	// agent asked (a permission_request event) and is blocked until a person
-	// chooses one of the offered options. The decision is recorded as a
-	// permission_resolved event.
+	// agent asked (a permission_request event) and is blocked until the client
+	// relays a choice among the offered options — usually the user's. Who inside
+	// the client decided is not something the platform can verify; it trusts the
+	// client to relay the decision, and the run's authorization still bounds what
+	// any tool call can reach. The decision is recorded as a permission_resolved
+	// event.
 	//
 	// The platform remembers how it resolved a request for ten minutes, so a
 	// repeated answer inside that window gets the same result rather than an
@@ -377,9 +426,12 @@ type HarnessAPIServiceHandler interface {
 	// the wire tells the two apart. Report the error instead.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request: the
-	// agent asked (a permission_request event) and is blocked until a person
-	// chooses one of the offered options. The decision is recorded as a
-	// permission_resolved event.
+	// agent asked (a permission_request event) and is blocked until the client
+	// relays a choice among the offered options — usually the user's. Who inside
+	// the client decided is not something the platform can verify; it trusts the
+	// client to relay the decision, and the run's authorization still bounds what
+	// any tool call can reach. The decision is recorded as a permission_resolved
+	// event.
 	//
 	// The platform remembers how it resolved a request for ten minutes, so a
 	// repeated answer inside that window gets the same result rather than an
