@@ -2,6 +2,47 @@
 //
 // Source: harnessapi/v1/harnessapi.proto
 
+// The Harness API: the client-facing contract of the agentops harness.
+//
+// A client (a Slack bot, a web app, a CI job) uses it to start an agent session,
+// have a human approve it, talk to the agent turn by turn, and read everything
+// the session does back off one durable, ordered event log. This file is the
+// source of truth for that contract. docs/clients.md is the guide to writing a
+// client against it, and `make apistub` builds a conformance server that speaks
+// it with no cluster and no credentials.
+//
+// # Transport
+//
+// Connect (https://connectrpc.com), over HTTP/2 or HTTP/1.1, with either the
+// binary protobuf or the JSON codec. The service is served behind a Pomerium
+// route; a client reaches it at that route's URL and presents the credential the
+// route asks for (for a workload, its projected ServiceAccount token).
+//
+// # Identity
+//
+// Identity is NEVER taken from message fields. The caller's client id comes from
+// the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is scoped
+// to it: a client sees, and can act on, only the sessions it created. That is why
+// no request message carries a client id — a field a client could set would be a
+// field a client could lie in. Another client's session is always reported as
+// not found, never as forbidden, because saying it exists would disclose it.
+//
+// # Errors
+//
+// A failed call returns a Connect error whose code classifies it, with an
+// ErrorInfo detail naming the exact sentinel. Branch on the sentinel; fall back to
+// the code when the detail is absent or names something this client does not
+// know. See ErrorInfo for the full list. Every verb returns ErrForbidden when the
+// calling client has no ClientBinding, i.e. has not been registered to use the
+// platform; the per-verb lists below leave that out.
+//
+// # Stability
+//
+// The contract grows only by addition. A client must ignore a field it does not
+// know, tolerate a string value it does not know in every vocabulary field
+// (SessionView.state, Event.type, and the enumerated strings inside payloads),
+// and tolerate an event payload key it does not know. Those fields are strings
+// rather than enums precisely so that a new value never breaks an old client.
 package harnessapipbconnect
 
 import (
@@ -64,25 +105,105 @@ const (
 
 // HarnessAPIServiceClient is a client for the harnessapi.v1.HarnessAPIService service.
 type HarnessAPIServiceClient interface {
-	// CreateSession opens a session and starts its launch. It returns as soon as
-	// the row exists; the launch reports itself on the event log.
+	// CreateSession opens a session and starts its launch.
+	//
+	// It returns as soon as the session exists, in state "pending"; the launch
+	// then runs on its own and reports itself on the event log. The client's next
+	// job is to deliver the consent-page URL from the approval_required event to
+	// the person who should approve — the platform mints the page, but only the
+	// client knows who to ask. Nothing runs until that person approves; if nobody
+	// does within the approval window, the session ends with reason
+	// "never_approved".
+	//
+	// Errors: ErrInvalidArgument (a required field is blank), ErrForbidden (this
+	// client has no ClientBinding, or may not run this template), ErrQuotaExceeded
+	// (a ClientBinding cap: live sessions, outstanding approvals, or creates per
+	// minute), ErrConflict (the conversation already has a live session),
+	// ErrUnavailable.
+	//
+	// Safe to retry: a conversation holds one live session, so retrying a create
+	// that did succeed is refused with ErrConflict rather than making a second one.
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
-	// Prompt sends one turn. On a suspended session it is the revive.
+	// Prompt sends one turn to the agent.
+	//
+	// On a "running" session it opens a turn and returns its id at once; the
+	// turn's output arrives on the event log, every event of it stamped with that
+	// turn id, and ends with turn_completed or turn_failed. A second prompt while a
+	// turn is still running is accepted, and the turns overlap.
+	//
+	// On a "suspended" session it is the revive: a new pod on the same workspace
+	// and conversation, a new run, and a fresh approval_required the client must
+	// deliver again, pinned to the person who approved the session the first time.
+	// A revive counts against the client's quotas like a launch. The log shows a
+	// revived event, then the prompt runs as its first turn once approved.
+	//
+	// Errors: ErrInvalidArgument (empty content), ErrNotFound, ErrInvalidState
+	// (the session is in any other state), ErrNotRevivable (suspended, but it
+	// cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
+	// cap), ErrUnavailable.
+	//
+	// NEVER retry a Prompt. One the platform accepted but whose response was lost
+	// has already started a turn, and a resent one would start another; nothing on
+	// the wire tells the two apart. Report the error instead.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
-	// RespondPermission answers an outstanding tool-call permission request.
+	// RespondPermission answers an outstanding tool-call permission request: the
+	// agent asked (a permission_request event) and is blocked until a person
+	// chooses one of the offered options. The decision is recorded as a
+	// permission_resolved event.
+	//
+	// The platform remembers how it resolved a request for ten minutes, so a
+	// repeated answer inside that window gets the same result rather than an
+	// error. Past it, or for a request that never existed or belongs to a session
+	// that is no longer live, the answer is ErrUnknownRequest.
+	//
+	// Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
+	// ErrUnavailable. Safe to retry within the window.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
-	// EndSession ends a session and releases its workspace.
+	// EndSession ends a session: its pod and its workspace are released, and the
+	// log closes with a session_ended event. Ending a session that has already
+	// ended succeeds and changes nothing, so it is safe to retry.
+	//
+	// Errors: ErrNotFound, ErrUnavailable.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
 	// GetSession returns one session, by id or by conversation ref.
+	//
+	// Errors: ErrInvalidArgument (neither or both of session_id and
+	// conversation_ref), ErrNotFound, ErrUnavailable.
 	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
-	// ListSessions enumerates the calling client's sessions and nobody else's.
+	// ListSessions enumerates the calling client's sessions, newest first, and
+	// nobody else's.
+	//
+	// Errors: ErrUnavailable.
 	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
-	// ListTemplates reports what this client may run.
+	// ListTemplates reports the agent templates this client may run: exactly the
+	// names CreateSession accepts in its template field.
+	//
+	// Errors: ErrForbidden (this client has no ClientBinding), ErrUnavailable.
 	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
-	// ListEvents reads a page of a session's event history.
+	// ListEvents reads one page of a session's event history, in sequence order.
+	// Page by passing the last seq you received as after_seq; an empty page means
+	// you have everything so far. It is the polling alternative to Subscribe, for a
+	// client that cannot hold a stream open.
+	//
+	// Errors: ErrNotFound, ErrUnavailable.
 	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
-	// Subscribe streams a session's events, replaying anything after after_seq
-	// first.
+	// Subscribe streams a session's events: everything after after_seq first, then
+	// each new event as it is recorded.
+	//
+	// The first message is always a keepalive, sent once the subscription is
+	// accepted; a refusal (ErrNotFound and the like) arrives as the stream's error
+	// before it. After that the stream carries events and a keepalive every 20
+	// seconds while nothing else happens.
+	//
+	// Stop on the session_ended EVENT. The server ends the stream cleanly only
+	// once the log is finished, and a clean end of stream means exactly that: the
+	// log will never grow again. Any other end — an error, a reset, a proxy
+	// recycling the connection, several keepalive intervals of silence — means
+	// reconnect with after_seq set to the last seq you received. Delivery is
+	// at-least-once across reconnects: drop any event whose seq you have already
+	// seen.
+	//
+	// Errors: ErrInvalidArgument, ErrNotFound, ErrUnavailable.
 	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest]) (*connect.ServerStreamForClient[pb.SubscribeResponse], error)
 }
 
@@ -214,25 +335,105 @@ func (c *harnessAPIServiceClient) Subscribe(ctx context.Context, req *connect.Re
 
 // HarnessAPIServiceHandler is an implementation of the harnessapi.v1.HarnessAPIService service.
 type HarnessAPIServiceHandler interface {
-	// CreateSession opens a session and starts its launch. It returns as soon as
-	// the row exists; the launch reports itself on the event log.
+	// CreateSession opens a session and starts its launch.
+	//
+	// It returns as soon as the session exists, in state "pending"; the launch
+	// then runs on its own and reports itself on the event log. The client's next
+	// job is to deliver the consent-page URL from the approval_required event to
+	// the person who should approve — the platform mints the page, but only the
+	// client knows who to ask. Nothing runs until that person approves; if nobody
+	// does within the approval window, the session ends with reason
+	// "never_approved".
+	//
+	// Errors: ErrInvalidArgument (a required field is blank), ErrForbidden (this
+	// client has no ClientBinding, or may not run this template), ErrQuotaExceeded
+	// (a ClientBinding cap: live sessions, outstanding approvals, or creates per
+	// minute), ErrConflict (the conversation already has a live session),
+	// ErrUnavailable.
+	//
+	// Safe to retry: a conversation holds one live session, so retrying a create
+	// that did succeed is refused with ErrConflict rather than making a second one.
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
-	// Prompt sends one turn. On a suspended session it is the revive.
+	// Prompt sends one turn to the agent.
+	//
+	// On a "running" session it opens a turn and returns its id at once; the
+	// turn's output arrives on the event log, every event of it stamped with that
+	// turn id, and ends with turn_completed or turn_failed. A second prompt while a
+	// turn is still running is accepted, and the turns overlap.
+	//
+	// On a "suspended" session it is the revive: a new pod on the same workspace
+	// and conversation, a new run, and a fresh approval_required the client must
+	// deliver again, pinned to the person who approved the session the first time.
+	// A revive counts against the client's quotas like a launch. The log shows a
+	// revived event, then the prompt runs as its first turn once approved.
+	//
+	// Errors: ErrInvalidArgument (empty content), ErrNotFound, ErrInvalidState
+	// (the session is in any other state), ErrNotRevivable (suspended, but it
+	// cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
+	// cap), ErrUnavailable.
+	//
+	// NEVER retry a Prompt. One the platform accepted but whose response was lost
+	// has already started a turn, and a resent one would start another; nothing on
+	// the wire tells the two apart. Report the error instead.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
-	// RespondPermission answers an outstanding tool-call permission request.
+	// RespondPermission answers an outstanding tool-call permission request: the
+	// agent asked (a permission_request event) and is blocked until a person
+	// chooses one of the offered options. The decision is recorded as a
+	// permission_resolved event.
+	//
+	// The platform remembers how it resolved a request for ten minutes, so a
+	// repeated answer inside that window gets the same result rather than an
+	// error. Past it, or for a request that never existed or belongs to a session
+	// that is no longer live, the answer is ErrUnknownRequest.
+	//
+	// Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
+	// ErrUnavailable. Safe to retry within the window.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
-	// EndSession ends a session and releases its workspace.
+	// EndSession ends a session: its pod and its workspace are released, and the
+	// log closes with a session_ended event. Ending a session that has already
+	// ended succeeds and changes nothing, so it is safe to retry.
+	//
+	// Errors: ErrNotFound, ErrUnavailable.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
 	// GetSession returns one session, by id or by conversation ref.
+	//
+	// Errors: ErrInvalidArgument (neither or both of session_id and
+	// conversation_ref), ErrNotFound, ErrUnavailable.
 	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
-	// ListSessions enumerates the calling client's sessions and nobody else's.
+	// ListSessions enumerates the calling client's sessions, newest first, and
+	// nobody else's.
+	//
+	// Errors: ErrUnavailable.
 	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
-	// ListTemplates reports what this client may run.
+	// ListTemplates reports the agent templates this client may run: exactly the
+	// names CreateSession accepts in its template field.
+	//
+	// Errors: ErrForbidden (this client has no ClientBinding), ErrUnavailable.
 	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
-	// ListEvents reads a page of a session's event history.
+	// ListEvents reads one page of a session's event history, in sequence order.
+	// Page by passing the last seq you received as after_seq; an empty page means
+	// you have everything so far. It is the polling alternative to Subscribe, for a
+	// client that cannot hold a stream open.
+	//
+	// Errors: ErrNotFound, ErrUnavailable.
 	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
-	// Subscribe streams a session's events, replaying anything after after_seq
-	// first.
+	// Subscribe streams a session's events: everything after after_seq first, then
+	// each new event as it is recorded.
+	//
+	// The first message is always a keepalive, sent once the subscription is
+	// accepted; a refusal (ErrNotFound and the like) arrives as the stream's error
+	// before it. After that the stream carries events and a keepalive every 20
+	// seconds while nothing else happens.
+	//
+	// Stop on the session_ended EVENT. The server ends the stream cleanly only
+	// once the log is finished, and a clean end of stream means exactly that: the
+	// log will never grow again. Any other end — an error, a reset, a proxy
+	// recycling the connection, several keepalive intervals of silence — means
+	// reconnect with after_seq set to the last seq you received. Delivery is
+	// at-least-once across reconnects: drop any event whose seq you have already
+	// seen.
+	//
+	// Errors: ErrInvalidArgument, ErrNotFound, ErrUnavailable.
 	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest], *connect.ServerStream[pb.SubscribeResponse]) error
 }
 

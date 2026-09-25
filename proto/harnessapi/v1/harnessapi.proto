@@ -1,41 +1,177 @@
 syntax = "proto3";
 
+// The Harness API: the client-facing contract of the agentops harness.
+//
+// A client (a Slack bot, a web app, a CI job) uses it to start an agent session,
+// have a human approve it, talk to the agent turn by turn, and read everything
+// the session does back off one durable, ordered event log. This file is the
+// source of truth for that contract. docs/clients.md is the guide to writing a
+// client against it, and `make apistub` builds a conformance server that speaks
+// it with no cluster and no credentials.
+//
+// # Transport
+//
+// Connect (https://connectrpc.com), over HTTP/2 or HTTP/1.1, with either the
+// binary protobuf or the JSON codec. The service is served behind a Pomerium
+// route; a client reaches it at that route's URL and presents the credential the
+// route asks for (for a workload, its projected ServiceAccount token).
+//
+// # Identity
+//
+// Identity is NEVER taken from message fields. The caller's client id comes from
+// the X-Pomerium-Jwt-Assertion header the route stamps, and every verb is scoped
+// to it: a client sees, and can act on, only the sessions it created. That is why
+// no request message carries a client id — a field a client could set would be a
+// field a client could lie in. Another client's session is always reported as
+// not found, never as forbidden, because saying it exists would disclose it.
+//
+// # Errors
+//
+// A failed call returns a Connect error whose code classifies it, with an
+// ErrorInfo detail naming the exact sentinel. Branch on the sentinel; fall back to
+// the code when the detail is absent or names something this client does not
+// know. See ErrorInfo for the full list. Every verb returns ErrForbidden when the
+// calling client has no ClientBinding, i.e. has not been registered to use the
+// platform; the per-verb lists below leave that out.
+//
+// # Stability
+//
+// The contract grows only by addition. A client must ignore a field it does not
+// know, tolerate a string value it does not know in every vocabulary field
+// (SessionView.state, Event.type, and the enumerated strings inside payloads),
+// and tolerate an event payload key it does not know. Those fields are strings
+// rather than enums precisely so that a new value never breaks an old client.
 package harnessapi.v1;
 
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/pomerium/agentops/harness/api/pb;harnessapipb";
 
-// HarnessAPIService is the client-facing Session/Turn/Event API, served by the
-// harness behind a Pomerium route and dialed BY a client (the Slack bot, a web
-// app, a CI bot). It is the wire form of the Go interface in the api package,
-// and the two are kept in step deliberately: a caller written against the
-// interface runs unchanged in-process or over this.
+// HarnessAPIService is the Session/Turn/Event API.
 //
-// Identity is NEVER taken from message fields. The caller's client_id comes from
-// the X-Pomerium-Jwt-Assertion header the route stamps, and the handler puts it
-// on every request it builds. That is why no request message below carries one —
-// a field a client could set would be a field a client could lie in.
+// A session's life, as a client sees it:
+//
+//   CreateSession -> pending -> launching -> awaiting_approval -> running
+//                                                                 |    ^
+//                                             idle for too long   |    | Prompt
+//                                                                 v    | (revive)
+//                                                               suspended
+//
+//   EndSession, an approval that lapses or is withdrawn, or a failure -> ended
+//   a platform restart in the middle of a session -> interrupted
+//
+// Every transition is on the event log as a state_changed event, so a client
+// that subscribes needs no polling. It is the wire form of the Go interface in
+// the api package, and the two are kept in step deliberately: a caller written
+// against the interface runs unchanged in-process or over this.
 service HarnessAPIService {
-  // CreateSession opens a session and starts its launch. It returns as soon as
-  // the row exists; the launch reports itself on the event log.
+  // CreateSession opens a session and starts its launch.
+  //
+  // It returns as soon as the session exists, in state "pending"; the launch
+  // then runs on its own and reports itself on the event log. The client's next
+  // job is to deliver the consent-page URL from the approval_required event to
+  // the person who should approve — the platform mints the page, but only the
+  // client knows who to ask. Nothing runs until that person approves; if nobody
+  // does within the approval window, the session ends with reason
+  // "never_approved".
+  //
+  // Errors: ErrInvalidArgument (a required field is blank), ErrForbidden (this
+  // client has no ClientBinding, or may not run this template), ErrQuotaExceeded
+  // (a ClientBinding cap: live sessions, outstanding approvals, or creates per
+  // minute), ErrConflict (the conversation already has a live session),
+  // ErrUnavailable.
+  //
+  // Safe to retry: a conversation holds one live session, so retrying a create
+  // that did succeed is refused with ErrConflict rather than making a second one.
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
-  // Prompt sends one turn. On a suspended session it is the revive.
+
+  // Prompt sends one turn to the agent.
+  //
+  // On a "running" session it opens a turn and returns its id at once; the
+  // turn's output arrives on the event log, every event of it stamped with that
+  // turn id, and ends with turn_completed or turn_failed. A second prompt while a
+  // turn is still running is accepted, and the turns overlap.
+  //
+  // On a "suspended" session it is the revive: a new pod on the same workspace
+  // and conversation, a new run, and a fresh approval_required the client must
+  // deliver again, pinned to the person who approved the session the first time.
+  // A revive counts against the client's quotas like a launch. The log shows a
+  // revived event, then the prompt runs as its first turn once approved.
+  //
+  // Errors: ErrInvalidArgument (empty content), ErrNotFound, ErrInvalidState
+  // (the session is in any other state), ErrNotRevivable (suspended, but it
+  // cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
+  // cap), ErrUnavailable.
+  //
+  // NEVER retry a Prompt. One the platform accepted but whose response was lost
+  // has already started a turn, and a resent one would start another; nothing on
+  // the wire tells the two apart. Report the error instead.
   rpc Prompt(PromptRequest) returns (PromptResponse);
-  // RespondPermission answers an outstanding tool-call permission request.
+
+  // RespondPermission answers an outstanding tool-call permission request: the
+  // agent asked (a permission_request event) and is blocked until a person
+  // chooses one of the offered options. The decision is recorded as a
+  // permission_resolved event.
+  //
+  // The platform remembers how it resolved a request for ten minutes, so a
+  // repeated answer inside that window gets the same result rather than an
+  // error. Past it, or for a request that never existed or belongs to a session
+  // that is no longer live, the answer is ErrUnknownRequest.
+  //
+  // Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
+  // ErrUnavailable. Safe to retry within the window.
   rpc RespondPermission(RespondPermissionRequest) returns (RespondPermissionResponse);
-  // EndSession ends a session and releases its workspace.
+
+  // EndSession ends a session: its pod and its workspace are released, and the
+  // log closes with a session_ended event. Ending a session that has already
+  // ended succeeds and changes nothing, so it is safe to retry.
+  //
+  // Errors: ErrNotFound, ErrUnavailable.
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+
   // GetSession returns one session, by id or by conversation ref.
+  //
+  // Errors: ErrInvalidArgument (neither or both of session_id and
+  // conversation_ref), ErrNotFound, ErrUnavailable.
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
-  // ListSessions enumerates the calling client's sessions and nobody else's.
+
+  // ListSessions enumerates the calling client's sessions, newest first, and
+  // nobody else's.
+  //
+  // Errors: ErrUnavailable.
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
-  // ListTemplates reports what this client may run.
+
+  // ListTemplates reports the agent templates this client may run: exactly the
+  // names CreateSession accepts in its template field.
+  //
+  // Errors: ErrForbidden (this client has no ClientBinding), ErrUnavailable.
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
-  // ListEvents reads a page of a session's event history.
+
+  // ListEvents reads one page of a session's event history, in sequence order.
+  // Page by passing the last seq you received as after_seq; an empty page means
+  // you have everything so far. It is the polling alternative to Subscribe, for a
+  // client that cannot hold a stream open.
+  //
+  // Errors: ErrNotFound, ErrUnavailable.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
-  // Subscribe streams a session's events, replaying anything after after_seq
-  // first.
+
+  // Subscribe streams a session's events: everything after after_seq first, then
+  // each new event as it is recorded.
+  //
+  // The first message is always a keepalive, sent once the subscription is
+  // accepted; a refusal (ErrNotFound and the like) arrives as the stream's error
+  // before it. After that the stream carries events and a keepalive every 20
+  // seconds while nothing else happens.
+  //
+  // Stop on the session_ended EVENT. The server ends the stream cleanly only
+  // once the log is finished, and a clean end of stream means exactly that: the
+  // log will never grow again. Any other end — an error, a reset, a proxy
+  // recycling the connection, several keepalive intervals of silence — means
+  // reconnect with after_seq set to the last seq you received. Delivery is
+  // at-least-once across reconnects: drop any event whose seq you have already
+  // seen.
+  //
+  // Errors: ErrInvalidArgument, ErrNotFound, ErrUnavailable.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
@@ -43,43 +179,104 @@ service HarnessAPIService {
 // platform actually raised.
 //
 // The Connect code alone is not enough: several sentinels map onto the same code
-// (a not-found session and an unknown permission request are both NotFound-ish,
-// forbidden and quota-exceeded are both refusals), and a client that branches on
-// errors.Is needs the sentinel back, not an approximation of it. Carrying the
-// name makes the mapping injective, so an error round-trips through the wire
-// and still matches the same errors.Is check on the far side.
+// (a missing session and an unknown permission request are both not_found), and
+// a client that branches on the error needs the sentinel back, not an
+// approximation of it. Carrying the name makes the mapping injective, so an error
+// round-trips through the wire and still matches the same check on the far side.
 message ErrorInfo {
-  // sentinel is the Go sentinel's name, e.g. "ErrNotRevivable". Unknown names
-  // are tolerated: a client that does not recognize one falls back to the code.
+  // sentinel is the error's name, one of the values below with the Connect code
+  // it travels under. A name this client does not know must be tolerated: fall
+  // back to the code.
+  //
+  // BEGIN GENERATED: sentinels (make vocab)
+  // "ErrNotFound" (not_found): no such session, or none this client may see.
+  // "ErrUnknownRequest" (not_found): an unknown or already-resolved permission
+  //     request.
+  // "ErrForbidden" (permission_denied): this client has no ClientBinding, or the
+  //     template is not in its binding. Another client's session is never
+  //     Forbidden; it is NotFound.
+  // "ErrConflict" (already_exists): the conversation ref already has a live
+  //     session.
+  // "ErrInvalidState" (failed_precondition): the verb does not apply in this
+  //     session's state. Notably a prompt at a state that is neither running nor
+  //     suspended: consent must cover exactly what the approver read, so there
+  //     is no queue.
+  // "ErrNotRevivable" (failed_precondition): the session is suspended but cannot
+  //     be continued — no recorded conversation, no workspace, or no approver
+  //     to pin a fresh approval to. A client is expected to start a new session
+  //     instead.
+  // "ErrInvalidArgument" (invalid_argument): a malformed or missing field.
+  // "ErrUnavailable" (unavailable): a dependency (the orchestrator, the
+  //     authorization server) failed. Retryable.
+  // "ErrQuotaExceeded" (resource_exhausted): the client's ClientBinding caps
+  //     what it may hold at once, or how fast it may open sessions, and this
+  //     call would exceed it. Distinct from ErrForbidden because it is a "not
+  //     now", not a "not ever": the detail names which quota, and a client can
+  //     retry or end something first.
+  // END GENERATED: sentinels
   string sentinel = 1;
-  // detail is the human-readable elaboration the sentinel was wrapped with.
+  // detail is the human-readable elaboration of this particular failure, for a
+  // log or a person. Never branch on it: its wording is not part of the contract.
   string detail = 2;
 }
 
-// SessionRef addresses a session by id or by conversation, always within the
-// calling client. Exactly one of session_id/conversation_ref must be set.
+// SessionRef addresses one session within the calling client, either by the id
+// the platform gave it or by the client's own conversation ref. Exactly one of
+// session_id and conversation_ref must be set; neither or both is
+// ErrInvalidArgument.
 //
-// It carries no client_id: the caller's identity is the verified assertion's,
+// It carries no client id: the caller's identity is the verified assertion's,
 // and a field here would only ever be a lie waiting to be believed.
 message SessionRef {
+  // session_id is SessionView.id, as CreateSession returned it.
   string session_id = 1;
+  // conversation_ref is the client's own ref, as given to CreateSession. It
+  // matches the conversation's live session; with include_terminal, its most
+  // recent one.
   string conversation_ref = 2;
   // include_terminal makes a lookup by conversation_ref return the most recent
-  // session the conversation had even if it has ended. Verbs that act on a
-  // session ignore it.
+  // session the conversation had, even one that has ended — the answer to "what
+  // ran here before?", which a client seeding a successor needs. Only the reading
+  // verbs honor it (GetSession, ListEvents, Subscribe). The verbs that act on a
+  // session (Prompt, RespondPermission, EndSession) ignore it: they operate on
+  // the live session or on nothing. Ignored with session_id.
   bool include_terminal = 3;
 }
 
-// SessionView is what a client sees of a session. State and reason-shaped fields
-// are strings, not enums: the vocabularies are additive and a client must
-// tolerate a value it does not know rather than fail to parse the message.
+// SessionView is what a client sees of a session.
 message SessionView {
+  // id is the session's platform-assigned id: opaque, stable for the session's
+  // life, and what SessionRef.session_id takes.
   string id = 1;
+  // conversation_ref is the client's own ref, exactly as given to CreateSession.
   string conversation_ref = 2;
+  // state is where the session is in its life. A string, not an enum: tolerate a
+  // value you do not know.
+  //
+  // BEGIN GENERATED: vocab:SessionState (make vocab)
+  // "pending": the session row exists; nothing has been launched yet. (live: the
+  //     session still holds cluster resources.)
+  // "launching": a workspace is being prepared, or a run created. (live: the
+  //     session still holds cluster resources.)
+  // "awaiting_approval": a run exists and a human has been asked to approve it.
+  //     (live: the session still holds cluster resources.)
+  // "running": an agent is attached and can take turns. (live: the session still
+  //     holds cluster resources.)
+  // "suspended": the pod is freed, the workspace and conversation kept. The next
+  //     prompt revives it. (live: the session still holds cluster resources.)
+  // "ended": terminal.
+  // "interrupted": terminal for this episode — the harness restarted under a
+  //     live session. The workspace may still be revivable.
+  // END GENERATED: vocab:SessionState
   string state = 3;
+  // template is the agent template the session runs, as named at creation. The
+  // template's spec was snapshotted then, and every run of this session —
+  // including a revive — uses that snapshot, so an edit to the template later
+  // cannot widen what an approver consented to.
   string template = 4;
-  // last_seq is the newest event on the session's log: where a client that has
-  // rendered nothing yet starts reading, so it does not replay the conversation.
+  // last_seq is the seq of the newest event on the session's log, 0 before the
+  // first. A client that has rendered nothing yet subscribes from here, so it
+  // does not replay the whole conversation.
   int64 last_seq = 5;
 }
 
@@ -92,106 +289,387 @@ message SessionView {
 // verbatim. Both would break the contract at the transport, which is the one
 // place it must not break.
 message Event {
+  // session_id is the session the event belongs to.
   string session_id = 1;
+  // seq is the event's position on the session's log: 1 for the first event,
+  // then dense and strictly increasing, surviving suspend, revive and platform
+  // restarts. It is the deduplication key for at-least-once delivery and the
+  // cursor for ListEvents and Subscribe (after_seq).
   int64 seq = 2;
+  // type names what happened, and fixes the shape of payload. A string, not an
+  // enum: ignore a type you do not know. The types, each with its payload keys:
+  //
+  // BEGIN GENERATED: vocab:EventType (make vocab)
+  // "state_changed": a session-state transition.
+  //     payload:
+  //       old (SessionState): the state the session left.
+  //       new (SessionState): the state the session is now in; the same value a
+  //           GetSession would report.
+  //       reason (Reason, absent when zero): one of the [Reason] values, empty
+  //           for an ordinary transition.
+  // "approval_required": the consent-page URL the client must deliver to the
+  //     person it believes should approve.
+  //     payload:
+  //       approval_url (string): the consent page to deliver to the approver.
+  //           Opening it lets the person who follows it approve this run, so
+  //           hand it only to that person, and render it as chrome rather than
+  //           as anything the agent said.
+  //       expires_at (timestamp): when the approval window closes. A timestamp
+  //           is always written, so an absent expiry reads as the zero time
+  //           rather than as a missing key.
+  // "approved": the verified IdP subject that approved the run.
+  //     payload:
+  //       approver_subject (string): the raw IdP subject reported by the
+  //           authorization server — email/name enrichment is a directory
+  //           concern and deliberately not an AS field.
+  // "launch_stalled": an approved run whose workspace has not connected back
+  //     when it should have.
+  //     payload:
+  //       waited_ns (duration): how long the approved run has gone without its
+  //           workspace connecting back.
+  // "agent_message": one addressable segment of the agent's visible output.
+  //     payload:
+  //       part_id (string): addresses this segment within the turn. A later
+  //           agent_message with the same part_id replaces the text of the one
+  //           before, so a client updates the rendered part in place.
+  //       text (string): the segment's text, verbatim from the agent. Untrusted;
+  //           render it as inert content.
+  //       final (bool): true on the turn's last segment, false on one a tool
+  //           call interrupted.
+  // "agent_thought": the agent's reasoning, when it discloses any.
+  //     payload:
+  //       text (string): the reasoning, verbatim from the agent. Untrusted, like
+  //           agent text.
+  // "tool_call": announces or updates a tool call.
+  //     payload:
+  //       id (string): identifies the call within the session; an update carries
+  //           the id of the call it updates, and a permission_request names it
+  //           as tool_call_id.
+  //       title (string, absent when zero): a short human-readable name for the
+  //           call, as the agent gives it.
+  //       kind (string, absent when zero): what sort of tool it is (read, edit,
+  //           execute, fetch, …), passed through from the agent's protocol
+  //           unchanged.
+  //       status (ToolCallStatus): where the call is, one of the
+  //           [ToolCallStatus] values.
+  //       invocation_message (string, absent when zero): the agent's own
+  //           description of what it is doing, when it supplies one.
+  //       tool_input (json, absent when zero): the raw tool input as the agent
+  //           sent it, when the agent discloses it. Untrusted, like agent text.
+  //       update (bool, absent when zero): false when this announces a new call,
+  //           true for a status or result update to one already announced.
+  // "permission_request": asks the client's principal to authorize a tool call.
+  //     payload:
+  //       request_id (string): identifies the request; RespondPermission takes
+  //           it, and the permission_resolved event that closes it carries it.
+  //       summary (string): what the agent is asking to do, in its own words,
+  //           for the person deciding. Untrusted, like agent text.
+  //       options ([]PermissionOption): the choices on offer. Answer with one of
+  //           their ids.
+  //       deadline (timestamp): when the request lapses unanswered; the agent is
+  //           then told no, and a permission_resolved event records it as
+  //           expired.
+  //       tool_call_id (string, absent when zero): the call the request belongs
+  //           to.
+  // "permission_resolved": closes a permission request, however it ended.
+  //     payload:
+  //       request_id (string): the request this closes, as permission_request
+  //           named it.
+  //       resolution (Resolution): the chosen option id, or one of the
+  //           [Resolution] values.
+  // "turn_completed": a turn that finished.
+  //     payload:
+  //       stop_reason (string): the ACP stop reason ("end_turn", "max_tokens",
+  //           "cancelled", …).
+  // "turn_failed": a turn that died.
+  //     payload:
+  //       reason (string): why the turn died, as a human-readable explanation
+  //           for a person or a log.
+  // "usage": the turn's token and cost counters.
+  //     payload:
+  //       input_tokens (int, absent when zero): prompt tokens the turn consumed.
+  //       output_tokens (int, absent when zero): tokens the agent generated.
+  //       cached_input_tokens (int, absent when zero): prompt tokens served from
+  //           the model's cache.
+  //       cache_creation_tokens (int, absent when zero): prompt tokens written
+  //           to the model's cache.
+  //       thought_tokens (int, absent when zero): tokens spent on reasoning,
+  //           when the model reports them separately.
+  //       total_tokens (int, absent when zero): all tokens the turn used, as the
+  //           agent counts them.
+  //       cost_usd (float, absent when zero): what the turn cost, in US dollars,
+  //           as the agent reports it.
+  //       context_window (int, absent when zero): how much context the agent
+  //           has, when it says.
+  //       context_used (int, absent when zero): how much of it this turn left
+  //           occupied, when it says.
+  // "idle_warning": a quiet session about to be suspended.
+  //     payload:
+  //       lead_ns (duration): how long until the session is suspended; a Prompt
+  //           before then keeps it running.
+  // "suspended": the pod was freed and the workspace kept.
+  //     payload:
+  //       reason (Reason, absent when zero): one of the [Reason] values.
+  //       retained_for_ns (duration, absent when zero): how long the workspace
+  //           is kept before it is released.
+  // "revived": a suspended session came back on a new pod.
+  //     payload: {} (no keys)
+  // "released": a suspended session's workspace was reclaimed.
+  //     payload:
+  //       retained_for_ns (duration, absent when zero): how long the workspace
+  //           was kept.
+  // "session_ended": the last event a session ever emits.
+  //     payload:
+  //       reason (EndReason): one of the [EndReason] values.
+  //       detail (string, absent when zero): a human-readable elaboration, empty
+  //           when the reason says it all. It is for a person reading a log,
+  //           never for a client to branch on — that is what reason is for.
+  // END GENERATED: vocab:EventType
+  //
+  // Shapes nested inside those payloads:
+  //
+  // BEGIN GENERATED: payloads:nested (make vocab)
+  // PermissionOption: PermissionOption is one choice on a permission request.
+  //     payload:
+  //       id (string): the option's id, which RespondPermission takes as
+  //           option_id.
+  //       name (string): the option's label, as the agent offers it, for the
+  //           person choosing.
+  //       kind (string, absent when zero): what choosing it means (allow_once,
+  //           allow_always, reject_once, reject_always, …), passed through
+  //           from the agent's protocol unchanged.
+  // END GENERATED: payloads:nested
+  //
+  // The reasons a state_changed or suspended event gives:
+  //
+  // BEGIN GENERATED: vocab:Reason (make vocab)
+  // "launch": a session starting, as opposed to one coming back.
+  // "revive": a session coming back on the same workspace.
+  // "idle": the session was quiet past its idle TTL. It is both a suspend reason
+  //     and, when the suspend itself failed, an end reason.
+  // "revive_failed": a continuation could not happen and the session went back
+  //     to suspended with its workspace intact. The turn that asked for it gets
+  //     a turn_failed carrying the specifics.
+  // END GENERATED: vocab:Reason
+  //
+  // The reasons a session_ended event gives:
+  //
+  // BEGIN GENERATED: vocab:EndReason (make vocab)
+  // "revoked": the run was revoked at the authorization server.
+  // "expired": a running session's run window ran out.
+  // "never_approved": the approval window closed with nothing approved. The
+  //     authorization server exposes no denial signal, so "refused" and
+  //     "ignored" are indistinguishable and a client must not claim to know
+  //     which.
+  // "agent_exit": the agent process ended.
+  // "tunnel_lost": the sandbox's tunnel died and did not come back.
+  // "ended": a client (or an operator) ended it deliberately.
+  // "interrupted": the harness restarted under a live session. Live ACP state is
+  //     in memory, so the session cannot continue — but the workspace survives
+  //     and the conversation can be revived.
+  // "prepare_failed": no workspace could be made ready.
+  // "run_create_failed": the authorization server would not create a run, so
+  //     there was nothing for anyone to approve.
+  // "attach_timeout": the workspace started but never connected back. The place
+  //     to look is the network path, not the app or the agent.
+  // "launch_failed": the launch failed some other way.
+  // END GENERATED: vocab:EndReason
+  //
+  // A tool_call's status:
+  //
+  // BEGIN GENERATED: vocab:ToolCallStatus (make vocab)
+  // "pending": announced; not started yet.
+  // "in_progress": running.
+  // "completed": finished successfully.
+  // "failed": finished with an error.
+  // END GENERATED: vocab:ToolCallStatus
+  //
+  // How a permission_resolved event records a request nobody answered:
+  //
+  // BEGIN GENERATED: vocab:Resolution (make vocab)
+  // "expired": the deadline passed with no answer; the agent was told the call
+  //     was cancelled.
+  // "superseded": the session ended, or the turn was cancelled, with the request
+  //     outstanding.
+  // END GENERATED: vocab:Resolution
   string type = 3;
+  // turn_id is the turn this event belongs to, as Prompt returned it (or the
+  // opening turn's id, for initial_prompt). Set on the events a turn produces —
+  // agent_message, agent_thought, tool_call, permission_request,
+  // permission_resolved, usage, turn_completed, turn_failed — and empty on the
+  // session-level ones.
   string turn_id = 4;
+  // timestamp is when the platform recorded the event, by its own clock.
   google.protobuf.Timestamp timestamp = 5;
+  // payload is the event's body: a UTF-8 JSON object whose keys type fixes (see
+  // above). A key marked "absent when zero" is omitted when its value is the
+  // zero value; a key this client does not know must be ignored. It is the exact
+  // bytes the platform recorded, so a replay is byte-identical.
   bytes payload = 6;
 }
 
-// TemplateSummary is one entry of ListTemplates: what a client may run.
+// TemplateSummary is one entry of ListTemplates: an agent template this client
+// may run.
 message TemplateSummary {
+  // name is the template's name, which is what CreateSessionRequest.template
+  // takes.
   string name = 1;
+  // description is the template's own one-line description, for a person
+  // choosing between templates. May be empty.
   string description = 2;
 }
 
+// CreateSessionRequest opens a session.
 message CreateSessionRequest {
+  // template is the agent template to run: one of the names ListTemplates
+  // returns. Required. Its spec is snapshotted onto the session now.
   string template = 1;
+  // conversation_ref is the client's own name for the conversation this session
+  // serves: a chat thread, a pull request, a job id. Required, opaque to the
+  // platform, and unique per client among live sessions — a second live session
+  // for the same ref is ErrConflict. Once the session has ended the ref is free
+  // again, and a lookup with include_terminal still finds the old one.
   string conversation_ref = 2;
+  // parent_session_id records lineage: the id of the session this one was
+  // derived from (a handoff, a fork). Optional. The platform records it and does
+  // not interpret it; it is not returned on the view.
   string parent_session_id = 3;
+  // approval_prompt is what the human approver reads on the consent page: the
+  // request this session will carry out, in words the approver can judge.
+  // Required and non-blank, because an empty consent page asks a person to
+  // authorize a blank. It is shown to the approver, not sent to the agent. A
+  // client seeding the agent from an earlier conversation says so in a bounded
+  // clause here rather than pasting the conversation in.
   string approval_prompt = 4;
+  // initial_prompt is the agent's first turn, run as soon as the session is
+  // approved and its agent is attached. Optional: empty opens the session idle,
+  // waiting for a Prompt.
   string initial_prompt = 5;
+  // system_prompt_appendix is the client's own guidance about how answers should
+  // be written — mrkdwn for Slack, plain text for a terminal — appended to the
+  // template's system prompt. Optional. It is snapshotted with the template, so a
+  // revive keeps it.
   string system_prompt_appendix = 6;
 }
 
+// CreateSessionResponse is the session as it stands the moment it is created:
+// in state "pending", with the launch just started.
 message CreateSessionResponse {
   SessionView session = 1;
 }
 
+// PromptRequest sends one turn.
 message PromptRequest {
+  // ref is the session to prompt: its live session, or a suspended one to revive.
   SessionRef ref = 1;
+  // content is the person's message to the agent, passed through verbatim.
+  // Required and non-empty.
   string content = 2;
 }
 
+// PromptResponse identifies the turn the prompt opened.
 message PromptResponse {
+  // turn_id stamps every event the turn produces (Event.turn_id), so a client can
+  // tell which answer belongs to which prompt when turns overlap.
   string turn_id = 1;
 }
 
+// RespondPermissionRequest answers a permission_request event.
 message RespondPermissionRequest {
+  // ref is the session the request was raised on.
   SessionRef ref = 1;
+  // request_id is the permission_request payload's "request_id". Required.
   string request_id = 2;
+  // option_id is the chosen option: the "id" of one entry in the request's
+  // "options" list.
   string option_id = 3;
 }
 
+// RespondPermissionResponse is empty: the outcome is the permission_resolved
+// event on the log.
 message RespondPermissionResponse {}
 
+// EndSessionRequest ends a session.
 message EndSessionRequest {
+  // ref is the session to end.
   SessionRef ref = 1;
+  // reason is recorded on the session_ended event. Optional: empty records
+  // "ended", which is the reason a client ending its own session should give.
+  // The other end reasons (see Event.type) name causes on the platform's side.
   string reason = 2;
 }
 
+// EndSessionResponse is empty: the ending is on the log.
 message EndSessionResponse {}
 
+// GetSessionRequest reads one session.
 message GetSessionRequest {
+  // ref is the session to read. include_terminal is honored here.
   SessionRef ref = 1;
 }
 
+// GetSessionResponse carries the session as it stands now.
 message GetSessionResponse {
   SessionView session = 1;
 }
 
+// ListSessionsRequest enumerates the calling client's sessions. Both filters are
+// optional and combine.
 message ListSessionsRequest {
   // live_only drops ended and interrupted sessions.
   bool live_only = 1;
-  // updated_since returns only sessions touched at or after this instant. It is
-  // what a client's own reconciliation sweep pages on: "which of my sessions
-  // moved since I last looked", which live_only cannot express because a session
-  // that just went terminal is exactly the one worth hearing about.
+  // updated_since returns only sessions that changed at or after this instant,
+  // compared at one-second granularity. It is what a client's own reconciliation
+  // sweep pages on — "which of my sessions moved since I last looked" — which
+  // live_only cannot express, because a session that has just ended is exactly
+  // the one worth hearing about. Unset means no lower bound.
   google.protobuf.Timestamp updated_since = 2;
 }
 
+// ListSessionsResponse lists sessions newest first, by creation time.
 message ListSessionsResponse {
   repeated SessionView sessions = 1;
 }
 
+// ListTemplatesRequest has no fields: the answer depends only on who is asking.
 message ListTemplatesRequest {}
 
+// ListTemplatesResponse lists the templates this client may run.
 message ListTemplatesResponse {
   repeated TemplateSummary templates = 1;
 }
 
+// ListEventsRequest reads one page of a session's log.
 message ListEventsRequest {
+  // ref is the session to read. include_terminal is honored here.
   SessionRef ref = 1;
   // after_seq returns events strictly after this sequence; 0 starts at the
   // beginning.
   int64 after_seq = 2;
-  // limit caps the page; 0 means the server default.
+  // limit caps the page. 0 means the server default, and anything above the
+  // server's maximum is clamped to it; both are 500 today.
   int32 limit = 3;
 }
 
+// ListEventsResponse is one page of events, in seq order. Fewer than the limit
+// does not mean the log is finished — only that nothing more has been recorded
+// yet; the session_ended event is what says the log is done.
 message ListEventsResponse {
   repeated Event events = 1;
 }
 
+// SubscribeRequest opens a live feed of one session's events.
 message SubscribeRequest {
+  // ref is the session to follow. include_terminal is honored here.
   SessionRef ref = 1;
-  // after_seq resumes: history at or before it is not replayed, history after it
-  // is, so a reconnecting client picks up exactly where it stopped.
+  // after_seq is where the feed starts: events strictly after it are replayed,
+  // then live ones follow, so a reconnecting client resumes exactly where it
+  // stopped by passing the last seq it received. 0 replays the whole log;
+  // SessionView.last_seq skips straight to what happens next.
   int64 after_seq = 2;
 }
 
-// SubscribeResponse carries either a session event or a keepalive.
+// SubscribeResponse carries either one event or a keepalive, never both.
 //
 // The FIRST message of every subscription is a keepalive, sent as soon as the
 // server has accepted the subscription. That is what makes opening one a
@@ -206,6 +684,10 @@ message SubscribeRequest {
 // the whole path. Clients discard keepalives and treat several missed intervals
 // as a dead stream worth reconnecting with after_seq.
 message SubscribeResponse {
+  // event is the next event on the log. Unset on a keepalive.
   Event event = 1;
+  // keepalive is true on a liveness tick, which carries no event and is never
+  // surfaced to the application. Sent first on every subscription, then every 20
+  // seconds while nothing else is.
   bool keepalive = 2;
 }
