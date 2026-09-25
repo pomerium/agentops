@@ -78,6 +78,14 @@
 // calling client has no ClientBinding, i.e. has not been registered to use the
 // platform; the per-verb lists below leave that out.
 //
+// # Retries
+//
+// Every verb that changes something can be retried without doing it twice:
+// CreateSession because a conversation holds one live session (a retry of a
+// create that succeeded is ErrConflict), Prompt by its idempotency_key,
+// RespondPermission by its request_id, and EndSession because ending an ended
+// session changes nothing.
+//
 // # Stability
 //
 // The contract grows only by addition. A client must ignore a field it does not
@@ -979,9 +987,18 @@ type PromptRequest struct {
 	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	// content is the user's message to the agent, as the client relays it; passed
 	// to the agent verbatim. Required and non-empty.
-	Content       string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Content string `protobuf:"bytes,2,opt,name=content,proto3" json:"content,omitempty"`
+	// idempotency_key makes the prompt safe to retry. Optional; a client that
+	// leaves it empty must not retry, since a prompt whose response was lost may
+	// already have started its turn. A prompt that repeats a key this session
+	// accepted in the last ten minutes starts nothing and returns the first one's
+	// turn_id. Only the key is compared, not the content. A repeat that arrives
+	// while the first is still being decided waits for its answer, and a refused
+	// prompt's key is not remembered. Any string unique per prompt: a UUID, or the
+	// id of the message the client is relaying.
+	IdempotencyKey string `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PromptRequest) Reset() {
@@ -1024,6 +1041,13 @@ func (x *PromptRequest) GetRef() *SessionRef {
 func (x *PromptRequest) GetContent() string {
 	if x != nil {
 		return x.Content
+	}
+	return ""
+}
+
+func (x *PromptRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
 	}
 	return ""
 }
@@ -1831,10 +1855,11 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\x0einitial_prompt\x18\x05 \x01(\tR\rinitialPrompt\x124\n" +
 	"\x16system_prompt_appendix\x18\x06 \x01(\tR\x14systemPromptAppendix\"M\n" +
 	"\x15CreateSessionResponse\x124\n" +
-	"\asession\x18\x01 \x01(\v2\x1a.harnessapi.v1.SessionViewR\asession\"V\n" +
+	"\asession\x18\x01 \x01(\v2\x1a.harnessapi.v1.SessionViewR\asession\"\x7f\n" +
 	"\rPromptRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\tR\acontent\")\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\x12'\n" +
+	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\")\n" +
 	"\x0ePromptResponse\x12\x17\n" +
 	"\aturn_id\x18\x01 \x01(\tR\x06turnId\"\x83\x01\n" +
 	"\x18RespondPermissionRequest\x12+\n" +
