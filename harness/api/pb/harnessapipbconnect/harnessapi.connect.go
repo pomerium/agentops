@@ -82,6 +82,14 @@
 // calling client has no ClientBinding, i.e. has not been registered to use the
 // platform; the per-verb lists below leave that out.
 //
+// # Retries
+//
+// Every verb that changes something can be retried without doing it twice:
+// CreateSession because a conversation holds one live session (a retry of a
+// create that succeeded is ErrConflict), Prompt by its idempotency_key,
+// RespondPermission by its request_id, and EndSession because ending an ended
+// session changes nothing.
+//
 // # Stability
 //
 // The contract grows only by addition. A client must ignore a field it does not
@@ -166,9 +174,6 @@ type HarnessAPIServiceClient interface {
 	// (a ClientBinding cap: live sessions, outstanding approvals, or creates per
 	// minute), ErrConflict (the conversation already has a live session),
 	// ErrUnavailable.
-	//
-	// Safe to retry: a conversation holds one live session, so retrying a create
-	// that did succeed is refused with ErrConflict rather than making a second one.
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
 	// Prompt sends one turn to the agent.
 	//
@@ -187,10 +192,6 @@ type HarnessAPIServiceClient interface {
 	// (the session is in any other state), ErrNotRevivable (suspended, but it
 	// cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
 	// cap), ErrUnavailable.
-	//
-	// NEVER retry a Prompt. One the platform accepted but whose response was lost
-	// has already started a turn, and a resent one would start another; nothing on
-	// the wire tells the two apart. Report the error instead.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request: the
 	// agent asked (a permission_request event) and is blocked until the client
@@ -206,11 +207,11 @@ type HarnessAPIServiceClient interface {
 	// that is no longer live, the answer is ErrUnknownRequest.
 	//
 	// Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
-	// ErrUnavailable. Safe to retry within the window.
+	// ErrUnavailable.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
 	// EndSession ends a session: its pod and its workspace are released, and the
 	// log closes with a session_ended event. Ending a session that has already
-	// ended succeeds and changes nothing, so it is safe to retry.
+	// ended succeeds and changes nothing.
 	//
 	// Errors: ErrNotFound, ErrUnavailable.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
@@ -399,9 +400,6 @@ type HarnessAPIServiceHandler interface {
 	// (a ClientBinding cap: live sessions, outstanding approvals, or creates per
 	// minute), ErrConflict (the conversation already has a live session),
 	// ErrUnavailable.
-	//
-	// Safe to retry: a conversation holds one live session, so retrying a create
-	// that did succeed is refused with ErrConflict rather than making a second one.
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
 	// Prompt sends one turn to the agent.
 	//
@@ -420,10 +418,6 @@ type HarnessAPIServiceHandler interface {
 	// (the session is in any other state), ErrNotRevivable (suspended, but it
 	// cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
 	// cap), ErrUnavailable.
-	//
-	// NEVER retry a Prompt. One the platform accepted but whose response was lost
-	// has already started a turn, and a resent one would start another; nothing on
-	// the wire tells the two apart. Report the error instead.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request: the
 	// agent asked (a permission_request event) and is blocked until the client
@@ -439,11 +433,11 @@ type HarnessAPIServiceHandler interface {
 	// that is no longer live, the answer is ErrUnknownRequest.
 	//
 	// Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
-	// ErrUnavailable. Safe to retry within the window.
+	// ErrUnavailable.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
 	// EndSession ends a session: its pod and its workspace are released, and the
 	// log closes with a session_ended event. Ending a session that has already
-	// ended succeeds and changes nothing, so it is safe to retry.
+	// ended succeeds and changes nothing.
 	//
 	// Errors: ErrNotFound, ErrUnavailable.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
