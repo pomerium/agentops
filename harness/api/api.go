@@ -3,14 +3,12 @@
 // durable event log that surface reads from.
 //
 // This package is the whole of what a client compiles against. It holds the
-// verb interface, the request/response types, the typed error set and the event
-// vocabulary — and it imports nothing but the standard library, so depending on
-// it costs a client no Kubernetes, no SQLite and no platform internals. The
-// implementation lives behind it and is not importable.
-//
-// The vocabularies and the error set are in vocab.go, generated from
-// proto/vocabulary.yaml — the one place they are written down, so this package,
-// the two SDKs and docs/clients.md cannot come to name different sets.
+// verb interface, the request/response types and the typed error set; the events
+// and the enums are the contract's own generated types (package pb), from
+// proto/harnessapi/v1 — the one place they are written down, so this package and
+// the two SDKs cannot come to name different sets. Depending on it costs a
+// client protobuf and nothing else: no Kubernetes, no SQLite and no platform
+// internals. The implementation lives behind it and is not importable.
 //
 // The types are transport-neutral by construction: the same API interface is
 // satisfied in-process by the platform's Service and over the wire by a Connect
@@ -34,14 +32,9 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	pb "github.com/pomerium/agentops/harness/api/pb"
 )
-
-// Live reports whether a state still owns cluster resources, which is also what
-// makes a ConversationRef unavailable to a second session.
-func (s SessionState) Live() bool { return liveSessionState(s) }
-
-// Terminal reports whether a session in this state can never run again.
-func (s SessionState) Terminal() bool { return !s.Live() }
 
 // --- errors ------------------------------------------------------------------
 
@@ -74,19 +67,19 @@ func Errorf(sentinel error, format string, args ...any) error {
 // SessionView is what a client sees of a session. It carries no Slack, no
 // Kubernetes and no credential detail by construction.
 type SessionView struct {
-	ID              string       `json:"id"`
-	ConversationRef string       `json:"conversation_ref"`
-	State           SessionState `json:"state"`
-	Template        string       `json:"template"`
+	ID              string
+	ConversationRef string
+	State           SessionState
+	Template        string
 	// LastSeq is the highest event sequence allocated for this session, so a
 	// client can start a subscription from a known point.
-	LastSeq int64 `json:"last_seq"`
+	LastSeq int64
 }
 
 // TemplateSummary is one entry of ListTemplates: what a client may run.
 type TemplateSummary struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
+	Name        string
+	Description string
 }
 
 // --- requests ----------------------------------------------------------------
@@ -102,36 +95,36 @@ type CreateSessionRequest struct {
 	// ClientID is the verified caller identity. Over the wire it is never sent:
 	// the handler stamps it from the assertion Pomerium verified on the route, so
 	// a client cannot state its own. In-process callers fill it in themselves.
-	ClientID string `json:"client_id"`
+	ClientID string
 	// Template is the AgentTemplate name to run. It is snapshotted onto the
 	// session and every later run of this session uses the snapshot.
-	Template string `json:"template"`
+	Template string
 	// ConversationRef is an opaque, client-owned string, unique per client while a
 	// session is live.
-	ConversationRef string `json:"conversation_ref"`
+	ConversationRef string
 	// ParentSessionID records lineage for a derived session.
-	ParentSessionID string `json:"parent_session_id,omitempty"`
+	ParentSessionID string
 	// ApprovalPrompt is what the human approver reads on the consent page. It
 	// never carries conversation content the approver did not ask for; a client
 	// that seeds an agent from a transcript says so in a bounded clause instead.
-	ApprovalPrompt string `json:"approval_prompt,omitempty"`
+	ApprovalPrompt string
 	// InitialPrompt is the first turn, run as soon as the agent is attached. Empty
 	// opens the session idle.
-	InitialPrompt string `json:"initial_prompt,omitempty"`
+	InitialPrompt string
 	// SystemPromptAppendix is the client's rendering guidance, appended to the
 	// template's own system prompt. How output should be formatted is a property
 	// of where it will be displayed, so it belongs to the client — the platform
 	// has no opinion about mrkdwn. It is snapshotted with the template, so a
 	// revive keeps it.
-	SystemPromptAppendix string `json:"system_prompt_appendix,omitempty"`
+	SystemPromptAppendix string
 }
 
 // SessionRef addresses a session by id or by conversation, always within a
 // client. Exactly one of SessionID/ConversationRef must be set.
 type SessionRef struct {
-	ClientID        string `json:"client_id"`
-	SessionID       string `json:"session_id,omitempty"`
-	ConversationRef string `json:"conversation_ref,omitempty"`
+	ClientID        string
+	SessionID       string
+	ConversationRef string
 	// IncludeTerminal makes a lookup by ConversationRef return the most recent
 	// session the conversation had even if it has ended.
 	//
@@ -143,24 +136,24 @@ type SessionRef struct {
 	//
 	// Verbs that act on a session (Prompt, EndSession) ignore it: they
 	// operate on the live one or on nothing.
-	IncludeTerminal bool `json:"include_terminal,omitempty"`
+	IncludeTerminal bool
 }
 
 // PromptRequest sends one turn.
 type PromptRequest struct {
-	Ref     SessionRef `json:"ref"`
-	Content string     `json:"content"`
+	Ref     SessionRef
+	Content string
 	// IdempotencyKey makes the prompt safe to retry: a prompt repeating a key the
 	// session accepted in the last ten minutes starts nothing and returns the first
 	// one's turn id. Only the key is compared, not the content. Optional; without
 	// one a prompt must not be retried, because one whose response was lost may
 	// already have started its turn.
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	IdempotencyKey string
 }
 
 // PromptResult reports the turn the prompt opened.
 type PromptResult struct {
-	TurnID string `json:"turn_id"`
+	TurnID string
 }
 
 // RespondPermissionRequest answers an outstanding permission request.
@@ -176,31 +169,31 @@ type PromptResult struct {
 // client is trusted to relay its principal's tool-call decisions, and the
 // authority ceiling stays with what the run token can reach.
 type RespondPermissionRequest struct {
-	Ref       SessionRef `json:"ref"`
-	RequestID string     `json:"request_id"`
-	OptionID  string     `json:"option_id"`
+	Ref       SessionRef
+	RequestID string
+	OptionID  string
 }
 
 // EndSessionRequest ends a session.
 type EndSessionRequest struct {
-	Ref SessionRef `json:"ref"`
-	// Reason is recorded on the session_ended event; empty means EndEnded.
-	Reason string `json:"reason,omitempty"`
+	Ref SessionRef
+	// Reason is recorded on the session_ended event; unspecified means EndEnded.
+	Reason EndReason
 }
 
 // ListSessionsRequest enumerates a client's sessions. It is always scoped to the
 // caller.
 type ListSessionsRequest struct {
-	ClientID string `json:"client_id"`
+	ClientID string
 	// LiveOnly drops ended and interrupted sessions.
-	LiveOnly bool `json:"live_only,omitempty"`
+	LiveOnly bool
 	// UpdatedSince returns only sessions touched at or after this instant.
 	//
 	// It is what a client's own reconciliation sweep pages on — "which of my
 	// sessions moved since I last looked" — and LiveOnly cannot express that: a
 	// session that has just gone terminal is precisely the one worth hearing
 	// about, and LiveOnly is what hides it. Zero means no lower bound.
-	UpdatedSince time.Time `json:"updated_since,omitempty"`
+	UpdatedSince time.Time
 }
 
 // KeepaliveInterval is how often a subscription carries a keepalive while
@@ -218,20 +211,20 @@ const KeepaliveInterval = 20 * time.Second
 
 // EventsRequest reads a session's event history.
 type EventsRequest struct {
-	Ref SessionRef `json:"ref"`
+	Ref SessionRef
 	// AfterSeq returns events strictly after this sequence; 0 starts at the
 	// beginning.
-	AfterSeq int64 `json:"after_seq,omitempty"`
+	AfterSeq int64
 	// Limit caps the page; 0 means the server default.
-	Limit int `json:"limit,omitempty"`
+	Limit int
 }
 
 // SubscribeRequest opens a live event subscription. History before AfterSeq is
 // not replayed; history after it is, so a reconnecting client resumes exactly
 // where it stopped.
 type SubscribeRequest struct {
-	Ref      SessionRef `json:"ref"`
-	AfterSeq int64      `json:"after_seq,omitempty"`
+	Ref      SessionRef
+	AfterSeq int64
 }
 
 // Subscription is a live event feed for one session. Events arrive in Seq order
@@ -239,7 +232,7 @@ type SubscribeRequest struct {
 // context ends). Delivery is at-least-once: dedup by Seq.
 type Subscription interface {
 	// Events yields the feed. It is closed when nothing further will arrive.
-	Events() <-chan Event
+	Events() <-chan *pb.Event
 	// Close releases the subscription. It is idempotent.
 	Close()
 }
@@ -254,6 +247,6 @@ type API interface {
 	GetSession(ctx context.Context, ref SessionRef) (SessionView, error)
 	ListSessions(ctx context.Context, req ListSessionsRequest) ([]SessionView, error)
 	ListTemplates(ctx context.Context, clientID string) ([]TemplateSummary, error)
-	ListEvents(ctx context.Context, req EventsRequest) ([]Event, error)
+	ListEvents(ctx context.Context, req EventsRequest) ([]*pb.Event, error)
 	Subscribe(ctx context.Context, req SubscribeRequest) (Subscription, error)
 }

@@ -1,18 +1,6 @@
-// This file holds the event log's envelope. What travels inside it is in
-// payloads.go and the vocabularies those payloads speak are in vocab.go — both
-// generated, from proto/payloads.yaml and proto/vocabulary.yaml, so that the
-// SDKs and the documentation cannot come to describe a different event than the
-// one the platform writes.
-
-package api
-
-import (
-	"encoding/json"
-	"fmt"
-	"time"
-)
-
-// Event is one entry on a session's durable, ordered log.
+// This file holds what the package adds to the log's event type, which is the
+// contract's own pb.Event: its payload is a oneof, and which field is set is the
+// event's kind.
 //
 // Delivery contract, published from day one and depended on by every consumer:
 //
@@ -28,39 +16,37 @@ import (
 //     a client can in principle miss an event that a later GetSession would
 //     contradict. Reconciling against GetSession's State and LastSeq is therefore
 //     legitimate — the stream is the fast path, not the only path.
-type Event struct {
-	SessionID string    `json:"session_id"`
-	Seq       int64     `json:"seq"`
-	Type      EventType `json:"type"`
-	// TurnID is set on everything that happens inside a turn, empty otherwise.
-	TurnID string `json:"turn_id,omitempty"`
-	// At is when the event was recorded, to millisecond precision.
-	At time.Time `json:"timestamp"`
-	// Payload is the type-specific body, stored as JSON so an unknown type still
-	// round-trips through the log byte-identically.
-	Payload json.RawMessage `json:"payload,omitempty"`
-}
 
-// Decode unmarshals the event payload into v.
-func (e Event) Decode(v any) error {
-	if len(e.Payload) == 0 {
-		return nil
+package api
+
+import pb "github.com/pomerium/agentops/harness/api/pb"
+
+// payloadOneof is Event's payload oneof, resolved once.
+var payloadOneof = (&pb.Event{}).ProtoReflect().Descriptor().Oneofs().ByName("payload")
+
+// Kind names an event by the payload field that is set — "state_changed",
+// "agent_message" — for a log line, a metric label or a store column. It is ""
+// for an event whose payload this build does not know.
+//
+// Branch on the payload's type, not on this: a type switch is checked by the
+// compiler, and a string is not.
+func Kind(ev *pb.Event) string {
+	fd := ev.ProtoReflect().WhichOneof(payloadOneof)
+	if fd == nil {
+		return ""
 	}
-	if err := json.Unmarshal(e.Payload, v); err != nil {
-		return fmt.Errorf("decode %s payload: %w", e.Type, err)
-	}
-	return nil
+	return string(fd.Name())
 }
 
 // NormalizeToolCallStatus maps an ACP tool-call status onto the published enum.
 // ACP spells the running state "in_progress"; older harnesses say "running".
 func NormalizeToolCallStatus(s string) ToolCallStatus {
 	switch s {
-	case string(ToolCallInProgress), "running":
+	case "in_progress", "running":
 		return ToolCallInProgress
-	case string(ToolCallCompleted), "success":
+	case "completed", "success":
 		return ToolCallCompleted
-	case string(ToolCallFailed), "error":
+	case "failed", "error":
 		return ToolCallFailed
 	default:
 		return ToolCallPending

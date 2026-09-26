@@ -9,7 +9,6 @@
 package wire
 
 import (
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -22,22 +21,47 @@ import (
 
 // --- errors ------------------------------------------------------------------
 
-// Sentinel is one entry of the published error set: the sentinel a caller
-// matches with errors.Is, and the Connect code it arrives as.
+// published is the error set, in one table read from both directions: the
+// Sentinel travels on the wire, the code is what a transport-only client sees.
+//
+// The Sentinel is what makes the mapping injective. Several errors share a code
+// — a missing session and an unknown permission request are both not-found —
+// so a client branching on errors.Is needs the one that was actually raised
+// rather than the nearest code. A slice rather than two maps because the match
+// order has to be deterministic: an error wrapping two sentinels must classify
+// the same way every time.
+var published = []struct {
+	name pb.Sentinel
+	err  error
+	code connect.Code
+}{
+	{pb.Sentinel_SENTINEL_NOT_FOUND, api.ErrNotFound, connect.CodeNotFound},
+	{pb.Sentinel_SENTINEL_UNKNOWN_REQUEST, api.ErrUnknownRequest, connect.CodeNotFound},
+	{pb.Sentinel_SENTINEL_FORBIDDEN, api.ErrForbidden, connect.CodePermissionDenied},
+	{pb.Sentinel_SENTINEL_CONFLICT, api.ErrConflict, connect.CodeAlreadyExists},
+	{pb.Sentinel_SENTINEL_INVALID_STATE, api.ErrInvalidState, connect.CodeFailedPrecondition},
+	{pb.Sentinel_SENTINEL_NOT_REVIVABLE, api.ErrNotRevivable, connect.CodeFailedPrecondition},
+	{pb.Sentinel_SENTINEL_INVALID_ARGUMENT, api.ErrInvalidArgument, connect.CodeInvalidArgument},
+	{pb.Sentinel_SENTINEL_UNAVAILABLE, api.ErrUnavailable, connect.CodeUnavailable},
+	{pb.Sentinel_SENTINEL_QUOTA_EXCEEDED, api.ErrQuotaExceeded, connect.CodeResourceExhausted},
+}
+
+// Sentinel is one entry of the published error set: the error a caller matches
+// with errors.Is, and the Connect code it arrives as.
 type Sentinel struct {
 	Err  error
 	Code connect.Code
 }
 
-// Sentinels is the published error set keyed by the name that travels in
+// Sentinels is the published error set keyed by the value that travels in
 // ErrorInfo.sentinel.
 //
 // It is exported for conformance tooling — a stub asked to raise every
 // published error, a test asserting an SDK maps all of them — so that set has
-// one definition rather than a copy per consumer. A copy is exactly how an
-// eleventh sentinel comes to be untested everywhere at once.
-func Sentinels() map[string]Sentinel {
-	out := make(map[string]Sentinel, len(published))
+// one definition rather than a copy per consumer. A copy is exactly how a tenth
+// sentinel comes to be untested everywhere at once.
+func Sentinels() map[pb.Sentinel]Sentinel {
+	out := make(map[pb.Sentinel]Sentinel, len(published))
 	for _, p := range published {
 		out[p.name] = Sentinel{Err: p.err, Code: p.code}
 	}
@@ -51,13 +75,13 @@ func Sentinels() map[string]Sentinel {
 // error wrapping two sentinels must classify the same way every time, and a map
 // would decide by whichever key came up first. Anything unclassified reports
 // false rather than being guessed at from its shape.
-func Classify(err error) (string, Sentinel, bool) {
+func Classify(err error) (pb.Sentinel, Sentinel, bool) {
 	for _, p := range published {
 		if errors.Is(err, p.err) {
 			return p.name, Sentinel{Err: p.err, Code: p.code}, true
 		}
 	}
-	return "", Sentinel{}, false
+	return pb.Sentinel_SENTINEL_UNSPECIFIED, Sentinel{}, false
 }
 
 // ToConnect renders a service error for the wire: a Connect code for anything
@@ -175,7 +199,7 @@ func View(v api.SessionView) *pb.SessionView {
 	return &pb.SessionView{
 		Id:              v.ID,
 		ConversationRef: v.ConversationRef,
-		State:           string(v.State),
+		State:           v.State,
 		Template:        v.Template,
 		LastSeq:         v.LastSeq,
 	}
@@ -189,43 +213,8 @@ func ViewFrom(v *pb.SessionView) api.SessionView {
 	return api.SessionView{
 		ID:              v.GetId(),
 		ConversationRef: v.GetConversationRef(),
-		State:           api.SessionState(v.GetState()),
+		State:           v.GetState(),
 		Template:        v.GetTemplate(),
 		LastSeq:         v.GetLastSeq(),
 	}
-}
-
-// --- events ------------------------------------------------------------------
-
-// Event renders a log event for the wire. The payload crosses as the bytes the
-// log holds — not re-marshalled, not re-typed — which is what keeps replay
-// byte-identical through a transport that did not exist when the event was
-// written.
-func Event(ev api.Event) *pb.Event {
-	return &pb.Event{
-		SessionId: ev.SessionID,
-		Seq:       ev.Seq,
-		Type:      string(ev.Type),
-		TurnId:    ev.TurnID,
-		Timestamp: Timestamp(ev.At),
-		Payload:   ev.Payload,
-	}
-}
-
-// EventFrom reads a log event off the wire.
-func EventFrom(ev *pb.Event) api.Event {
-	if ev == nil {
-		return api.Event{}
-	}
-	out := api.Event{
-		SessionID: ev.GetSessionId(),
-		Seq:       ev.GetSeq(),
-		Type:      api.EventType(ev.GetType()),
-		TurnID:    ev.GetTurnId(),
-		At:        Time(ev.GetTimestamp()),
-	}
-	if p := ev.GetPayload(); len(p) > 0 {
-		out.Payload = json.RawMessage(p)
-	}
-	return out
 }
