@@ -365,16 +365,12 @@ func (c *Client) ListTemplates(ctx context.Context, _ string) ([]api.TemplateSum
 	return out, nil
 }
 
-func (c *Client) ListEvents(ctx context.Context, req api.EventsRequest) ([]api.Event, error) {
+func (c *Client) ListEvents(ctx context.Context, req api.EventsRequest) ([]*pb.Event, error) {
 	res, err := call(ctx, c, c.unary.ListEvents, &pb.ListEventsRequest{
 		Ref: wire.Ref(req.Ref), AfterSeq: req.AfterSeq, Limit: int32(req.Limit),
 	})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]api.Event, 0, len(res.GetEvents()))
-	for _, ev := range res.GetEvents() {
-		out = append(out, wire.EventFrom(ev))
-	}
-	return out, nil
+	return res.GetEvents(), nil
 }

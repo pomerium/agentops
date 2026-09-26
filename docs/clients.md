@@ -53,7 +53,7 @@ cannot imitate, never as agent-supplied content.
 back on a new pod with a fresh approval, and the log says so with a `revived`
 event.
 There is no queue: consent covers exactly what the approver read, so a prompt in
-any other state is `ErrInvalidState`.
+any other state is `SENTINEL_INVALID_STATE`.
 
 **The template is fixed at creation.** It is snapshotted onto the session, and a
 revive reuses the stored spec — so a client cannot re-point a consented
@@ -120,18 +120,25 @@ To address a session by your own conversation ref instead of by id, put `-` in
 the path and the ref in the query: `/v1/sessions/-?conversation_ref=slack:C123/1712345678.9001`.
 Refs contain colons and slashes, and escaping one into a path segment is a trap.
 
-Field names here are snake_case — the Go `api` package's json tags — not the
-proto3 camelCase of the wire underneath. **This REST shape is the companion's own
-translation, not the platform's protocol.** Errors come back as
-`{"error":{"sentinel":"ErrNotFound","detail":"…"}}` with a matching status;
+Field names here are the `.proto`'s own, snake_case, in both directions — not the
+lowerCamelCase of the Connect JSON wire underneath. A response that carries an API
+message (a session, a page of events) is that message in the proto3 JSON mapping
+under those names, with every scalar written even at its default: an enum is its
+name (`"state":"SESSION_STATE_RUNNING"`), an int64 is a string (`"seq":"12"`).
+An `EndSession` body names its reason the same way, `{"reason":"END_REASON_ENDED"}`.
+**This REST shape is the companion's own translation, not the platform's
+protocol.** Errors come back as
+`{"error":{"sentinel":"SENTINEL_NOT_FOUND","detail":"…"}}` with a matching status;
 branch on the sentinel, because HTTP cannot express every distinction the
 sentinel set makes (see the table below).
 
-On the SSE stream, `id:` is the event's sequence, `event:` is its type, and
-`data:` is the whole event. Because `id:` is the sequence, a browser's automatic
-`Last-Event-ID` resumption lands exactly where it should. **Close the stream
-yourself when you see `session_ended`** — an `EventSource` reconnects when the
-server closes, forever, and the log is finished.
+On the SSE stream, `id:` is the event's sequence and `data:` is the whole event.
+There is no `event:` field — a named event reaches only a listener for that exact
+name, so a kind your page has never heard of would arrive nowhere; the kind is
+the one payload key the event carries (`"approval_required":{…}`). Because `id:`
+is the sequence, a browser's automatic `Last-Event-ID` resumption lands exactly
+where it should. **Close the stream yourself when you see `session_ended`** — an
+`EventSource` reconnects when the server closes, forever, and the log is finished.
 
 The socket carries **unauthenticated full session authority** for this pod's
 client identity. Never share the volume it lives on with a sandbox or an agent
@@ -188,15 +195,17 @@ The rule, everywhere: **absent means the proto3 default.** A decoder that
 distinguishes "missing" from "zero" is reading a difference the wire does not
 carry.
 
-Two more conversions:
+More conversions:
 
 - **int64 travels as a JSON string** (`"seq": "12"`), because a 64-bit integer
   does not survive a JSON number in every language. Accept both forms.
-- **`bytes` travels as base64** — `payload`, `metadata`. Decode it. (In
-  TypeScript, protobuf-es has already done this for you: `payload` reaches you as
-  a `Uint8Array`. Decoding it again is the mistake to avoid there.)
+- **An enum travels as its name** (`"state": "SESSION_STATE_RUNNING"`). Accept
+  the number too, and tolerate a name you do not know: every enum here grows.
+- **A oneof is whichever field is set**, under that field's name: an event is
+  its envelope plus exactly one payload key, `{"seq":"4","approvalRequired":{…}}`.
 - **Timestamps are RFC3339**, up to nanosecond precision — more digits than
   Python's `datetime` accepts, so truncate rather than fail.
+- **Durations are strings of seconds** (`"lead": "120s"`).
 
 ### Streaming framing
 
@@ -220,23 +229,22 @@ codec.
 
 ### Errors
 
-A Connect code, plus one error detail of type `harnessapi.v1.ErrorInfo` naming
-the sentinel the platform actually raised. **Two pairs share a code**, so the
-code alone is not enough:
+A Connect code, plus one error detail of type `harnessapi.v1.ErrorInfo` whose
+`sentinel` names the error the platform actually raised — a `Sentinel`, each
+value documented, with what it means, in [the `.proto`](../proto/harnessapi/v1/harnessapi.proto).
+**Two pairs share a code**, so the code alone is not enough:
 
-<!-- BEGIN GENERATED: sentinels (make generate) -->
-| sentinel | Connect code | HTTP (companion) | means |
-|---|---|---|---|
-| `ErrNotFound` | `not_found` | 404 | no such session, or none yours |
-| `ErrUnknownRequest` | `not_found` | 404 | an unknown or already-resolved permission request |
-| `ErrForbidden` | `permission_denied` | 403 | not your session, or template not in your binding |
-| `ErrConflict` | `already_exists` | 409 | the conversation ref already has a live session |
-| `ErrInvalidState` | `failed_precondition` | 412 | the verb does not apply in this session's state |
-| `ErrNotRevivable` | `failed_precondition` | 412 | suspended but not continuable — start a new session |
-| `ErrInvalidArgument` | `invalid_argument` | 400 | a malformed or missing field |
-| `ErrUnavailable` | `unavailable` | 503 | a dependency failed; retryable |
-| `ErrQuotaExceeded` | `resource_exhausted` | 429 | your ClientBinding caps this; a "not now" |
-<!-- END GENERATED: sentinels -->
+| sentinel | Connect code | HTTP (companion) |
+|---|---|---|
+| `SENTINEL_NOT_FOUND` | `not_found` | 404 |
+| `SENTINEL_UNKNOWN_REQUEST` | `not_found` | 404 |
+| `SENTINEL_FORBIDDEN` | `permission_denied` | 403 |
+| `SENTINEL_CONFLICT` | `already_exists` | 409 |
+| `SENTINEL_INVALID_STATE` | `failed_precondition` | 412 |
+| `SENTINEL_NOT_REVIVABLE` | `failed_precondition` | 412 |
+| `SENTINEL_INVALID_ARGUMENT` | `invalid_argument` | 400 |
+| `SENTINEL_UNAVAILABLE` | `unavailable` | 503 |
+| `SENTINEL_QUOTA_EXCEEDED` | `resource_exhausted` | 429 |
 
 In a JSON error body the detail appears twice — once as base64 `value` and once
 as a decoded `debug` object:
@@ -244,8 +252,8 @@ as a decoded `debug` object:
 ```json
 {"code":"failed_precondition","message":"…",
  "details":[{"type":"harnessapi.v1.ErrorInfo",
-             "value":"CgxFcnJOb3RSZXZpdmFibGU",
-             "debug":{"sentinel":"ErrNotRevivable","detail":"no approver recorded"}}]}
+             "value":"CAYSFG5vIGFwcHJvdmVyIHJlY29yZGVk",
+             "debug":{"sentinel":"SENTINEL_NOT_REVIVABLE","detail":"no approver recorded"}}]}
 ```
 
 Read `debug.sentinel` if you are not decoding protobuf. Note the base64 in
@@ -295,7 +303,7 @@ Unary calls: retry twice on `unavailable`, `deadline_exceeded`, `unknown`, or a
 transport failure with no Connect error at all; back off `(attempt+1) × 200 ms`.
 Everything else is the platform's considered answer, and asking again only asks
 again. `CreateSession` is safe to retry: a conversation holds one live session,
-so retrying a create that did succeed is refused as `ErrConflict` rather than
+so retrying a create that did succeed is refused as `SENTINEL_CONFLICT` rather than
 making a second one. **Retry `Prompt` only with an `idempotency_key`**, unique per
 prompt (the id of the message you are relaying makes a good one): a prompt that
 repeats a key the session accepted in the last ten minutes starts nothing and
@@ -305,50 +313,17 @@ resent one would start another. Surface the error instead.
 
 ### Events
 
-The vocabulary is **additive-only**: tolerate a type you do not know rather than
-fail to parse. `type` is a free string and `payload` is raw JSON bytes for
-exactly this reason — a proto enum would reject a type this build has not heard
-of, and a `oneof` would re-encode a payload the log holds verbatim.
+An event is its envelope — `session_id`, `seq`, `turn_id`, `timestamp` — and a
+`payload` oneof; which payload field is set is the event's kind:
+`state_changed`, `approval_required`, `agent_message`, `session_ended` and the
+rest. Each payload is a message in [the `.proto`](../proto/harnessapi/v1/harnessapi.proto),
+documented there field by field, and every generated client has the types.
 
-<!-- BEGIN GENERATED: event-types (make generate) -->
-`state_changed` · `approval_required` · `approved` · `launch_stalled` ·
-`agent_message` · `agent_thought` · `tool_call` · `permission_request` ·
-`permission_resolved` · `turn_completed` · `turn_failed` · `usage` ·
-`idle_warning` · `suspended` · `revived` · `released` · `session_ended`
-<!-- END GENERATED: event-types -->
-
-Payload keys are snake_case (the payload is opaque JSON the platform stores
-verbatim — it is not proto3-mapped like the envelope around it).
-
-**Duration fields are nanosecond integers**, named with an `_ns` suffix, because
-that is how Go marshals a duration: `waited_ns`, `lead_ns`, `retained_for_ns`.
-
-Here is every shape. A `timestamp` is an RFC 3339 string, an `int` is a JSON
-number and never a quoted one, and a key that can be absent is the platform
-having nothing to say — not a null.
-
-<!-- BEGIN GENERATED: payload-shapes (make generate) -->
-| event or shape | payload keys (`?` = omitted when empty) |
-|---|---|
-| `state_changed` | `old` string · `new` string · `reason?` string |
-| `approval_required` | `approval_url` string · `expires_at` timestamp |
-| `approved` | `approver_subject` string |
-| `launch_stalled` | `waited_ns` int (ns) |
-| `agent_message` | `part_id` string · `text` string · `final` bool |
-| `agent_thought` | `text` string |
-| `tool_call` | `id` string · `title?` string · `kind?` string · `status` string · `invocation_message?` string · `tool_input?` json · `update?` bool |
-| `permission_request` | `request_id` string · `summary` string · `options` PermissionOption[] · `deadline` timestamp · `tool_call_id?` string |
-| `permission_resolved` | `request_id` string · `resolution` string |
-| `turn_completed` | `stop_reason` string |
-| `turn_failed` | `reason` string |
-| `usage` | `input_tokens?` int · `output_tokens?` int · `cached_input_tokens?` int · `cache_creation_tokens?` int · `thought_tokens?` int · `total_tokens?` int · `cost_usd?` float · `context_window?` int · `context_used?` int |
-| `idle_warning` | `lead_ns` int (ns) |
-| `suspended` | `reason?` string · `retained_for_ns?` int (ns) |
-| `revived` | — empty |
-| `released` | `retained_for_ns?` int (ns) |
-| `session_ended` | `reason` string · `detail?` string |
-| `PermissionOption` | `id` string · `name` string · `kind?` string |
-<!-- END GENERATED: payload-shapes -->
+The set is **additive-only**. An event whose payload this build does not define
+arrives with **no payload set** — the binary codec keeps its bytes as unknown
+fields, the JSON codec drops them — and a client skips it rather than failing.
+The same goes for enum values: every enum here grows, and a value you do not know
+is to be tolerated, not rejected.
 
 `agent_message` carries a `part_id`: it is a *segment*, not a chunk, and a
 renderer updates a part in place rather than diffing text. Its `text` is
@@ -356,15 +331,15 @@ attacker-influenceable by construction (prompt injection); the platform carries
 it verbatim and never sanitizes it. Rendering it as inert content — no link
 unfurling, no mention syntax — is your half of the contract.
 
-`session_ended` carries one of these reasons, and they exist because each calls
-for a different next step: `never_approved` and `attach_timeout` and
-`revive_failed` send a reader to three different places.
+`session_ended` carries an `EndReason`, and the reasons exist because each calls
+for a different next step: `END_REASON_NEVER_APPROVED`, `END_REASON_ATTACH_TIMEOUT`
+and `END_REASON_REVOKED` send a reader to three different places. The
+`state_changed` into `SESSION_STATE_ENDED` just before it carries no reason of
+its own; the ending's reason is on the ending.
 
-<!-- BEGIN GENERATED: end-reasons (make generate) -->
-`revoked` · `expired` · `never_approved` · `agent_exit` · `tunnel_lost` ·
-`ended` · `interrupted` · `prepare_failed` · `run_create_failed` ·
-`attach_timeout` · `launch_failed`
-<!-- END GENERATED: end-reasons -->
+`permission_resolved` says how a request closed: `option_id` when an option was
+chosen, `unanswered` (`RESOLUTION_EXPIRED`, `RESOLUTION_SUPERSEDED`) when none
+was.
 
 ### Other limits
 

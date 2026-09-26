@@ -41,7 +41,7 @@ func (c *Client) Subscribe(ctx context.Context, req api.SubscribeRequest) (api.S
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	s := &subscription{client: c, req: req, out: make(chan api.Event), cancel: cancel}
+	s := &subscription{client: c, req: req, out: make(chan *pb.Event), cancel: cancel}
 	if errors.Is(err, errLogFinished) {
 		// A subscription to a session whose log is already over. Accepted, and
 		// immediately closed: there is nothing wrong and nothing to deliver, and a
@@ -58,11 +58,11 @@ func (c *Client) Subscribe(ctx context.Context, req api.SubscribeRequest) (api.S
 type subscription struct {
 	client *Client
 	req    api.SubscribeRequest
-	out    chan api.Event
+	out    chan *pb.Event
 	cancel context.CancelFunc
 }
 
-func (s *subscription) Events() <-chan api.Event { return s.out }
+func (s *subscription) Events() <-chan *pb.Event { return s.out }
 
 // Close is idempotent, as the interface promises — a CancelFunc already is, and
 // the loop it cancels is what closes the channel, so a caller ranging over
@@ -184,8 +184,8 @@ func (s *subscription) deliver(ctx context.Context, msg *pb.SubscribeResponse, l
 	if msg.GetKeepalive() {
 		return false, nil // liveness only; never surfaced to the caller
 	}
-	ev := wire.EventFrom(msg.GetEvent())
-	if ev.Seq <= *last {
+	ev := msg.GetEvent()
+	if ev.GetSeq() <= *last {
 		return false, nil // at-least-once allows a duplicate after a resume
 	}
 	select {
@@ -193,8 +193,8 @@ func (s *subscription) deliver(ctx context.Context, msg *pb.SubscribeResponse, l
 	case <-ctx.Done():
 		return false, ctx.Err()
 	}
-	*last = ev.Seq
-	return ev.Type == api.EventSessionEnded, nil
+	*last = ev.GetSeq()
+	return ev.GetSessionEnded() != nil, nil
 }
 
 // openStream opens one subscription connection at a sequence and waits for the
