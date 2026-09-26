@@ -6,19 +6,19 @@
 
 // The Harness API: the client-facing contract of the agentops harness.
 //
-// A client (a Slack bot, a web app, a CI job) uses it to start an agent session,
-// have a human approve it, talk to the agent turn by turn, and read everything
-// the session does back off one durable, ordered event log. This file is the
-// source of truth for that contract. docs/clients.md is the guide to writing a
-// client against it, and `make apistub` builds a conformance server that speaks
-// it with no cluster and no credentials.
+// A client (a Slack bot, a web app, a CI job) uses it to start an agent
+// session, have a human approve it, talk to the agent turn by turn, and read
+// everything the session does back off one durable, ordered event log. This
+// file is the source of truth for that contract. docs/clients.md is the guide
+// to writing a client against it, and `make apistub` builds a conformance
+// server that speaks it with no cluster and no credentials.
 //
 // # Transport
 //
 // Connect (https://connectrpc.com), over HTTP/2 or HTTP/1.1, with either the
 // binary protobuf or the JSON codec. The service is served behind a Pomerium
-// route; a client reaches it at that route's URL and presents the credential the
-// route asks for (for a workload, its projected ServiceAccount token).
+// route; a client reaches it at that route's URL and presents the credential
+// the route asks for (for a workload, its projected ServiceAccount token).
 //
 // # Terms
 //
@@ -74,31 +74,32 @@
 // A failed call returns a Connect error whose code classifies it, with an
 // ErrorInfo detail naming the exact sentinel. Branch on the sentinel; fall back to
 // the code when the detail is absent or names something this client does not
-// know. See ErrorInfo for the full list. Every verb returns ErrForbidden when the
-// calling client has no ClientBinding, i.e. has not been registered to use the
-// platform; the per-verb lists below leave that out.
+// know. See Sentinel for the full list. Every verb returns SENTINEL_FORBIDDEN
+// when the calling client has no ClientBinding, i.e. has not been registered to
+// use the platform; the per-verb lists below leave that out.
 //
 // # Retries
 //
 // Every verb that changes something can be retried without doing it twice:
 // CreateSession because a conversation holds one live session (a retry of a
-// create that succeeded is ErrConflict), Prompt by its idempotency_key,
+// create that succeeded is SENTINEL_CONFLICT), Prompt by its idempotency_key,
 // RespondPermission by its request_id, and EndSession because ending an ended
 // session changes nothing.
 //
 // # Stability
 //
 // The contract grows only by addition. A client must ignore a field it does not
-// know, tolerate a string value it does not know in every vocabulary field
-// (SessionView.state, Event.type, and the enumerated strings inside payloads),
-// and tolerate an event payload key it does not know. Those fields are strings
-// rather than enums precisely so that a new value never breaks an old client.
+// know, tolerate an enum value it does not know (a session state, a reason, a
+// sentinel), and skip an event whose payload it does not know: a payload added
+// later reaches an older client as an Event with no payload set.
 
 package harnessapipb
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
+	structpb "google.golang.org/protobuf/types/known/structpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -112,63 +113,483 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// SessionState is the published session lifecycle. The set grows: tolerate a
+// state you do not know.
+type SessionState int32
+
+const (
+	SessionState_SESSION_STATE_UNSPECIFIED SessionState = 0
+	// The session row exists; nothing has been launched yet. Live.
+	SessionState_SESSION_STATE_PENDING SessionState = 1
+	// A workspace is being prepared, or a run created. Live.
+	SessionState_SESSION_STATE_LAUNCHING SessionState = 2
+	// A run exists and a human has been asked to approve it. Live.
+	SessionState_SESSION_STATE_AWAITING_APPROVAL SessionState = 3
+	// An agent is attached and can take turns. Live.
+	SessionState_SESSION_STATE_RUNNING SessionState = 4
+	// The pod is freed, the workspace and conversation kept. The next prompt
+	// revives it. Live.
+	SessionState_SESSION_STATE_SUSPENDED SessionState = 5
+	// Terminal.
+	SessionState_SESSION_STATE_ENDED SessionState = 6
+	// Terminal for this episode — the harness restarted under a live session. The
+	// workspace may still be revivable.
+	SessionState_SESSION_STATE_INTERRUPTED SessionState = 7
+)
+
+// Enum value maps for SessionState.
+var (
+	SessionState_name = map[int32]string{
+		0: "SESSION_STATE_UNSPECIFIED",
+		1: "SESSION_STATE_PENDING",
+		2: "SESSION_STATE_LAUNCHING",
+		3: "SESSION_STATE_AWAITING_APPROVAL",
+		4: "SESSION_STATE_RUNNING",
+		5: "SESSION_STATE_SUSPENDED",
+		6: "SESSION_STATE_ENDED",
+		7: "SESSION_STATE_INTERRUPTED",
+	}
+	SessionState_value = map[string]int32{
+		"SESSION_STATE_UNSPECIFIED":       0,
+		"SESSION_STATE_PENDING":           1,
+		"SESSION_STATE_LAUNCHING":         2,
+		"SESSION_STATE_AWAITING_APPROVAL": 3,
+		"SESSION_STATE_RUNNING":           4,
+		"SESSION_STATE_SUSPENDED":         5,
+		"SESSION_STATE_ENDED":             6,
+		"SESSION_STATE_INTERRUPTED":       7,
+	}
+)
+
+func (x SessionState) Enum() *SessionState {
+	p := new(SessionState)
+	*p = x
+	return p
+}
+
+func (x SessionState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SessionState) Descriptor() protoreflect.EnumDescriptor {
+	return file_harnessapi_v1_harnessapi_proto_enumTypes[0].Descriptor()
+}
+
+func (SessionState) Type() protoreflect.EnumType {
+	return &file_harnessapi_v1_harnessapi_proto_enumTypes[0]
+}
+
+func (x SessionState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SessionState.Descriptor instead.
+func (SessionState) EnumDescriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{0}
+}
+
+// Reason is why a session changed state or was suspended.
+//
+// Clients make DECISIONS on these, not just copy them: the Slack app turns
+// revive_failed into a whole new session. The set grows: tolerate a value you
+// do not know.
+type Reason int32
+
+const (
+	// An ordinary transition, which needs no reason.
+	Reason_REASON_UNSPECIFIED Reason = 0
+	// A session starting, as opposed to one coming back.
+	Reason_REASON_LAUNCH Reason = 1
+	// A session coming back on the same workspace.
+	Reason_REASON_REVIVE Reason = 2
+	// The session was quiet past its idle TTL.
+	Reason_REASON_IDLE Reason = 3
+	// A continuation could not happen and the session went back to suspended with
+	// its workspace intact. The turn that asked for it gets a turn_failed
+	// carrying the specifics.
+	Reason_REASON_REVIVE_FAILED Reason = 4
+)
+
+// Enum value maps for Reason.
+var (
+	Reason_name = map[int32]string{
+		0: "REASON_UNSPECIFIED",
+		1: "REASON_LAUNCH",
+		2: "REASON_REVIVE",
+		3: "REASON_IDLE",
+		4: "REASON_REVIVE_FAILED",
+	}
+	Reason_value = map[string]int32{
+		"REASON_UNSPECIFIED":   0,
+		"REASON_LAUNCH":        1,
+		"REASON_REVIVE":        2,
+		"REASON_IDLE":          3,
+		"REASON_REVIVE_FAILED": 4,
+	}
+)
+
+func (x Reason) Enum() *Reason {
+	p := new(Reason)
+	*p = x
+	return p
+}
+
+func (x Reason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Reason) Descriptor() protoreflect.EnumDescriptor {
+	return file_harnessapi_v1_harnessapi_proto_enumTypes[1].Descriptor()
+}
+
+func (Reason) Type() protoreflect.EnumType {
+	return &file_harnessapi_v1_harnessapi_proto_enumTypes[1]
+}
+
+func (x Reason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Reason.Descriptor instead.
+func (Reason) EnumDescriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{1}
+}
+
+// EndReason is why a session ended.
+//
+// Each one exists because it calls for a different next step: "the approval was
+// withdrawn", "nobody approved in time" and "the workspace never dialed in"
+// send a reader to three different places, and a client that could only see "it
+// failed" would have to guess which. The set grows: tolerate a value you do not
+// know.
+type EndReason int32
+
+const (
+	EndReason_END_REASON_UNSPECIFIED EndReason = 0
+	// The run was revoked at the authorization server.
+	EndReason_END_REASON_REVOKED EndReason = 1
+	// A running session's run window ran out.
+	EndReason_END_REASON_EXPIRED EndReason = 2
+	// The approval window closed with nothing approved. The authorization server
+	// exposes no denial signal, so "refused" and "ignored" are indistinguishable
+	// and a client must not claim to know which.
+	EndReason_END_REASON_NEVER_APPROVED EndReason = 3
+	// The agent process ended.
+	EndReason_END_REASON_AGENT_EXIT EndReason = 4
+	// The sandbox's tunnel died and did not come back.
+	EndReason_END_REASON_TUNNEL_LOST EndReason = 5
+	// A client (or an operator) ended it deliberately.
+	EndReason_END_REASON_ENDED EndReason = 6
+	// The harness restarted under a live session. Live ACP state is in memory, so
+	// the session cannot continue — but the workspace survives and the
+	// conversation can be revived.
+	EndReason_END_REASON_INTERRUPTED EndReason = 7
+	// No workspace could be made ready.
+	EndReason_END_REASON_PREPARE_FAILED EndReason = 8
+	// The authorization server would not create a run, so there was nothing for
+	// anyone to approve.
+	EndReason_END_REASON_RUN_CREATE_FAILED EndReason = 9
+	// The workspace started but never connected back. The place to look is the
+	// network path, not the app or the agent.
+	EndReason_END_REASON_ATTACH_TIMEOUT EndReason = 10
+	// The launch failed some other way.
+	EndReason_END_REASON_LAUNCH_FAILED EndReason = 11
+	// The session was quiet past its idle TTL and could not be suspended, so its
+	// workspace was not kept.
+	EndReason_END_REASON_IDLE EndReason = 12
+)
+
+// Enum value maps for EndReason.
+var (
+	EndReason_name = map[int32]string{
+		0:  "END_REASON_UNSPECIFIED",
+		1:  "END_REASON_REVOKED",
+		2:  "END_REASON_EXPIRED",
+		3:  "END_REASON_NEVER_APPROVED",
+		4:  "END_REASON_AGENT_EXIT",
+		5:  "END_REASON_TUNNEL_LOST",
+		6:  "END_REASON_ENDED",
+		7:  "END_REASON_INTERRUPTED",
+		8:  "END_REASON_PREPARE_FAILED",
+		9:  "END_REASON_RUN_CREATE_FAILED",
+		10: "END_REASON_ATTACH_TIMEOUT",
+		11: "END_REASON_LAUNCH_FAILED",
+		12: "END_REASON_IDLE",
+	}
+	EndReason_value = map[string]int32{
+		"END_REASON_UNSPECIFIED":       0,
+		"END_REASON_REVOKED":           1,
+		"END_REASON_EXPIRED":           2,
+		"END_REASON_NEVER_APPROVED":    3,
+		"END_REASON_AGENT_EXIT":        4,
+		"END_REASON_TUNNEL_LOST":       5,
+		"END_REASON_ENDED":             6,
+		"END_REASON_INTERRUPTED":       7,
+		"END_REASON_PREPARE_FAILED":    8,
+		"END_REASON_RUN_CREATE_FAILED": 9,
+		"END_REASON_ATTACH_TIMEOUT":    10,
+		"END_REASON_LAUNCH_FAILED":     11,
+		"END_REASON_IDLE":              12,
+	}
+)
+
+func (x EndReason) Enum() *EndReason {
+	p := new(EndReason)
+	*p = x
+	return p
+}
+
+func (x EndReason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EndReason) Descriptor() protoreflect.EnumDescriptor {
+	return file_harnessapi_v1_harnessapi_proto_enumTypes[2].Descriptor()
+}
+
+func (EndReason) Type() protoreflect.EnumType {
+	return &file_harnessapi_v1_harnessapi_proto_enumTypes[2]
+}
+
+func (x EndReason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EndReason.Descriptor instead.
+func (EndReason) EnumDescriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{2}
+}
+
+// ToolCallStatus is the CLOSED set of tool-call states. An ACP status outside
+// this set is normalized to pending rather than passed through, so a client can
+// switch exhaustively.
+type ToolCallStatus int32
+
+const (
+	ToolCallStatus_TOOL_CALL_STATUS_UNSPECIFIED ToolCallStatus = 0
+	// Announced; not started yet.
+	ToolCallStatus_TOOL_CALL_STATUS_PENDING ToolCallStatus = 1
+	// Running.
+	ToolCallStatus_TOOL_CALL_STATUS_IN_PROGRESS ToolCallStatus = 2
+	// Finished successfully.
+	ToolCallStatus_TOOL_CALL_STATUS_COMPLETED ToolCallStatus = 3
+	// Finished with an error.
+	ToolCallStatus_TOOL_CALL_STATUS_FAILED ToolCallStatus = 4
+)
+
+// Enum value maps for ToolCallStatus.
+var (
+	ToolCallStatus_name = map[int32]string{
+		0: "TOOL_CALL_STATUS_UNSPECIFIED",
+		1: "TOOL_CALL_STATUS_PENDING",
+		2: "TOOL_CALL_STATUS_IN_PROGRESS",
+		3: "TOOL_CALL_STATUS_COMPLETED",
+		4: "TOOL_CALL_STATUS_FAILED",
+	}
+	ToolCallStatus_value = map[string]int32{
+		"TOOL_CALL_STATUS_UNSPECIFIED": 0,
+		"TOOL_CALL_STATUS_PENDING":     1,
+		"TOOL_CALL_STATUS_IN_PROGRESS": 2,
+		"TOOL_CALL_STATUS_COMPLETED":   3,
+		"TOOL_CALL_STATUS_FAILED":      4,
+	}
+)
+
+func (x ToolCallStatus) Enum() *ToolCallStatus {
+	p := new(ToolCallStatus)
+	*p = x
+	return p
+}
+
+func (x ToolCallStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ToolCallStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_harnessapi_v1_harnessapi_proto_enumTypes[3].Descriptor()
+}
+
+func (ToolCallStatus) Type() protoreflect.EnumType {
+	return &file_harnessapi_v1_harnessapi_proto_enumTypes[3]
+}
+
+func (x ToolCallStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ToolCallStatus.Descriptor instead.
+func (ToolCallStatus) EnumDescriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{3}
+}
+
+// Resolution is how a permission request closed when nobody chose an option.
+type Resolution int32
+
+const (
+	Resolution_RESOLUTION_UNSPECIFIED Resolution = 0
+	// The deadline passed with no answer; the agent was told the call was
+	// cancelled.
+	Resolution_RESOLUTION_EXPIRED Resolution = 1
+	// The session ended, or the turn was cancelled, with the request outstanding.
+	Resolution_RESOLUTION_SUPERSEDED Resolution = 2
+)
+
+// Enum value maps for Resolution.
+var (
+	Resolution_name = map[int32]string{
+		0: "RESOLUTION_UNSPECIFIED",
+		1: "RESOLUTION_EXPIRED",
+		2: "RESOLUTION_SUPERSEDED",
+	}
+	Resolution_value = map[string]int32{
+		"RESOLUTION_UNSPECIFIED": 0,
+		"RESOLUTION_EXPIRED":     1,
+		"RESOLUTION_SUPERSEDED":  2,
+	}
+)
+
+func (x Resolution) Enum() *Resolution {
+	p := new(Resolution)
+	*p = x
+	return p
+}
+
+func (x Resolution) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Resolution) Descriptor() protoreflect.EnumDescriptor {
+	return file_harnessapi_v1_harnessapi_proto_enumTypes[4].Descriptor()
+}
+
+func (Resolution) Type() protoreflect.EnumType {
+	return &file_harnessapi_v1_harnessapi_proto_enumTypes[4]
+}
+
+func (x Resolution) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Resolution.Descriptor instead.
+func (Resolution) EnumDescriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{4}
+}
+
+// Sentinel is the platform's published error set, carried in ErrorInfo.
+//
+// The Connect code alone cannot tell these apart, because two pairs share one:
+// not_found and unknown_request both arrive as NotFound, and invalid_state and
+// not_revivable both arrive as FailedPrecondition. The distinction matters —
+// "this conversation cannot be continued" calls for a new session where "not
+// valid in this state" calls for waiting — so branch on the sentinel, and fall
+// back to the code only when no detail arrived. Each value names the code it
+// travels under.
+type Sentinel int32
+
+const (
+	Sentinel_SENTINEL_UNSPECIFIED Sentinel = 0
+	// not_found: no such session, or none this client may see.
+	Sentinel_SENTINEL_NOT_FOUND Sentinel = 1
+	// not_found: an unknown or already-resolved permission request.
+	Sentinel_SENTINEL_UNKNOWN_REQUEST Sentinel = 2
+	// permission_denied: this client has no ClientBinding, or the template is not
+	// in its binding. Another client's session is never forbidden; it is not
+	// found.
+	Sentinel_SENTINEL_FORBIDDEN Sentinel = 3
+	// already_exists: the conversation ref already has a live session.
+	Sentinel_SENTINEL_CONFLICT Sentinel = 4
+	// failed_precondition: the verb does not apply in this session's state.
+	// Notably a prompt at a state that is neither running nor suspended: consent
+	// must cover exactly what the approver read, so there is no queue.
+	Sentinel_SENTINEL_INVALID_STATE Sentinel = 5
+	// failed_precondition: the session is suspended but cannot be continued — no
+	// recorded conversation, no workspace, or no approver to pin a fresh approval
+	// to. A client is expected to start a new session instead.
+	Sentinel_SENTINEL_NOT_REVIVABLE Sentinel = 6
+	// invalid_argument: a malformed or missing field.
+	Sentinel_SENTINEL_INVALID_ARGUMENT Sentinel = 7
+	// unavailable: a dependency (the orchestrator, the authorization server)
+	// failed. Retryable.
+	Sentinel_SENTINEL_UNAVAILABLE Sentinel = 8
+	// resource_exhausted: the client's ClientBinding caps what it may hold at
+	// once, or how fast it may open sessions, and this call would exceed it.
+	// Distinct from forbidden because it is a "not now", not a "not ever": the
+	// detail names which quota, and a client can retry or end something first.
+	Sentinel_SENTINEL_QUOTA_EXCEEDED Sentinel = 9
+)
+
+// Enum value maps for Sentinel.
+var (
+	Sentinel_name = map[int32]string{
+		0: "SENTINEL_UNSPECIFIED",
+		1: "SENTINEL_NOT_FOUND",
+		2: "SENTINEL_UNKNOWN_REQUEST",
+		3: "SENTINEL_FORBIDDEN",
+		4: "SENTINEL_CONFLICT",
+		5: "SENTINEL_INVALID_STATE",
+		6: "SENTINEL_NOT_REVIVABLE",
+		7: "SENTINEL_INVALID_ARGUMENT",
+		8: "SENTINEL_UNAVAILABLE",
+		9: "SENTINEL_QUOTA_EXCEEDED",
+	}
+	Sentinel_value = map[string]int32{
+		"SENTINEL_UNSPECIFIED":      0,
+		"SENTINEL_NOT_FOUND":        1,
+		"SENTINEL_UNKNOWN_REQUEST":  2,
+		"SENTINEL_FORBIDDEN":        3,
+		"SENTINEL_CONFLICT":         4,
+		"SENTINEL_INVALID_STATE":    5,
+		"SENTINEL_NOT_REVIVABLE":    6,
+		"SENTINEL_INVALID_ARGUMENT": 7,
+		"SENTINEL_UNAVAILABLE":      8,
+		"SENTINEL_QUOTA_EXCEEDED":   9,
+	}
+)
+
+func (x Sentinel) Enum() *Sentinel {
+	p := new(Sentinel)
+	*p = x
+	return p
+}
+
+func (x Sentinel) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Sentinel) Descriptor() protoreflect.EnumDescriptor {
+	return file_harnessapi_v1_harnessapi_proto_enumTypes[5].Descriptor()
+}
+
+func (Sentinel) Type() protoreflect.EnumType {
+	return &file_harnessapi_v1_harnessapi_proto_enumTypes[5]
+}
+
+func (x Sentinel) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Sentinel.Descriptor instead.
+func (Sentinel) EnumDescriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{5}
+}
+
 // ErrorInfo travels as a Connect error detail and names the typed error the
 // platform actually raised.
 //
-// The Connect code alone is not enough: several sentinels map onto the same code
-// (a missing session and an unknown permission request are both not_found), and
-// a client that branches on the error needs the sentinel back, not an
-// approximation of it. Carrying the name makes the mapping injective, so an error
-// round-trips through the wire and still matches the same check on the far side.
+// The Connect code alone is not enough: several sentinels map onto the same
+// code (a missing session and an unknown permission request are both
+// not_found), and a client that branches on the error needs the sentinel back,
+// not an approximation of it. Carrying the name makes the mapping injective, so
+// an error round-trips through the wire and still matches the same check on the
+// far side.
 type ErrorInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// sentinel is the error's name, one of the values below with the Connect code
-	// it travels under. A name this client does not know must be tolerated: fall
-	// back to the code.
-	//
-	// BEGIN GENERATED: sentinels (make vocab)
-	// "ErrNotFound" (not_found): no such session, or none this client may see.
-	// "ErrUnknownRequest" (not_found): an unknown or already-resolved permission
-	//
-	//	request.
-	//
-	// "ErrForbidden" (permission_denied): this client has no ClientBinding, or the
-	//
-	//	template is not in its binding. Another client's session is never
-	//	Forbidden; it is NotFound.
-	//
-	// "ErrConflict" (already_exists): the conversation ref already has a live
-	//
-	//	session.
-	//
-	// "ErrInvalidState" (failed_precondition): the verb does not apply in this
-	//
-	//	session's state. Notably a prompt at a state that is neither running nor
-	//	suspended: consent must cover exactly what the approver read, so there
-	//	is no queue.
-	//
-	// "ErrNotRevivable" (failed_precondition): the session is suspended but cannot
-	//
-	//	be continued — no recorded conversation, no workspace, or no approver
-	//	to pin a fresh approval to. A client is expected to start a new session
-	//	instead.
-	//
-	// "ErrInvalidArgument" (invalid_argument): a malformed or missing field.
-	// "ErrUnavailable" (unavailable): a dependency (the orchestrator, the
-	//
-	//	authorization server) failed. Retryable.
-	//
-	// "ErrQuotaExceeded" (resource_exhausted): the client's ClientBinding caps
-	//
-	//	what it may hold at once, or how fast it may open sessions, and this
-	//	call would exceed it. Distinct from ErrForbidden because it is a "not
-	//	now", not a "not ever": the detail names which quota, and a client can
-	//	retry or end something first.
-	//
-	// END GENERATED: sentinels
-	Sentinel string `protobuf:"bytes,1,opt,name=sentinel,proto3" json:"sentinel,omitempty"`
+	// sentinel is the error the platform raised. A value this client does not
+	// know must be tolerated: fall back to the Connect code.
+	Sentinel Sentinel `protobuf:"varint,1,opt,name=sentinel,proto3,enum=harnessapi.v1.Sentinel" json:"sentinel,omitempty"`
 	// detail is the human-readable elaboration of this particular failure, for a
-	// log or a person. Never branch on it: its wording is not part of the contract.
+	// log or a person. Never branch on it: its wording is not part of the
+	// contract.
 	Detail        string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -204,11 +625,11 @@ func (*ErrorInfo) Descriptor() ([]byte, []int) {
 	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *ErrorInfo) GetSentinel() string {
+func (x *ErrorInfo) GetSentinel() Sentinel {
 	if x != nil {
 		return x.Sentinel
 	}
-	return ""
+	return Sentinel_SENTINEL_UNSPECIFIED
 }
 
 func (x *ErrorInfo) GetDetail() string {
@@ -221,10 +642,11 @@ func (x *ErrorInfo) GetDetail() string {
 // SessionRef addresses one session within the calling client, either by the id
 // the platform gave it or by the client's own conversation ref. Exactly one of
 // session_id and conversation_ref must be set; neither or both is
-// ErrInvalidArgument.
+// SENTINEL_INVALID_ARGUMENT.
 //
 // It carries no client id: the calling client's identity is the verified
-// assertion's, and a field here would only ever be a lie waiting to be believed.
+// assertion's, and a field here would only ever be a lie waiting to be
+// believed.
 type SessionRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// session_id is SessionView.id, as CreateSession returned it.
@@ -235,10 +657,10 @@ type SessionRef struct {
 	ConversationRef string `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
 	// include_terminal makes a lookup by conversation_ref return the most recent
 	// session the conversation had, even one that has ended — the answer to "what
-	// ran here before?", which a client seeding a successor needs. Only the reading
-	// verbs honor it (GetSession, ListEvents, Subscribe). The verbs that act on a
-	// session (Prompt, RespondPermission, EndSession) ignore it: they operate on
-	// the live session or on nothing. Ignored with session_id.
+	// ran here before?", which a client seeding a successor needs. Only the
+	// reading verbs honor it (GetSession, ListEvents, Subscribe). The verbs that
+	// act on a session (Prompt, RespondPermission, EndSession) ignore it: they
+	// operate on the live session or on nothing. Ignored with session_id.
 	IncludeTerminal bool `protobuf:"varint,3,opt,name=include_terminal,json=includeTerminal,proto3" json:"include_terminal,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -301,39 +723,11 @@ type SessionView struct {
 	// id is the session's platform-assigned id: opaque, stable for the session's
 	// life, and what SessionRef.session_id takes.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// conversation_ref is the client's own ref, exactly as given to CreateSession.
+	// conversation_ref is the client's own ref, exactly as given to
+	// CreateSession.
 	ConversationRef string `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
-	// state is where the session is in its life. A string, not an enum: tolerate a
-	// value you do not know.
-	//
-	// BEGIN GENERATED: vocab:SessionState (make vocab)
-	// "pending": the session row exists; nothing has been launched yet. (live: the
-	//
-	//	session still holds cluster resources.)
-	//
-	// "launching": a workspace is being prepared, or a run created. (live: the
-	//
-	//	session still holds cluster resources.)
-	//
-	// "awaiting_approval": a run exists and a human has been asked to approve it.
-	//
-	//	(live: the session still holds cluster resources.)
-	//
-	// "running": an agent is attached and can take turns. (live: the session still
-	//
-	//	holds cluster resources.)
-	//
-	// "suspended": the pod is freed, the workspace and conversation kept. The next
-	//
-	//	prompt revives it. (live: the session still holds cluster resources.)
-	//
-	// "ended": terminal.
-	// "interrupted": terminal for this episode — the harness restarted under a
-	//
-	//	live session. The workspace may still be revivable.
-	//
-	// END GENERATED: vocab:SessionState
-	State string `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"`
+	// state is where the session is in its life.
+	State SessionState `protobuf:"varint,3,opt,name=state,proto3,enum=harnessapi.v1.SessionState" json:"state,omitempty"`
 	// template is the agent template the session runs, as named at creation. The
 	// template's spec was snapshotted then, and every run of this session —
 	// including a revive — uses that snapshot, so an edit to the template later
@@ -391,11 +785,11 @@ func (x *SessionView) GetConversationRef() string {
 	return ""
 }
 
-func (x *SessionView) GetState() string {
+func (x *SessionView) GetState() SessionState {
 	if x != nil {
 		return x.State
 	}
-	return ""
+	return SessionState_SESSION_STATE_UNSPECIFIED
 }
 
 func (x *SessionView) GetTemplate() string {
@@ -414,12 +808,10 @@ func (x *SessionView) GetLastSeq() int64 {
 
 // Event is one entry on a session's durable, ordered log.
 //
-// type is a string and payload is the raw JSON body — deliberately, and this is
-// load-bearing. The event set is additive-only with unknown-type tolerance, and
-// the log promises byte-identical replay; a proto enum would reject a type this
-// build has not heard of, and a oneof would re-encode a payload the store holds
-// verbatim. Both would break the contract at the transport, which is the one
-// place it must not break.
+// The payload oneof says what happened; which of its fields is set is the
+// event's type. The set grows: a client built before a payload was added
+// receives that event with no payload set (its body kept as unknown fields by
+// the binary codec, dropped by the JSON one), and must skip it.
 type Event struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// session_id is the session the event belongs to.
@@ -429,269 +821,36 @@ type Event struct {
 	// restarts. It is the deduplication key for at-least-once delivery and the
 	// cursor for ListEvents and Subscribe (after_seq).
 	Seq int64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
-	// type names what happened, and fixes the shape of payload. A string, not an
-	// enum: ignore a type you do not know. The types, each with its payload keys:
-	//
-	// BEGIN GENERATED: vocab:EventType (make vocab)
-	// "state_changed": a session-state transition.
-	//
-	//	payload:
-	//	  old (SessionState): the state the session left.
-	//	  new (SessionState): the state the session is now in; the same value a
-	//	      GetSession would report.
-	//	  reason (Reason, absent when zero): one of the [Reason] values, empty
-	//	      for an ordinary transition.
-	//
-	// "approval_required": the consent-page URL the client must deliver to the
-	//
-	//	person it believes should approve.
-	//	payload:
-	//	  approval_url (string): the consent page to deliver to the approver.
-	//	      Opening it lets the person who follows it approve this run, so
-	//	      hand it only to that person, and render it as chrome rather than
-	//	      as anything the agent said.
-	//	  expires_at (timestamp): when the approval window closes. A timestamp
-	//	      is always written, so an absent expiry reads as the zero time
-	//	      rather than as a missing key.
-	//
-	// "approved": the verified IdP subject that approved the run.
-	//
-	//	payload:
-	//	  approver_subject (string): the raw IdP subject reported by the
-	//	      authorization server — email/name enrichment is a directory
-	//	      concern and deliberately not an AS field.
-	//
-	// "launch_stalled": an approved run whose workspace has not connected back
-	//
-	//	when it should have.
-	//	payload:
-	//	  waited_ns (duration): how long the approved run has gone without its
-	//	      workspace connecting back.
-	//
-	// "agent_message": one addressable segment of the agent's visible output.
-	//
-	//	payload:
-	//	  part_id (string): addresses this segment within the turn. A later
-	//	      agent_message with the same part_id replaces the text of the one
-	//	      before, so a client updates the rendered part in place.
-	//	  text (string): the segment's text, verbatim from the agent. Untrusted;
-	//	      render it as inert content.
-	//	  final (bool): true on the turn's last segment, false on one a tool
-	//	      call interrupted.
-	//
-	// "agent_thought": the agent's reasoning, when it discloses any.
-	//
-	//	payload:
-	//	  text (string): the reasoning, verbatim from the agent. Untrusted, like
-	//	      agent text.
-	//
-	// "tool_call": announces or updates a tool call.
-	//
-	//	payload:
-	//	  id (string): identifies the call within the session; an update carries
-	//	      the id of the call it updates, and a permission_request names it
-	//	      as tool_call_id.
-	//	  title (string, absent when zero): a short human-readable name for the
-	//	      call, as the agent gives it.
-	//	  kind (string, absent when zero): what sort of tool it is (read, edit,
-	//	      execute, fetch, …), passed through from the agent's protocol
-	//	      unchanged.
-	//	  status (ToolCallStatus): where the call is, one of the
-	//	      [ToolCallStatus] values.
-	//	  invocation_message (string, absent when zero): the agent's own
-	//	      description of what it is doing, when it supplies one.
-	//	  tool_input (json, absent when zero): the raw tool input as the agent
-	//	      sent it, when the agent discloses it. Untrusted, like agent text.
-	//	  update (bool, absent when zero): false when this announces a new call,
-	//	      true for a status or result update to one already announced.
-	//
-	// "permission_request": asks for a decision on a tool call, which the client
-	//
-	//	puts to a person (usually the user) and relays with RespondPermission.
-	//	payload:
-	//	  request_id (string): identifies the request; RespondPermission takes
-	//	      it, and the permission_resolved event that closes it carries it.
-	//	  summary (string): what the agent is asking to do, in its own words,
-	//	      for the person deciding. Untrusted, like agent text.
-	//	  options ([]PermissionOption): the choices on offer. Answer with one of
-	//	      their ids.
-	//	  deadline (timestamp): when the request lapses unanswered; the agent is
-	//	      then told no, and a permission_resolved event records it as
-	//	      expired.
-	//	  tool_call_id (string, absent when zero): the call the request belongs
-	//	      to.
-	//
-	// "permission_resolved": closes a permission request, however it ended.
-	//
-	//	payload:
-	//	  request_id (string): the request this closes, as permission_request
-	//	      named it.
-	//	  resolution (Resolution): the chosen option id, or one of the
-	//	      [Resolution] values.
-	//
-	// "turn_completed": a turn that finished.
-	//
-	//	payload:
-	//	  stop_reason (string): the ACP stop reason ("end_turn", "max_tokens",
-	//	      "cancelled", …).
-	//
-	// "turn_failed": a turn that died.
-	//
-	//	payload:
-	//	  reason (string): why the turn died, as a human-readable explanation
-	//	      for a person or a log.
-	//
-	// "usage": the turn's token and cost counters.
-	//
-	//	payload:
-	//	  input_tokens (int, absent when zero): prompt tokens the turn consumed.
-	//	  output_tokens (int, absent when zero): tokens the agent generated.
-	//	  cached_input_tokens (int, absent when zero): prompt tokens served from
-	//	      the model's cache.
-	//	  cache_creation_tokens (int, absent when zero): prompt tokens written
-	//	      to the model's cache.
-	//	  thought_tokens (int, absent when zero): tokens spent on reasoning,
-	//	      when the model reports them separately.
-	//	  total_tokens (int, absent when zero): all tokens the turn used, as the
-	//	      agent counts them.
-	//	  cost_usd (float, absent when zero): what the turn cost, in US dollars,
-	//	      as the agent reports it.
-	//	  context_window (int, absent when zero): how much context the agent
-	//	      has, when it says.
-	//	  context_used (int, absent when zero): how much of it this turn left
-	//	      occupied, when it says.
-	//
-	// "idle_warning": a quiet session about to be suspended.
-	//
-	//	payload:
-	//	  lead_ns (duration): how long until the session is suspended; a Prompt
-	//	      before then keeps it running.
-	//
-	// "suspended": the pod was freed and the workspace kept.
-	//
-	//	payload:
-	//	  reason (Reason, absent when zero): one of the [Reason] values.
-	//	  retained_for_ns (duration, absent when zero): how long the workspace
-	//	      is kept before it is released.
-	//
-	// "revived": a suspended session came back on a new pod.
-	//
-	//	payload: {} (no keys)
-	//
-	// "released": a suspended session's workspace was reclaimed.
-	//
-	//	payload:
-	//	  retained_for_ns (duration, absent when zero): how long the workspace
-	//	      was kept.
-	//
-	// "session_ended": the last event a session ever emits.
-	//
-	//	payload:
-	//	  reason (EndReason): one of the [EndReason] values.
-	//	  detail (string, absent when zero): a human-readable elaboration, empty
-	//	      when the reason says it all. It is for a person reading a log,
-	//	      never for a client to branch on — that is what reason is for.
-	//
-	// END GENERATED: vocab:EventType
-	//
-	// Shapes nested inside those payloads:
-	//
-	// BEGIN GENERATED: payloads:nested (make vocab)
-	// PermissionOption: PermissionOption is one choice on a permission request.
-	//
-	//	payload:
-	//	  id (string): the option's id, which RespondPermission takes as
-	//	      option_id.
-	//	  name (string): the option's label, as the agent offers it, for the
-	//	      person choosing.
-	//	  kind (string, absent when zero): what choosing it means (allow_once,
-	//	      allow_always, reject_once, reject_always, …), passed through
-	//	      from the agent's protocol unchanged.
-	//
-	// END GENERATED: payloads:nested
-	//
-	// The reasons a state_changed or suspended event gives:
-	//
-	// BEGIN GENERATED: vocab:Reason (make vocab)
-	// "launch": a session starting, as opposed to one coming back.
-	// "revive": a session coming back on the same workspace.
-	// "idle": the session was quiet past its idle TTL. It is both a suspend reason
-	//
-	//	and, when the suspend itself failed, an end reason.
-	//
-	// "revive_failed": a continuation could not happen and the session went back
-	//
-	//	to suspended with its workspace intact. The turn that asked for it gets
-	//	a turn_failed carrying the specifics.
-	//
-	// END GENERATED: vocab:Reason
-	//
-	// The reasons a session_ended event gives:
-	//
-	// BEGIN GENERATED: vocab:EndReason (make vocab)
-	// "revoked": the run was revoked at the authorization server.
-	// "expired": a running session's run window ran out.
-	// "never_approved": the approval window closed with nothing approved. The
-	//
-	//	authorization server exposes no denial signal, so "refused" and
-	//	"ignored" are indistinguishable and a client must not claim to know
-	//	which.
-	//
-	// "agent_exit": the agent process ended.
-	// "tunnel_lost": the sandbox's tunnel died and did not come back.
-	// "ended": a client (or an operator) ended it deliberately.
-	// "interrupted": the harness restarted under a live session. Live ACP state is
-	//
-	//	in memory, so the session cannot continue — but the workspace survives
-	//	and the conversation can be revived.
-	//
-	// "prepare_failed": no workspace could be made ready.
-	// "run_create_failed": the authorization server would not create a run, so
-	//
-	//	there was nothing for anyone to approve.
-	//
-	// "attach_timeout": the workspace started but never connected back. The place
-	//
-	//	to look is the network path, not the app or the agent.
-	//
-	// "launch_failed": the launch failed some other way.
-	// END GENERATED: vocab:EndReason
-	//
-	// A tool_call's status:
-	//
-	// BEGIN GENERATED: vocab:ToolCallStatus (make vocab)
-	// "pending": announced; not started yet.
-	// "in_progress": running.
-	// "completed": finished successfully.
-	// "failed": finished with an error.
-	// END GENERATED: vocab:ToolCallStatus
-	//
-	// How a permission_resolved event records a request nobody answered:
-	//
-	// BEGIN GENERATED: vocab:Resolution (make vocab)
-	// "expired": the deadline passed with no answer; the agent was told the call
-	//
-	//	was cancelled.
-	//
-	// "superseded": the session ended, or the turn was cancelled, with the request
-	//
-	//	outstanding.
-	//
-	// END GENERATED: vocab:Resolution
-	Type string `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"`
 	// turn_id is the turn this event belongs to, as Prompt returned it (or the
 	// opening turn's id, for initial_prompt). Set on the events a turn produces —
 	// agent_message, agent_thought, tool_call, permission_request,
 	// permission_resolved, usage, turn_completed, turn_failed — and empty on the
 	// session-level ones.
-	TurnId string `protobuf:"bytes,4,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	TurnId string `protobuf:"bytes,3,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
 	// timestamp is when the platform recorded the event, by its own clock.
-	Timestamp *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	// payload is the event's body: a UTF-8 JSON object whose keys type fixes (see
-	// above). A key marked "absent when zero" is omitted when its value is the
-	// zero value; a key this client does not know must be ignored. It is the exact
-	// bytes the platform recorded, so a replay is byte-identical.
-	Payload       []byte `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// payload is what happened.
+	//
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*Event_StateChanged
+	//	*Event_ApprovalRequired
+	//	*Event_Approved
+	//	*Event_LaunchStalled
+	//	*Event_AgentMessage
+	//	*Event_AgentThought
+	//	*Event_ToolCall
+	//	*Event_PermissionRequest
+	//	*Event_PermissionResolved
+	//	*Event_TurnCompleted
+	//	*Event_TurnFailed
+	//	*Event_Usage
+	//	*Event_IdleWarning
+	//	*Event_Suspended
+	//	*Event_Revived
+	//	*Event_Released
+	//	*Event_SessionEnded
+	Payload       isEvent_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -740,13 +899,6 @@ func (x *Event) GetSeq() int64 {
 	return 0
 }
 
-func (x *Event) GetType() string {
-	if x != nil {
-		return x.Type
-	}
-	return ""
-}
-
 func (x *Event) GetTurnId() string {
 	if x != nil {
 		return x.TurnId
@@ -761,11 +913,1469 @@ func (x *Event) GetTimestamp() *timestamppb.Timestamp {
 	return nil
 }
 
-func (x *Event) GetPayload() []byte {
+func (x *Event) GetPayload() isEvent_Payload {
 	if x != nil {
 		return x.Payload
 	}
 	return nil
+}
+
+func (x *Event) GetStateChanged() *StateChanged {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_StateChanged); ok {
+			return x.StateChanged
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetApprovalRequired() *ApprovalRequired {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ApprovalRequired); ok {
+			return x.ApprovalRequired
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetApproved() *Approved {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Approved); ok {
+			return x.Approved
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetLaunchStalled() *LaunchStalled {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_LaunchStalled); ok {
+			return x.LaunchStalled
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetAgentMessage() *AgentMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_AgentMessage); ok {
+			return x.AgentMessage
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetAgentThought() *AgentThought {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_AgentThought); ok {
+			return x.AgentThought
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetToolCall() *ToolCall {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_ToolCall); ok {
+			return x.ToolCall
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetPermissionRequest() *PermissionRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_PermissionRequest); ok {
+			return x.PermissionRequest
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetPermissionResolved() *PermissionResolved {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_PermissionResolved); ok {
+			return x.PermissionResolved
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetTurnCompleted() *TurnCompleted {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_TurnCompleted); ok {
+			return x.TurnCompleted
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetTurnFailed() *TurnFailed {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_TurnFailed); ok {
+			return x.TurnFailed
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetUsage() *Usage {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Usage); ok {
+			return x.Usage
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetIdleWarning() *IdleWarning {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_IdleWarning); ok {
+			return x.IdleWarning
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetSuspended() *Suspended {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Suspended); ok {
+			return x.Suspended
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetRevived() *Revived {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Revived); ok {
+			return x.Revived
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetReleased() *Released {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_Released); ok {
+			return x.Released
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetSessionEnded() *SessionEnded {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_SessionEnded); ok {
+			return x.SessionEnded
+		}
+	}
+	return nil
+}
+
+type isEvent_Payload interface {
+	isEvent_Payload()
+}
+
+type Event_StateChanged struct {
+	// state_changed is a session-state transition.
+	StateChanged *StateChanged `protobuf:"bytes,10,opt,name=state_changed,json=stateChanged,proto3,oneof"`
+}
+
+type Event_ApprovalRequired struct {
+	// approval_required carries the consent-page URL the client must deliver to
+	// the person it believes should approve.
+	ApprovalRequired *ApprovalRequired `protobuf:"bytes,11,opt,name=approval_required,json=approvalRequired,proto3,oneof"`
+}
+
+type Event_Approved struct {
+	// approved names the verified IdP subject that approved the run.
+	Approved *Approved `protobuf:"bytes,12,opt,name=approved,proto3,oneof"`
+}
+
+type Event_LaunchStalled struct {
+	// launch_stalled is an approved run whose workspace has not connected back
+	// when it should have.
+	LaunchStalled *LaunchStalled `protobuf:"bytes,13,opt,name=launch_stalled,json=launchStalled,proto3,oneof"`
+}
+
+type Event_AgentMessage struct {
+	// agent_message is one addressable segment of the agent's visible output.
+	AgentMessage *AgentMessage `protobuf:"bytes,14,opt,name=agent_message,json=agentMessage,proto3,oneof"`
+}
+
+type Event_AgentThought struct {
+	// agent_thought is the agent's reasoning, when it discloses any.
+	AgentThought *AgentThought `protobuf:"bytes,15,opt,name=agent_thought,json=agentThought,proto3,oneof"`
+}
+
+type Event_ToolCall struct {
+	// tool_call announces or updates a tool call.
+	ToolCall *ToolCall `protobuf:"bytes,16,opt,name=tool_call,json=toolCall,proto3,oneof"`
+}
+
+type Event_PermissionRequest struct {
+	// permission_request asks for a decision on a tool call, which the client
+	// puts to a person (usually the user) and relays with RespondPermission.
+	PermissionRequest *PermissionRequest `protobuf:"bytes,17,opt,name=permission_request,json=permissionRequest,proto3,oneof"`
+}
+
+type Event_PermissionResolved struct {
+	// permission_resolved closes a permission request, however it ended.
+	PermissionResolved *PermissionResolved `protobuf:"bytes,18,opt,name=permission_resolved,json=permissionResolved,proto3,oneof"`
+}
+
+type Event_TurnCompleted struct {
+	// turn_completed is a turn that finished.
+	TurnCompleted *TurnCompleted `protobuf:"bytes,19,opt,name=turn_completed,json=turnCompleted,proto3,oneof"`
+}
+
+type Event_TurnFailed struct {
+	// turn_failed is a turn that died.
+	TurnFailed *TurnFailed `protobuf:"bytes,20,opt,name=turn_failed,json=turnFailed,proto3,oneof"`
+}
+
+type Event_Usage struct {
+	// usage is the turn's token and cost counters.
+	Usage *Usage `protobuf:"bytes,21,opt,name=usage,proto3,oneof"`
+}
+
+type Event_IdleWarning struct {
+	// idle_warning is a quiet session about to be suspended.
+	IdleWarning *IdleWarning `protobuf:"bytes,22,opt,name=idle_warning,json=idleWarning,proto3,oneof"`
+}
+
+type Event_Suspended struct {
+	// suspended is a session whose pod was freed and whose workspace was kept.
+	Suspended *Suspended `protobuf:"bytes,23,opt,name=suspended,proto3,oneof"`
+}
+
+type Event_Revived struct {
+	// revived is a suspended session come back on a new pod.
+	Revived *Revived `protobuf:"bytes,24,opt,name=revived,proto3,oneof"`
+}
+
+type Event_Released struct {
+	// released is a suspended session whose workspace was reclaimed.
+	Released *Released `protobuf:"bytes,25,opt,name=released,proto3,oneof"`
+}
+
+type Event_SessionEnded struct {
+	// session_ended is the last event a session ever emits.
+	SessionEnded *SessionEnded `protobuf:"bytes,26,opt,name=session_ended,json=sessionEnded,proto3,oneof"`
+}
+
+func (*Event_StateChanged) isEvent_Payload() {}
+
+func (*Event_ApprovalRequired) isEvent_Payload() {}
+
+func (*Event_Approved) isEvent_Payload() {}
+
+func (*Event_LaunchStalled) isEvent_Payload() {}
+
+func (*Event_AgentMessage) isEvent_Payload() {}
+
+func (*Event_AgentThought) isEvent_Payload() {}
+
+func (*Event_ToolCall) isEvent_Payload() {}
+
+func (*Event_PermissionRequest) isEvent_Payload() {}
+
+func (*Event_PermissionResolved) isEvent_Payload() {}
+
+func (*Event_TurnCompleted) isEvent_Payload() {}
+
+func (*Event_TurnFailed) isEvent_Payload() {}
+
+func (*Event_Usage) isEvent_Payload() {}
+
+func (*Event_IdleWarning) isEvent_Payload() {}
+
+func (*Event_Suspended) isEvent_Payload() {}
+
+func (*Event_Revived) isEvent_Payload() {}
+
+func (*Event_Released) isEvent_Payload() {}
+
+func (*Event_SessionEnded) isEvent_Payload() {}
+
+// StateChanged is a session-state transition.
+type StateChanged struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// old is the state the session left.
+	Old SessionState `protobuf:"varint,1,opt,name=old,proto3,enum=harnessapi.v1.SessionState" json:"old,omitempty"`
+	// new is the state the session is now in; the same value a GetSession would
+	// report.
+	New SessionState `protobuf:"varint,2,opt,name=new,proto3,enum=harnessapi.v1.SessionState" json:"new,omitempty"`
+	// reason is why, or unspecified for an ordinary transition. A transition into
+	// SESSION_STATE_ENDED or SESSION_STATE_INTERRUPTED carries none: the
+	// session_ended event right behind it says why, as an EndReason.
+	Reason        Reason `protobuf:"varint,3,opt,name=reason,proto3,enum=harnessapi.v1.Reason" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateChanged) Reset() {
+	*x = StateChanged{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateChanged) ProtoMessage() {}
+
+func (x *StateChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateChanged.ProtoReflect.Descriptor instead.
+func (*StateChanged) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StateChanged) GetOld() SessionState {
+	if x != nil {
+		return x.Old
+	}
+	return SessionState_SESSION_STATE_UNSPECIFIED
+}
+
+func (x *StateChanged) GetNew() SessionState {
+	if x != nil {
+		return x.New
+	}
+	return SessionState_SESSION_STATE_UNSPECIFIED
+}
+
+func (x *StateChanged) GetReason() Reason {
+	if x != nil {
+		return x.Reason
+	}
+	return Reason_REASON_UNSPECIFIED
+}
+
+// ApprovalRequired is the consent page a human has to visit before the run may
+// start.
+//
+// The URL is platform-authoritative: a client renders it as chrome the agent
+// cannot imitate, never as agent-supplied content.
+type ApprovalRequired struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// approval_url is the consent page to deliver to the approver. Opening it
+	// lets the person who follows it approve this run, so hand it only to that
+	// person, and render it as chrome rather than as anything the agent said.
+	ApprovalUrl string `protobuf:"bytes,1,opt,name=approval_url,json=approvalUrl,proto3" json:"approval_url,omitempty"`
+	// expires_at is when the approval window closes.
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApprovalRequired) Reset() {
+	*x = ApprovalRequired{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalRequired) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalRequired) ProtoMessage() {}
+
+func (x *ApprovalRequired) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalRequired.ProtoReflect.Descriptor instead.
+func (*ApprovalRequired) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ApprovalRequired) GetApprovalUrl() string {
+	if x != nil {
+		return x.ApprovalUrl
+	}
+	return ""
+}
+
+func (x *ApprovalRequired) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+// Approved is the verified identity that let the run start.
+type Approved struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// approver_subject is the raw IdP subject reported by the authorization
+	// server — email/name enrichment is a directory concern and deliberately not
+	// an AS field.
+	ApproverSubject string `protobuf:"bytes,1,opt,name=approver_subject,json=approverSubject,proto3" json:"approver_subject,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *Approved) Reset() {
+	*x = Approved{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Approved) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Approved) ProtoMessage() {}
+
+func (x *Approved) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Approved.ProtoReflect.Descriptor instead.
+func (*Approved) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Approved) GetApproverSubject() string {
+	if x != nil {
+		return x.ApproverSubject
+	}
+	return ""
+}
+
+// LaunchStalled is an approved run whose workspace should have dialed in
+// seconds later, and has not.
+//
+// It is on the log rather than only in the platform's own trace because it is
+// the one launch observation a reader can act on, and without it the session
+// sits on "waiting for approval" long after the approval — which reads as
+// "nobody clicked" and sends every diagnosis to the wrong subsystem. The
+// session is not lost when this arrives: the approval window is still open and
+// the sandbox keeps retrying, so it reports rather than concludes.
+type LaunchStalled struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// waited is how long the approved run has gone without its workspace
+	// connecting back.
+	Waited        *durationpb.Duration `protobuf:"bytes,1,opt,name=waited,proto3" json:"waited,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LaunchStalled) Reset() {
+	*x = LaunchStalled{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LaunchStalled) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LaunchStalled) ProtoMessage() {}
+
+func (x *LaunchStalled) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LaunchStalled.ProtoReflect.Descriptor instead.
+func (*LaunchStalled) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *LaunchStalled) GetWaited() *durationpb.Duration {
+	if x != nil {
+		return x.Waited
+	}
+	return nil
+}
+
+// AgentMessage is one complete segment of the agent's visible output.
+//
+// A segment, not a chunk. The platform buffers ACP message chunks and emits a
+// segment when a tool call interrupts it (final false) or when the turn ends
+// (final true) — the same granularity the Slack renderer has always displayed,
+// and the granularity that keeps the durable log from carrying one row per
+// token. part_id addresses the segment, so a client updates a rendered part in
+// place instead of diffing text.
+//
+// text is attacker-influenceable by construction (prompt injection). The
+// platform carries it verbatim and never sanitizes it; rendering it as inert
+// content — no link unfurling, no mention syntax — is the client's half of the
+// contract.
+type AgentMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// part_id addresses this segment within the turn. A later agent_message with
+	// the same part_id replaces the text of the one before, so a client updates
+	// the rendered part in place.
+	PartId string `protobuf:"bytes,1,opt,name=part_id,json=partId,proto3" json:"part_id,omitempty"`
+	// text is the segment's text, verbatim from the agent. Untrusted; render it
+	// as inert content.
+	Text string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	// final is true on the turn's last segment, false on one a tool call
+	// interrupted.
+	Final         bool `protobuf:"varint,3,opt,name=final,proto3" json:"final,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentMessage) Reset() {
+	*x = AgentMessage{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentMessage) ProtoMessage() {}
+
+func (x *AgentMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
+func (*AgentMessage) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AgentMessage) GetPartId() string {
+	if x != nil {
+		return x.PartId
+	}
+	return ""
+}
+
+func (x *AgentMessage) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *AgentMessage) GetFinal() bool {
+	if x != nil {
+		return x.Final
+	}
+	return false
+}
+
+// AgentThought is the agent's reasoning, when it discloses any.
+type AgentThought struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// text is the reasoning, verbatim from the agent. Untrusted, like agent text.
+	Text          string `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentThought) Reset() {
+	*x = AgentThought{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentThought) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentThought) ProtoMessage() {}
+
+func (x *AgentThought) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentThought.ProtoReflect.Descriptor instead.
+func (*AgentThought) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *AgentThought) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// ToolCall announces a tool call or updates one already announced.
+//
+// Today's Slack UX (segment flush, busy indicator) is driven entirely by these,
+// which is why they are on the log rather than only in the application trace.
+type ToolCall struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id identifies the call within the session; an update carries the id of the
+	// call it updates, and a permission_request names it as tool_call_id.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// title is a short human-readable name for the call, as the agent gives it.
+	Title string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	// kind is what sort of tool it is (read, edit, execute, fetch, …), passed
+	// through from the agent's protocol unchanged.
+	Kind string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	// status is where the call is.
+	Status ToolCallStatus `protobuf:"varint,4,opt,name=status,proto3,enum=harnessapi.v1.ToolCallStatus" json:"status,omitempty"`
+	// invocation_message is the agent's own description of what it is doing, when
+	// it supplies one.
+	InvocationMessage string `protobuf:"bytes,5,opt,name=invocation_message,json=invocationMessage,proto3" json:"invocation_message,omitempty"`
+	// tool_input is the raw tool input as the agent sent it, when the agent
+	// discloses it. Untrusted, like agent text.
+	ToolInput *structpb.Value `protobuf:"bytes,6,opt,name=tool_input,json=toolInput,proto3" json:"tool_input,omitempty"`
+	// update is false when this announces a new call, true for a status or result
+	// update to one already announced.
+	Update        bool `protobuf:"varint,7,opt,name=update,proto3" json:"update,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolCall) Reset() {
+	*x = ToolCall{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolCall) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolCall) ProtoMessage() {}
+
+func (x *ToolCall) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
+func (*ToolCall) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ToolCall) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolCall) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *ToolCall) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ToolCall) GetStatus() ToolCallStatus {
+	if x != nil {
+		return x.Status
+	}
+	return ToolCallStatus_TOOL_CALL_STATUS_UNSPECIFIED
+}
+
+func (x *ToolCall) GetInvocationMessage() string {
+	if x != nil {
+		return x.InvocationMessage
+	}
+	return ""
+}
+
+func (x *ToolCall) GetToolInput() *structpb.Value {
+	if x != nil {
+		return x.ToolInput
+	}
+	return nil
+}
+
+func (x *ToolCall) GetUpdate() bool {
+	if x != nil {
+		return x.Update
+	}
+	return false
+}
+
+// PermissionOption is one choice on a permission request.
+type PermissionOption struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id is the option's id, which RespondPermission takes as option_id.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// name is the option's label, as the agent offers it, for the person
+	// choosing.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// kind is what choosing it means (allow_once, allow_always, reject_once,
+	// reject_always, …), passed through from the agent's protocol unchanged.
+	Kind          string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionOption) Reset() {
+	*x = PermissionOption{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionOption) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionOption) ProtoMessage() {}
+
+func (x *PermissionOption) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionOption.ProtoReflect.Descriptor instead.
+func (*PermissionOption) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PermissionOption) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PermissionOption) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PermissionOption) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+// PermissionRequest asks for a decision on a tool call, which the client puts
+// to a person (usually the user) and relays with RespondPermission. The agent
+// is blocked until RespondPermission answers it or the deadline passes.
+type PermissionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// request_id identifies the request; RespondPermission takes it, and the
+	// permission_resolved event that closes it carries it.
+	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// summary is what the agent is asking to do, in its own words, for the person
+	// deciding. Untrusted, like agent text.
+	Summary string `protobuf:"bytes,2,opt,name=summary,proto3" json:"summary,omitempty"`
+	// options are the choices on offer. Answer with one of their ids.
+	Options []*PermissionOption `protobuf:"bytes,3,rep,name=options,proto3" json:"options,omitempty"`
+	// deadline is when the request lapses unanswered; the agent is then told no,
+	// and a permission_resolved event records it as expired.
+	Deadline *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=deadline,proto3" json:"deadline,omitempty"`
+	// tool_call_id is the call the request belongs to.
+	ToolCallId    string `protobuf:"bytes,5,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionRequest) Reset() {
+	*x = PermissionRequest{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionRequest) ProtoMessage() {}
+
+func (x *PermissionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionRequest.ProtoReflect.Descriptor instead.
+func (*PermissionRequest) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PermissionRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PermissionRequest) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *PermissionRequest) GetOptions() []*PermissionOption {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+func (x *PermissionRequest) GetDeadline() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Deadline
+	}
+	return nil
+}
+
+func (x *PermissionRequest) GetToolCallId() string {
+	if x != nil {
+		return x.ToolCallId
+	}
+	return ""
+}
+
+// PermissionResolved closes a permission request, however it ended.
+//
+// It closes the loop after a reconnect too: a client that missed the answer
+// learns it from here rather than leaving buttons live forever.
+type PermissionResolved struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// request_id is the request this closes, as permission_request named it.
+	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// resolution is how it ended: an option was chosen, or nobody chose one.
+	//
+	// Types that are valid to be assigned to Resolution:
+	//
+	//	*PermissionResolved_OptionId
+	//	*PermissionResolved_Unanswered
+	Resolution    isPermissionResolved_Resolution `protobuf_oneof:"resolution"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionResolved) Reset() {
+	*x = PermissionResolved{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionResolved) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionResolved) ProtoMessage() {}
+
+func (x *PermissionResolved) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionResolved.ProtoReflect.Descriptor instead.
+func (*PermissionResolved) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *PermissionResolved) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PermissionResolved) GetResolution() isPermissionResolved_Resolution {
+	if x != nil {
+		return x.Resolution
+	}
+	return nil
+}
+
+func (x *PermissionResolved) GetOptionId() string {
+	if x != nil {
+		if x, ok := x.Resolution.(*PermissionResolved_OptionId); ok {
+			return x.OptionId
+		}
+	}
+	return ""
+}
+
+func (x *PermissionResolved) GetUnanswered() Resolution {
+	if x != nil {
+		if x, ok := x.Resolution.(*PermissionResolved_Unanswered); ok {
+			return x.Unanswered
+		}
+	}
+	return Resolution_RESOLUTION_UNSPECIFIED
+}
+
+type isPermissionResolved_Resolution interface {
+	isPermissionResolved_Resolution()
+}
+
+type PermissionResolved_OptionId struct {
+	// option_id is the chosen option, as RespondPermission relayed it.
+	OptionId string `protobuf:"bytes,2,opt,name=option_id,json=optionId,proto3,oneof"`
+}
+
+type PermissionResolved_Unanswered struct {
+	// unanswered is why the request closed with no option chosen.
+	Unanswered Resolution `protobuf:"varint,3,opt,name=unanswered,proto3,enum=harnessapi.v1.Resolution,oneof"`
+}
+
+func (*PermissionResolved_OptionId) isPermissionResolved_Resolution() {}
+
+func (*PermissionResolved_Unanswered) isPermissionResolved_Resolution() {}
+
+// TurnCompleted is a turn that finished.
+type TurnCompleted struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// stop_reason is the ACP stop reason ("end_turn", "max_tokens", "cancelled",
+	// …).
+	StopReason    string `protobuf:"bytes,1,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnCompleted) Reset() {
+	*x = TurnCompleted{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnCompleted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnCompleted) ProtoMessage() {}
+
+func (x *TurnCompleted) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnCompleted.ProtoReflect.Descriptor instead.
+func (*TurnCompleted) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *TurnCompleted) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+// TurnFailed is a turn that died. "Why did this turn die" is a first-class
+// answer, not something to reconstruct from logs.
+type TurnFailed struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reason is why the turn died, as a human-readable explanation for a person
+	// or a log.
+	Reason        string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnFailed) Reset() {
+	*x = TurnFailed{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnFailed) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnFailed) ProtoMessage() {}
+
+func (x *TurnFailed) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnFailed.ProtoReflect.Descriptor instead.
+func (*TurnFailed) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *TurnFailed) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// Usage is the turn's token and cost counters, as the agent reports them.
+// Chargeback is the second question every platform team asks, so these are on
+// the log from day one.
+type Usage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// input_tokens is the prompt tokens the turn consumed.
+	InputTokens int64 `protobuf:"varint,1,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	// output_tokens is the tokens the agent generated.
+	OutputTokens int64 `protobuf:"varint,2,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// cached_input_tokens is the prompt tokens served from the model's cache.
+	CachedInputTokens int64 `protobuf:"varint,3,opt,name=cached_input_tokens,json=cachedInputTokens,proto3" json:"cached_input_tokens,omitempty"`
+	// cache_creation_tokens is the prompt tokens written to the model's cache.
+	CacheCreationTokens int64 `protobuf:"varint,4,opt,name=cache_creation_tokens,json=cacheCreationTokens,proto3" json:"cache_creation_tokens,omitempty"`
+	// thought_tokens is the tokens spent on reasoning, when the model reports
+	// them separately.
+	ThoughtTokens int64 `protobuf:"varint,5,opt,name=thought_tokens,json=thoughtTokens,proto3" json:"thought_tokens,omitempty"`
+	// total_tokens is all tokens the turn used, as the agent counts them.
+	TotalTokens int64 `protobuf:"varint,6,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
+	// cost_usd is what the turn cost, in US dollars, as the agent reports it.
+	CostUsd float64 `protobuf:"fixed64,7,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
+	// context_window is how much context the agent has, when it says.
+	ContextWindow int64 `protobuf:"varint,8,opt,name=context_window,json=contextWindow,proto3" json:"context_window,omitempty"`
+	// context_used is how much of it this turn left occupied, when it says.
+	ContextUsed   int64 `protobuf:"varint,9,opt,name=context_used,json=contextUsed,proto3" json:"context_used,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Usage) Reset() {
+	*x = Usage{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Usage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Usage) ProtoMessage() {}
+
+func (x *Usage) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Usage.ProtoReflect.Descriptor instead.
+func (*Usage) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *Usage) GetInputTokens() int64 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetOutputTokens() int64 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCachedInputTokens() int64 {
+	if x != nil {
+		return x.CachedInputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCacheCreationTokens() int64 {
+	if x != nil {
+		return x.CacheCreationTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetThoughtTokens() int64 {
+	if x != nil {
+		return x.ThoughtTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetTotalTokens() int64 {
+	if x != nil {
+		return x.TotalTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCostUsd() float64 {
+	if x != nil {
+		return x.CostUsd
+	}
+	return 0
+}
+
+func (x *Usage) GetContextWindow() int64 {
+	if x != nil {
+		return x.ContextWindow
+	}
+	return 0
+}
+
+func (x *Usage) GetContextUsed() int64 {
+	if x != nil {
+		return x.ContextUsed
+	}
+	return 0
+}
+
+// IdleWarning is a quiet session, to be suspended after lead unless something
+// happens.
+type IdleWarning struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// lead is how long until the session is suspended; a Prompt before then keeps
+	// it running.
+	Lead          *durationpb.Duration `protobuf:"bytes,1,opt,name=lead,proto3" json:"lead,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IdleWarning) Reset() {
+	*x = IdleWarning{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IdleWarning) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IdleWarning) ProtoMessage() {}
+
+func (x *IdleWarning) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IdleWarning.ProtoReflect.Descriptor instead.
+func (*IdleWarning) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *IdleWarning) GetLead() *durationpb.Duration {
+	if x != nil {
+		return x.Lead
+	}
+	return nil
+}
+
+// Suspended is a session whose pod is gone. The workspace and the conversation
+// are not.
+type Suspended struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reason is why the session was suspended.
+	Reason Reason `protobuf:"varint,1,opt,name=reason,proto3,enum=harnessapi.v1.Reason" json:"reason,omitempty"`
+	// retained_for is how long the workspace is kept before it is released.
+	RetainedFor   *durationpb.Duration `protobuf:"bytes,2,opt,name=retained_for,json=retainedFor,proto3" json:"retained_for,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Suspended) Reset() {
+	*x = Suspended{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Suspended) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Suspended) ProtoMessage() {}
+
+func (x *Suspended) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Suspended.ProtoReflect.Descriptor instead.
+func (*Suspended) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *Suspended) GetReason() Reason {
+	if x != nil {
+		return x.Reason
+	}
+	return Reason_REASON_UNSPECIFIED
+}
+
+func (x *Suspended) GetRetainedFor() *durationpb.Duration {
+	if x != nil {
+		return x.RetainedFor
+	}
+	return nil
+}
+
+// Revived is a suspended session come back — same workspace, same
+// conversation, new pod, new run, and a fresh human approval.
+type Revived struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Revived) Reset() {
+	*x = Revived{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Revived) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Revived) ProtoMessage() {}
+
+func (x *Revived) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Revived.ProtoReflect.Descriptor instead.
+func (*Revived) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{19}
+}
+
+// Released is a suspended session whose retention window lapsed and whose
+// workspace was reclaimed.
+type Released struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// retained_for is how long the workspace was kept.
+	RetainedFor   *durationpb.Duration `protobuf:"bytes,1,opt,name=retained_for,json=retainedFor,proto3" json:"retained_for,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Released) Reset() {
+	*x = Released{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Released) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Released) ProtoMessage() {}
+
+func (x *Released) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Released.ProtoReflect.Descriptor instead.
+func (*Released) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *Released) GetRetainedFor() *durationpb.Duration {
+	if x != nil {
+		return x.RetainedFor
+	}
+	return nil
+}
+
+// SessionEnded is the last event a session ever emits.
+type SessionEnded struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// reason is why the session ended.
+	Reason EndReason `protobuf:"varint,1,opt,name=reason,proto3,enum=harnessapi.v1.EndReason" json:"reason,omitempty"`
+	// detail is a human-readable elaboration, empty when the reason says it all.
+	// It is for a person reading a log, never for a client to branch on — that is
+	// what reason is for.
+	Detail        string `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionEnded) Reset() {
+	*x = SessionEnded{}
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionEnded) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionEnded) ProtoMessage() {}
+
+func (x *SessionEnded) ProtoReflect() protoreflect.Message {
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionEnded.ProtoReflect.Descriptor instead.
+func (*SessionEnded) Descriptor() ([]byte, []int) {
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *SessionEnded) GetReason() EndReason {
+	if x != nil {
+		return x.Reason
+	}
+	return EndReason_END_REASON_UNSPECIFIED
+}
+
+func (x *SessionEnded) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
 }
 
 // TemplateSummary is one entry of ListTemplates: an agent template this client
@@ -784,7 +2394,7 @@ type TemplateSummary struct {
 
 func (x *TemplateSummary) Reset() {
 	*x = TemplateSummary{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[4]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -796,7 +2406,7 @@ func (x *TemplateSummary) String() string {
 func (*TemplateSummary) ProtoMessage() {}
 
 func (x *TemplateSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[4]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -809,7 +2419,7 @@ func (x *TemplateSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TemplateSummary.ProtoReflect.Descriptor instead.
 func (*TemplateSummary) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{4}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *TemplateSummary) GetName() string {
@@ -835,12 +2445,12 @@ type CreateSessionRequest struct {
 	// conversation_ref is the client's own name for the conversation this session
 	// serves: a chat thread, a pull request, a job id. Required, opaque to the
 	// platform, and unique per client among live sessions — a second live session
-	// for the same ref is ErrConflict. Once the session has ended the ref is free
-	// again, and a lookup with include_terminal still finds the old one.
+	// for the same ref is SENTINEL_CONFLICT. Once the session has ended the ref
+	// is free again, and a lookup with include_terminal still finds the old one.
 	ConversationRef string `protobuf:"bytes,2,opt,name=conversation_ref,json=conversationRef,proto3" json:"conversation_ref,omitempty"`
 	// parent_session_id records lineage: the id of the session this one was
-	// derived from (a handoff, a fork). Optional. The platform records it and does
-	// not interpret it; it is not returned on the view.
+	// derived from (a handoff, a fork). Optional. The platform records it and
+	// does not interpret it; it is not returned on the view.
 	ParentSessionId string `protobuf:"bytes,3,opt,name=parent_session_id,json=parentSessionId,proto3" json:"parent_session_id,omitempty"`
 	// approval_prompt is what the human approver reads on the consent page: the
 	// request this session will carry out, in words the approver can judge.
@@ -853,10 +2463,10 @@ type CreateSessionRequest struct {
 	// approved and its agent is attached. Optional: empty opens the session idle,
 	// waiting for a Prompt.
 	InitialPrompt string `protobuf:"bytes,5,opt,name=initial_prompt,json=initialPrompt,proto3" json:"initial_prompt,omitempty"`
-	// system_prompt_appendix is the client's own guidance about how answers should
-	// be written — mrkdwn for Slack, plain text for a terminal — appended to the
-	// template's system prompt. Optional. It is snapshotted with the template, so a
-	// revive keeps it.
+	// system_prompt_appendix is the client's own guidance about how answers
+	// should be written — mrkdwn for Slack, plain text for a terminal — appended
+	// to the template's system prompt. Optional. It is snapshotted with the
+	// template, so a revive keeps it.
 	SystemPromptAppendix string `protobuf:"bytes,6,opt,name=system_prompt_appendix,json=systemPromptAppendix,proto3" json:"system_prompt_appendix,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -864,7 +2474,7 @@ type CreateSessionRequest struct {
 
 func (x *CreateSessionRequest) Reset() {
 	*x = CreateSessionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[5]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -876,7 +2486,7 @@ func (x *CreateSessionRequest) String() string {
 func (*CreateSessionRequest) ProtoMessage() {}
 
 func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[5]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -889,7 +2499,7 @@ func (x *CreateSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionRequest.ProtoReflect.Descriptor instead.
 func (*CreateSessionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{5}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CreateSessionRequest) GetTemplate() string {
@@ -935,7 +2545,7 @@ func (x *CreateSessionRequest) GetSystemPromptAppendix() string {
 }
 
 // CreateSessionResponse is the session as it stands the moment it is created:
-// in state "pending", with the launch just started.
+// in state SESSION_STATE_PENDING, with the launch just started.
 type CreateSessionResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Session       *SessionView           `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
@@ -945,7 +2555,7 @@ type CreateSessionResponse struct {
 
 func (x *CreateSessionResponse) Reset() {
 	*x = CreateSessionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[6]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -957,7 +2567,7 @@ func (x *CreateSessionResponse) String() string {
 func (*CreateSessionResponse) ProtoMessage() {}
 
 func (x *CreateSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[6]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -970,7 +2580,7 @@ func (x *CreateSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSessionResponse.ProtoReflect.Descriptor instead.
 func (*CreateSessionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{6}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CreateSessionResponse) GetSession() *SessionView {
@@ -983,7 +2593,8 @@ func (x *CreateSessionResponse) GetSession() *SessionView {
 // PromptRequest sends one turn.
 type PromptRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// ref is the session to prompt: its live session, or a suspended one to revive.
+	// ref is the session to prompt: its live session, or a suspended one to
+	// revive.
 	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	// content is the user's message to the agent, as the client relays it; passed
 	// to the agent verbatim. Required and non-empty.
@@ -994,8 +2605,8 @@ type PromptRequest struct {
 	// accepted in the last ten minutes starts nothing and returns the first one's
 	// turn_id. Only the key is compared, not the content. A repeat that arrives
 	// while the first is still being decided waits for its answer, and a refused
-	// prompt's key is not remembered. Any string unique per prompt: a UUID, or the
-	// id of the message the client is relaying.
+	// prompt's key is not remembered. Any string unique per prompt: a UUID, or
+	// the id of the message the client is relaying.
 	IdempotencyKey string `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -1003,7 +2614,7 @@ type PromptRequest struct {
 
 func (x *PromptRequest) Reset() {
 	*x = PromptRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[7]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1015,7 +2626,7 @@ func (x *PromptRequest) String() string {
 func (*PromptRequest) ProtoMessage() {}
 
 func (x *PromptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[7]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1028,7 +2639,7 @@ func (x *PromptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptRequest.ProtoReflect.Descriptor instead.
 func (*PromptRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{7}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PromptRequest) GetRef() *SessionRef {
@@ -1055,8 +2666,8 @@ func (x *PromptRequest) GetIdempotencyKey() string {
 // PromptResponse identifies the turn the prompt opened.
 type PromptResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// turn_id stamps every event the turn produces (Event.turn_id), so a client can
-	// tell which answer belongs to which prompt when turns overlap.
+	// turn_id stamps every event the turn produces (Event.turn_id), so a client
+	// can tell which answer belongs to which prompt when turns overlap.
 	TurnId        string `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1064,7 +2675,7 @@ type PromptResponse struct {
 
 func (x *PromptResponse) Reset() {
 	*x = PromptResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[8]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1076,7 +2687,7 @@ func (x *PromptResponse) String() string {
 func (*PromptResponse) ProtoMessage() {}
 
 func (x *PromptResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[8]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1089,7 +2700,7 @@ func (x *PromptResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PromptResponse.ProtoReflect.Descriptor instead.
 func (*PromptResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{8}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *PromptResponse) GetTurnId() string {
@@ -1104,10 +2715,9 @@ type RespondPermissionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// ref is the session the request was raised on.
 	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// request_id is the permission_request payload's "request_id". Required.
+	// request_id is PermissionRequest.request_id. Required.
 	RequestId string `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	// option_id is the chosen option: the "id" of one entry in the request's
-	// "options" list.
+	// option_id is the chosen option: the id of one of PermissionRequest.options.
 	OptionId      string `protobuf:"bytes,3,opt,name=option_id,json=optionId,proto3" json:"option_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1115,7 +2725,7 @@ type RespondPermissionRequest struct {
 
 func (x *RespondPermissionRequest) Reset() {
 	*x = RespondPermissionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1127,7 +2737,7 @@ func (x *RespondPermissionRequest) String() string {
 func (*RespondPermissionRequest) ProtoMessage() {}
 
 func (x *RespondPermissionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[9]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1140,7 +2750,7 @@ func (x *RespondPermissionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RespondPermissionRequest.ProtoReflect.Descriptor instead.
 func (*RespondPermissionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{9}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *RespondPermissionRequest) GetRef() *SessionRef {
@@ -1174,7 +2784,7 @@ type RespondPermissionResponse struct {
 
 func (x *RespondPermissionResponse) Reset() {
 	*x = RespondPermissionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1186,7 +2796,7 @@ func (x *RespondPermissionResponse) String() string {
 func (*RespondPermissionResponse) ProtoMessage() {}
 
 func (x *RespondPermissionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[10]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1199,7 +2809,7 @@ func (x *RespondPermissionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RespondPermissionResponse.ProtoReflect.Descriptor instead.
 func (*RespondPermissionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{10}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{28}
 }
 
 // EndSessionRequest ends a session.
@@ -1207,17 +2817,18 @@ type EndSessionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// ref is the session to end.
 	Ref *SessionRef `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// reason is recorded on the session_ended event. Optional: empty records
-	// "ended", which is the reason a client ending its own session should give.
-	// The other end reasons (see Event.type) name causes on the platform's side.
-	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	// reason is recorded on the session_ended event. Optional: unspecified
+	// records END_REASON_ENDED, which is the reason a client ending its own
+	// session should give. The other end reasons name causes on the platform's
+	// side.
+	Reason        EndReason `protobuf:"varint,2,opt,name=reason,proto3,enum=harnessapi.v1.EndReason" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EndSessionRequest) Reset() {
 	*x = EndSessionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1229,7 +2840,7 @@ func (x *EndSessionRequest) String() string {
 func (*EndSessionRequest) ProtoMessage() {}
 
 func (x *EndSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[11]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1242,7 +2853,7 @@ func (x *EndSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EndSessionRequest.ProtoReflect.Descriptor instead.
 func (*EndSessionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{11}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *EndSessionRequest) GetRef() *SessionRef {
@@ -1252,11 +2863,11 @@ func (x *EndSessionRequest) GetRef() *SessionRef {
 	return nil
 }
 
-func (x *EndSessionRequest) GetReason() string {
+func (x *EndSessionRequest) GetReason() EndReason {
 	if x != nil {
 		return x.Reason
 	}
-	return ""
+	return EndReason_END_REASON_UNSPECIFIED
 }
 
 // EndSessionResponse is empty: the ending is on the log.
@@ -1268,7 +2879,7 @@ type EndSessionResponse struct {
 
 func (x *EndSessionResponse) Reset() {
 	*x = EndSessionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1280,7 +2891,7 @@ func (x *EndSessionResponse) String() string {
 func (*EndSessionResponse) ProtoMessage() {}
 
 func (x *EndSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[12]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1293,7 +2904,7 @@ func (x *EndSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EndSessionResponse.ProtoReflect.Descriptor instead.
 func (*EndSessionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{12}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{30}
 }
 
 // GetSessionRequest reads one session.
@@ -1307,7 +2918,7 @@ type GetSessionRequest struct {
 
 func (x *GetSessionRequest) Reset() {
 	*x = GetSessionRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1319,7 +2930,7 @@ func (x *GetSessionRequest) String() string {
 func (*GetSessionRequest) ProtoMessage() {}
 
 func (x *GetSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[13]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1332,7 +2943,7 @@ func (x *GetSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSessionRequest.ProtoReflect.Descriptor instead.
 func (*GetSessionRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{13}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GetSessionRequest) GetRef() *SessionRef {
@@ -1352,7 +2963,7 @@ type GetSessionResponse struct {
 
 func (x *GetSessionResponse) Reset() {
 	*x = GetSessionResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1364,7 +2975,7 @@ func (x *GetSessionResponse) String() string {
 func (*GetSessionResponse) ProtoMessage() {}
 
 func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[14]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1377,7 +2988,7 @@ func (x *GetSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSessionResponse.ProtoReflect.Descriptor instead.
 func (*GetSessionResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{14}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GetSessionResponse) GetSession() *SessionView {
@@ -1387,17 +2998,17 @@ func (x *GetSessionResponse) GetSession() *SessionView {
 	return nil
 }
 
-// ListSessionsRequest enumerates the calling client's sessions. Both filters are
-// optional and combine.
+// ListSessionsRequest enumerates the calling client's sessions. Both filters
+// are optional and combine.
 type ListSessionsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// live_only drops ended and interrupted sessions.
 	LiveOnly bool `protobuf:"varint,1,opt,name=live_only,json=liveOnly,proto3" json:"live_only,omitempty"`
 	// updated_since returns only sessions that changed at or after this instant,
-	// compared at one-second granularity. It is what a client's own reconciliation
-	// sweep pages on — "which of my sessions moved since I last looked" — which
-	// live_only cannot express, because a session that has just ended is exactly
-	// the one worth hearing about. Unset means no lower bound.
+	// compared at one-second granularity. It is what a client's own
+	// reconciliation sweep pages on — "which of my sessions moved since I last
+	// looked" — which live_only cannot express, because a session that has just
+	// ended is exactly the one worth hearing about. Unset means no lower bound.
 	UpdatedSince  *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=updated_since,json=updatedSince,proto3" json:"updated_since,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1405,7 +3016,7 @@ type ListSessionsRequest struct {
 
 func (x *ListSessionsRequest) Reset() {
 	*x = ListSessionsRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1417,7 +3028,7 @@ func (x *ListSessionsRequest) String() string {
 func (*ListSessionsRequest) ProtoMessage() {}
 
 func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[15]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1430,7 +3041,7 @@ func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
 func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{15}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ListSessionsRequest) GetLiveOnly() bool {
@@ -1457,7 +3068,7 @@ type ListSessionsResponse struct {
 
 func (x *ListSessionsResponse) Reset() {
 	*x = ListSessionsResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1469,7 +3080,7 @@ func (x *ListSessionsResponse) String() string {
 func (*ListSessionsResponse) ProtoMessage() {}
 
 func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[16]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1482,7 +3093,7 @@ func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
 func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{16}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ListSessionsResponse) GetSessions() []*SessionView {
@@ -1492,8 +3103,8 @@ func (x *ListSessionsResponse) GetSessions() []*SessionView {
 	return nil
 }
 
-// ListTemplatesRequest has no fields: the answer depends only on which client is
-// asking.
+// ListTemplatesRequest has no fields: the answer depends only on which client
+// is asking.
 type ListTemplatesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1502,7 +3113,7 @@ type ListTemplatesRequest struct {
 
 func (x *ListTemplatesRequest) Reset() {
 	*x = ListTemplatesRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1514,7 +3125,7 @@ func (x *ListTemplatesRequest) String() string {
 func (*ListTemplatesRequest) ProtoMessage() {}
 
 func (x *ListTemplatesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[17]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1527,7 +3138,7 @@ func (x *ListTemplatesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTemplatesRequest.ProtoReflect.Descriptor instead.
 func (*ListTemplatesRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{17}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{35}
 }
 
 // ListTemplatesResponse lists the templates this client may run.
@@ -1540,7 +3151,7 @@ type ListTemplatesResponse struct {
 
 func (x *ListTemplatesResponse) Reset() {
 	*x = ListTemplatesResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1552,7 +3163,7 @@ func (x *ListTemplatesResponse) String() string {
 func (*ListTemplatesResponse) ProtoMessage() {}
 
 func (x *ListTemplatesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[18]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1565,7 +3176,7 @@ func (x *ListTemplatesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTemplatesResponse.ProtoReflect.Descriptor instead.
 func (*ListTemplatesResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{18}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ListTemplatesResponse) GetTemplates() []*TemplateSummary {
@@ -1592,7 +3203,7 @@ type ListEventsRequest struct {
 
 func (x *ListEventsRequest) Reset() {
 	*x = ListEventsRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1604,7 +3215,7 @@ func (x *ListEventsRequest) String() string {
 func (*ListEventsRequest) ProtoMessage() {}
 
 func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[19]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1617,7 +3228,7 @@ func (x *ListEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEventsRequest.ProtoReflect.Descriptor instead.
 func (*ListEventsRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{19}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ListEventsRequest) GetRef() *SessionRef {
@@ -1653,7 +3264,7 @@ type ListEventsResponse struct {
 
 func (x *ListEventsResponse) Reset() {
 	*x = ListEventsResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1665,7 +3276,7 @@ func (x *ListEventsResponse) String() string {
 func (*ListEventsResponse) ProtoMessage() {}
 
 func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[20]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1678,7 +3289,7 @@ func (x *ListEventsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEventsResponse.ProtoReflect.Descriptor instead.
 func (*ListEventsResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{20}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ListEventsResponse) GetEvents() []*Event {
@@ -1704,7 +3315,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1716,7 +3327,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[21]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1729,7 +3340,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{21}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SubscribeRequest) GetRef() *SessionRef {
@@ -1751,22 +3362,23 @@ func (x *SubscribeRequest) GetAfterSeq() int64 {
 // The FIRST message of every subscription is a keepalive, sent as soon as the
 // server has accepted the subscription. That is what makes opening one a
 // synchronous operation: a server-streaming call returns before the server has
-// done anything, so without an opening message a client cannot tell "subscribed"
-// from "refused" until an event happens to arrive — which for a quiet session is
-// never, and for another client's session would be silence instead of a denial.
+// done anything, so without an opening message a client cannot tell
+// "subscribed" from "refused" until an event happens to arrive — which for a
+// quiet session is never, and for another client's session would be silence
+// instead of a denial.
 //
 // The keepalive is not decoration. HTTP/2 PINGs terminate at each hop, so a
-// proxy in the path can hold a subscription open that has been dead upstream for
-// minutes; an application-level tick is the only liveness signal that traverses
-// the whole path. Clients discard keepalives and treat several missed intervals
-// as a dead stream worth reconnecting with after_seq.
+// proxy in the path can hold a subscription open that has been dead upstream
+// for minutes; an application-level tick is the only liveness signal that
+// traverses the whole path. Clients discard keepalives and treat several missed
+// intervals as a dead stream worth reconnecting with after_seq.
 type SubscribeResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// event is the next event on the log. Unset on a keepalive.
 	Event *Event `protobuf:"bytes,1,opt,name=event,proto3" json:"event,omitempty"`
 	// keepalive is true on a liveness tick, which carries no event and is never
-	// surfaced to the application. Sent first on every subscription, then every 20
-	// seconds while nothing else is.
+	// surfaced to the application. Sent first on every subscription, then every
+	// 20 seconds while nothing else is.
 	Keepalive     bool `protobuf:"varint,2,opt,name=keepalive,proto3" json:"keepalive,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1774,7 +3386,7 @@ type SubscribeResponse struct {
 
 func (x *SubscribeResponse) Reset() {
 	*x = SubscribeResponse{}
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1786,7 +3398,7 @@ func (x *SubscribeResponse) String() string {
 func (*SubscribeResponse) ProtoMessage() {}
 
 func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[22]
+	mi := &file_harnessapi_v1_harnessapi_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1799,7 +3411,7 @@ func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeResponse.ProtoReflect.Descriptor instead.
 func (*SubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{22}
+	return file_harnessapi_v1_harnessapi_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *SubscribeResponse) GetEvent() *Event {
@@ -1820,30 +3432,123 @@ var File_harnessapi_v1_harnessapi_proto protoreflect.FileDescriptor
 
 const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\n" +
-	"\x1eharnessapi/v1/harnessapi.proto\x12\rharnessapi.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"?\n" +
-	"\tErrorInfo\x12\x1a\n" +
-	"\bsentinel\x18\x01 \x01(\tR\bsentinel\x12\x16\n" +
+	"\x1eharnessapi/v1/harnessapi.proto\x12\rharnessapi.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"X\n" +
+	"\tErrorInfo\x123\n" +
+	"\bsentinel\x18\x01 \x01(\x0e2\x17.harnessapi.v1.SentinelR\bsentinel\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\"\x81\x01\n" +
 	"\n" +
 	"SessionRef\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12)\n" +
 	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x12)\n" +
-	"\x10include_terminal\x18\x03 \x01(\bR\x0fincludeTerminal\"\x95\x01\n" +
+	"\x10include_terminal\x18\x03 \x01(\bR\x0fincludeTerminal\"\xb2\x01\n" +
 	"\vSessionView\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12)\n" +
-	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x12\x14\n" +
-	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1a\n" +
+	"\x10conversation_ref\x18\x02 \x01(\tR\x0fconversationRef\x121\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1b.harnessapi.v1.SessionStateR\x05state\x12\x1a\n" +
 	"\btemplate\x18\x04 \x01(\tR\btemplate\x12\x19\n" +
-	"\blast_seq\x18\x05 \x01(\x03R\alastSeq\"\xb9\x01\n" +
+	"\blast_seq\x18\x05 \x01(\x03R\alastSeq\"\xee\t\n" +
 	"\x05Event\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +
-	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x12\n" +
-	"\x04type\x18\x03 \x01(\tR\x04type\x12\x17\n" +
-	"\aturn_id\x18\x04 \x01(\tR\x06turnId\x128\n" +
-	"\ttimestamp\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12\x18\n" +
-	"\apayload\x18\x06 \x01(\fR\apayload\"G\n" +
+	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x17\n" +
+	"\aturn_id\x18\x03 \x01(\tR\x06turnId\x128\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12B\n" +
+	"\rstate_changed\x18\n" +
+	" \x01(\v2\x1b.harnessapi.v1.StateChangedH\x00R\fstateChanged\x12N\n" +
+	"\x11approval_required\x18\v \x01(\v2\x1f.harnessapi.v1.ApprovalRequiredH\x00R\x10approvalRequired\x125\n" +
+	"\bapproved\x18\f \x01(\v2\x17.harnessapi.v1.ApprovedH\x00R\bapproved\x12E\n" +
+	"\x0elaunch_stalled\x18\r \x01(\v2\x1c.harnessapi.v1.LaunchStalledH\x00R\rlaunchStalled\x12B\n" +
+	"\ragent_message\x18\x0e \x01(\v2\x1b.harnessapi.v1.AgentMessageH\x00R\fagentMessage\x12B\n" +
+	"\ragent_thought\x18\x0f \x01(\v2\x1b.harnessapi.v1.AgentThoughtH\x00R\fagentThought\x126\n" +
+	"\ttool_call\x18\x10 \x01(\v2\x17.harnessapi.v1.ToolCallH\x00R\btoolCall\x12Q\n" +
+	"\x12permission_request\x18\x11 \x01(\v2 .harnessapi.v1.PermissionRequestH\x00R\x11permissionRequest\x12T\n" +
+	"\x13permission_resolved\x18\x12 \x01(\v2!.harnessapi.v1.PermissionResolvedH\x00R\x12permissionResolved\x12E\n" +
+	"\x0eturn_completed\x18\x13 \x01(\v2\x1c.harnessapi.v1.TurnCompletedH\x00R\rturnCompleted\x12<\n" +
+	"\vturn_failed\x18\x14 \x01(\v2\x19.harnessapi.v1.TurnFailedH\x00R\n" +
+	"turnFailed\x12,\n" +
+	"\x05usage\x18\x15 \x01(\v2\x14.harnessapi.v1.UsageH\x00R\x05usage\x12?\n" +
+	"\fidle_warning\x18\x16 \x01(\v2\x1a.harnessapi.v1.IdleWarningH\x00R\vidleWarning\x128\n" +
+	"\tsuspended\x18\x17 \x01(\v2\x18.harnessapi.v1.SuspendedH\x00R\tsuspended\x122\n" +
+	"\arevived\x18\x18 \x01(\v2\x16.harnessapi.v1.RevivedH\x00R\arevived\x125\n" +
+	"\breleased\x18\x19 \x01(\v2\x17.harnessapi.v1.ReleasedH\x00R\breleased\x12B\n" +
+	"\rsession_ended\x18\x1a \x01(\v2\x1b.harnessapi.v1.SessionEndedH\x00R\fsessionEndedB\t\n" +
+	"\apayload\"\x9b\x01\n" +
+	"\fStateChanged\x12-\n" +
+	"\x03old\x18\x01 \x01(\x0e2\x1b.harnessapi.v1.SessionStateR\x03old\x12-\n" +
+	"\x03new\x18\x02 \x01(\x0e2\x1b.harnessapi.v1.SessionStateR\x03new\x12-\n" +
+	"\x06reason\x18\x03 \x01(\x0e2\x15.harnessapi.v1.ReasonR\x06reason\"p\n" +
+	"\x10ApprovalRequired\x12!\n" +
+	"\fapproval_url\x18\x01 \x01(\tR\vapprovalUrl\x129\n" +
+	"\n" +
+	"expires_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"5\n" +
+	"\bApproved\x12)\n" +
+	"\x10approver_subject\x18\x01 \x01(\tR\x0fapproverSubject\"B\n" +
+	"\rLaunchStalled\x121\n" +
+	"\x06waited\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\x06waited\"Q\n" +
+	"\fAgentMessage\x12\x17\n" +
+	"\apart_id\x18\x01 \x01(\tR\x06partId\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12\x14\n" +
+	"\x05final\x18\x03 \x01(\bR\x05final\"\"\n" +
+	"\fAgentThought\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\xf9\x01\n" +
+	"\bToolCall\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x125\n" +
+	"\x06status\x18\x04 \x01(\x0e2\x1d.harnessapi.v1.ToolCallStatusR\x06status\x12-\n" +
+	"\x12invocation_message\x18\x05 \x01(\tR\x11invocationMessage\x125\n" +
+	"\n" +
+	"tool_input\x18\x06 \x01(\v2\x16.google.protobuf.ValueR\ttoolInput\x12\x16\n" +
+	"\x06update\x18\a \x01(\bR\x06update\"J\n" +
+	"\x10PermissionOption\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\"\xe1\x01\n" +
+	"\x11PermissionRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
+	"\asummary\x18\x02 \x01(\tR\asummary\x129\n" +
+	"\aoptions\x18\x03 \x03(\v2\x1f.harnessapi.v1.PermissionOptionR\aoptions\x126\n" +
+	"\bdeadline\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\bdeadline\x12 \n" +
+	"\ftool_call_id\x18\x05 \x01(\tR\n" +
+	"toolCallId\"\x9d\x01\n" +
+	"\x12PermissionResolved\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1d\n" +
+	"\toption_id\x18\x02 \x01(\tH\x00R\boptionId\x12;\n" +
+	"\n" +
+	"unanswered\x18\x03 \x01(\x0e2\x19.harnessapi.v1.ResolutionH\x00R\n" +
+	"unansweredB\f\n" +
+	"\n" +
+	"resolution\"0\n" +
+	"\rTurnCompleted\x12\x1f\n" +
+	"\vstop_reason\x18\x01 \x01(\tR\n" +
+	"stopReason\"$\n" +
+	"\n" +
+	"TurnFailed\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xe2\x02\n" +
+	"\x05Usage\x12!\n" +
+	"\finput_tokens\x18\x01 \x01(\x03R\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\x02 \x01(\x03R\foutputTokens\x12.\n" +
+	"\x13cached_input_tokens\x18\x03 \x01(\x03R\x11cachedInputTokens\x122\n" +
+	"\x15cache_creation_tokens\x18\x04 \x01(\x03R\x13cacheCreationTokens\x12%\n" +
+	"\x0ethought_tokens\x18\x05 \x01(\x03R\rthoughtTokens\x12!\n" +
+	"\ftotal_tokens\x18\x06 \x01(\x03R\vtotalTokens\x12\x19\n" +
+	"\bcost_usd\x18\a \x01(\x01R\acostUsd\x12%\n" +
+	"\x0econtext_window\x18\b \x01(\x03R\rcontextWindow\x12!\n" +
+	"\fcontext_used\x18\t \x01(\x03R\vcontextUsed\"<\n" +
+	"\vIdleWarning\x12-\n" +
+	"\x04lead\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\x04lead\"x\n" +
+	"\tSuspended\x12-\n" +
+	"\x06reason\x18\x01 \x01(\x0e2\x15.harnessapi.v1.ReasonR\x06reason\x12<\n" +
+	"\fretained_for\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\vretainedFor\"\t\n" +
+	"\aRevived\"H\n" +
+	"\bReleased\x12<\n" +
+	"\fretained_for\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\vretainedFor\"X\n" +
+	"\fSessionEnded\x120\n" +
+	"\x06reason\x18\x01 \x01(\x0e2\x18.harnessapi.v1.EndReasonR\x06reason\x12\x16\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\"G\n" +
 	"\x0fTemplateSummary\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\"\x8f\x02\n" +
@@ -1867,10 +3572,10 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x02 \x01(\tR\trequestId\x12\x1b\n" +
 	"\toption_id\x18\x03 \x01(\tR\boptionId\"\x1b\n" +
-	"\x19RespondPermissionResponse\"X\n" +
+	"\x19RespondPermissionResponse\"r\n" +
 	"\x11EndSessionRequest\x12+\n" +
-	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x14\n" +
+	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\x120\n" +
+	"\x06reason\x18\x02 \x01(\x0e2\x18.harnessapi.v1.EndReasonR\x06reason\"\x14\n" +
 	"\x12EndSessionResponse\"@\n" +
 	"\x11GetSessionRequest\x12+\n" +
 	"\x03ref\x18\x01 \x01(\v2\x19.harnessapi.v1.SessionRefR\x03ref\"J\n" +
@@ -1895,7 +3600,59 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\tafter_seq\x18\x02 \x01(\x03R\bafterSeq\"]\n" +
 	"\x11SubscribeResponse\x12*\n" +
 	"\x05event\x18\x01 \x01(\v2\x14.harnessapi.v1.EventR\x05event\x12\x1c\n" +
-	"\tkeepalive\x18\x02 \x01(\bR\tkeepalive2\x9e\x06\n" +
+	"\tkeepalive\x18\x02 \x01(\bR\tkeepalive*\xfa\x01\n" +
+	"\fSessionState\x12\x1d\n" +
+	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15SESSION_STATE_PENDING\x10\x01\x12\x1b\n" +
+	"\x17SESSION_STATE_LAUNCHING\x10\x02\x12#\n" +
+	"\x1fSESSION_STATE_AWAITING_APPROVAL\x10\x03\x12\x19\n" +
+	"\x15SESSION_STATE_RUNNING\x10\x04\x12\x1b\n" +
+	"\x17SESSION_STATE_SUSPENDED\x10\x05\x12\x17\n" +
+	"\x13SESSION_STATE_ENDED\x10\x06\x12\x1d\n" +
+	"\x19SESSION_STATE_INTERRUPTED\x10\a*q\n" +
+	"\x06Reason\x12\x16\n" +
+	"\x12REASON_UNSPECIFIED\x10\x00\x12\x11\n" +
+	"\rREASON_LAUNCH\x10\x01\x12\x11\n" +
+	"\rREASON_REVIVE\x10\x02\x12\x0f\n" +
+	"\vREASON_IDLE\x10\x03\x12\x18\n" +
+	"\x14REASON_REVIVE_FAILED\x10\x04*\xf2\x02\n" +
+	"\tEndReason\x12\x1a\n" +
+	"\x16END_REASON_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12END_REASON_REVOKED\x10\x01\x12\x16\n" +
+	"\x12END_REASON_EXPIRED\x10\x02\x12\x1d\n" +
+	"\x19END_REASON_NEVER_APPROVED\x10\x03\x12\x19\n" +
+	"\x15END_REASON_AGENT_EXIT\x10\x04\x12\x1a\n" +
+	"\x16END_REASON_TUNNEL_LOST\x10\x05\x12\x14\n" +
+	"\x10END_REASON_ENDED\x10\x06\x12\x1a\n" +
+	"\x16END_REASON_INTERRUPTED\x10\a\x12\x1d\n" +
+	"\x19END_REASON_PREPARE_FAILED\x10\b\x12 \n" +
+	"\x1cEND_REASON_RUN_CREATE_FAILED\x10\t\x12\x1d\n" +
+	"\x19END_REASON_ATTACH_TIMEOUT\x10\n" +
+	"\x12\x1c\n" +
+	"\x18END_REASON_LAUNCH_FAILED\x10\v\x12\x13\n" +
+	"\x0fEND_REASON_IDLE\x10\f*\xaf\x01\n" +
+	"\x0eToolCallStatus\x12 \n" +
+	"\x1cTOOL_CALL_STATUS_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18TOOL_CALL_STATUS_PENDING\x10\x01\x12 \n" +
+	"\x1cTOOL_CALL_STATUS_IN_PROGRESS\x10\x02\x12\x1e\n" +
+	"\x1aTOOL_CALL_STATUS_COMPLETED\x10\x03\x12\x1b\n" +
+	"\x17TOOL_CALL_STATUS_FAILED\x10\x04*[\n" +
+	"\n" +
+	"Resolution\x12\x1a\n" +
+	"\x16RESOLUTION_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12RESOLUTION_EXPIRED\x10\x01\x12\x19\n" +
+	"\x15RESOLUTION_SUPERSEDED\x10\x02*\x97\x02\n" +
+	"\bSentinel\x12\x18\n" +
+	"\x14SENTINEL_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12SENTINEL_NOT_FOUND\x10\x01\x12\x1c\n" +
+	"\x18SENTINEL_UNKNOWN_REQUEST\x10\x02\x12\x16\n" +
+	"\x12SENTINEL_FORBIDDEN\x10\x03\x12\x15\n" +
+	"\x11SENTINEL_CONFLICT\x10\x04\x12\x1a\n" +
+	"\x16SENTINEL_INVALID_STATE\x10\x05\x12\x1a\n" +
+	"\x16SENTINEL_NOT_REVIVABLE\x10\x06\x12\x1d\n" +
+	"\x19SENTINEL_INVALID_ARGUMENT\x10\a\x12\x18\n" +
+	"\x14SENTINEL_UNAVAILABLE\x10\b\x12\x1b\n" +
+	"\x17SENTINEL_QUOTA_EXCEEDED\x10\t2\x9e\x06\n" +
 	"\x11HarnessAPIService\x12Z\n" +
 	"\rCreateSession\x12#.harnessapi.v1.CreateSessionRequest\x1a$.harnessapi.v1.CreateSessionResponse\x12E\n" +
 	"\x06Prompt\x12\x1c.harnessapi.v1.PromptRequest\x1a\x1d.harnessapi.v1.PromptResponse\x12f\n" +
@@ -1922,71 +3679,133 @@ func file_harnessapi_v1_harnessapi_proto_rawDescGZIP() []byte {
 	return file_harnessapi_v1_harnessapi_proto_rawDescData
 }
 
-var file_harnessapi_v1_harnessapi_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_harnessapi_v1_harnessapi_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_harnessapi_v1_harnessapi_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
 var file_harnessapi_v1_harnessapi_proto_goTypes = []any{
-	(*ErrorInfo)(nil),                 // 0: harnessapi.v1.ErrorInfo
-	(*SessionRef)(nil),                // 1: harnessapi.v1.SessionRef
-	(*SessionView)(nil),               // 2: harnessapi.v1.SessionView
-	(*Event)(nil),                     // 3: harnessapi.v1.Event
-	(*TemplateSummary)(nil),           // 4: harnessapi.v1.TemplateSummary
-	(*CreateSessionRequest)(nil),      // 5: harnessapi.v1.CreateSessionRequest
-	(*CreateSessionResponse)(nil),     // 6: harnessapi.v1.CreateSessionResponse
-	(*PromptRequest)(nil),             // 7: harnessapi.v1.PromptRequest
-	(*PromptResponse)(nil),            // 8: harnessapi.v1.PromptResponse
-	(*RespondPermissionRequest)(nil),  // 9: harnessapi.v1.RespondPermissionRequest
-	(*RespondPermissionResponse)(nil), // 10: harnessapi.v1.RespondPermissionResponse
-	(*EndSessionRequest)(nil),         // 11: harnessapi.v1.EndSessionRequest
-	(*EndSessionResponse)(nil),        // 12: harnessapi.v1.EndSessionResponse
-	(*GetSessionRequest)(nil),         // 13: harnessapi.v1.GetSessionRequest
-	(*GetSessionResponse)(nil),        // 14: harnessapi.v1.GetSessionResponse
-	(*ListSessionsRequest)(nil),       // 15: harnessapi.v1.ListSessionsRequest
-	(*ListSessionsResponse)(nil),      // 16: harnessapi.v1.ListSessionsResponse
-	(*ListTemplatesRequest)(nil),      // 17: harnessapi.v1.ListTemplatesRequest
-	(*ListTemplatesResponse)(nil),     // 18: harnessapi.v1.ListTemplatesResponse
-	(*ListEventsRequest)(nil),         // 19: harnessapi.v1.ListEventsRequest
-	(*ListEventsResponse)(nil),        // 20: harnessapi.v1.ListEventsResponse
-	(*SubscribeRequest)(nil),          // 21: harnessapi.v1.SubscribeRequest
-	(*SubscribeResponse)(nil),         // 22: harnessapi.v1.SubscribeResponse
-	(*timestamppb.Timestamp)(nil),     // 23: google.protobuf.Timestamp
+	(SessionState)(0),                 // 0: harnessapi.v1.SessionState
+	(Reason)(0),                       // 1: harnessapi.v1.Reason
+	(EndReason)(0),                    // 2: harnessapi.v1.EndReason
+	(ToolCallStatus)(0),               // 3: harnessapi.v1.ToolCallStatus
+	(Resolution)(0),                   // 4: harnessapi.v1.Resolution
+	(Sentinel)(0),                     // 5: harnessapi.v1.Sentinel
+	(*ErrorInfo)(nil),                 // 6: harnessapi.v1.ErrorInfo
+	(*SessionRef)(nil),                // 7: harnessapi.v1.SessionRef
+	(*SessionView)(nil),               // 8: harnessapi.v1.SessionView
+	(*Event)(nil),                     // 9: harnessapi.v1.Event
+	(*StateChanged)(nil),              // 10: harnessapi.v1.StateChanged
+	(*ApprovalRequired)(nil),          // 11: harnessapi.v1.ApprovalRequired
+	(*Approved)(nil),                  // 12: harnessapi.v1.Approved
+	(*LaunchStalled)(nil),             // 13: harnessapi.v1.LaunchStalled
+	(*AgentMessage)(nil),              // 14: harnessapi.v1.AgentMessage
+	(*AgentThought)(nil),              // 15: harnessapi.v1.AgentThought
+	(*ToolCall)(nil),                  // 16: harnessapi.v1.ToolCall
+	(*PermissionOption)(nil),          // 17: harnessapi.v1.PermissionOption
+	(*PermissionRequest)(nil),         // 18: harnessapi.v1.PermissionRequest
+	(*PermissionResolved)(nil),        // 19: harnessapi.v1.PermissionResolved
+	(*TurnCompleted)(nil),             // 20: harnessapi.v1.TurnCompleted
+	(*TurnFailed)(nil),                // 21: harnessapi.v1.TurnFailed
+	(*Usage)(nil),                     // 22: harnessapi.v1.Usage
+	(*IdleWarning)(nil),               // 23: harnessapi.v1.IdleWarning
+	(*Suspended)(nil),                 // 24: harnessapi.v1.Suspended
+	(*Revived)(nil),                   // 25: harnessapi.v1.Revived
+	(*Released)(nil),                  // 26: harnessapi.v1.Released
+	(*SessionEnded)(nil),              // 27: harnessapi.v1.SessionEnded
+	(*TemplateSummary)(nil),           // 28: harnessapi.v1.TemplateSummary
+	(*CreateSessionRequest)(nil),      // 29: harnessapi.v1.CreateSessionRequest
+	(*CreateSessionResponse)(nil),     // 30: harnessapi.v1.CreateSessionResponse
+	(*PromptRequest)(nil),             // 31: harnessapi.v1.PromptRequest
+	(*PromptResponse)(nil),            // 32: harnessapi.v1.PromptResponse
+	(*RespondPermissionRequest)(nil),  // 33: harnessapi.v1.RespondPermissionRequest
+	(*RespondPermissionResponse)(nil), // 34: harnessapi.v1.RespondPermissionResponse
+	(*EndSessionRequest)(nil),         // 35: harnessapi.v1.EndSessionRequest
+	(*EndSessionResponse)(nil),        // 36: harnessapi.v1.EndSessionResponse
+	(*GetSessionRequest)(nil),         // 37: harnessapi.v1.GetSessionRequest
+	(*GetSessionResponse)(nil),        // 38: harnessapi.v1.GetSessionResponse
+	(*ListSessionsRequest)(nil),       // 39: harnessapi.v1.ListSessionsRequest
+	(*ListSessionsResponse)(nil),      // 40: harnessapi.v1.ListSessionsResponse
+	(*ListTemplatesRequest)(nil),      // 41: harnessapi.v1.ListTemplatesRequest
+	(*ListTemplatesResponse)(nil),     // 42: harnessapi.v1.ListTemplatesResponse
+	(*ListEventsRequest)(nil),         // 43: harnessapi.v1.ListEventsRequest
+	(*ListEventsResponse)(nil),        // 44: harnessapi.v1.ListEventsResponse
+	(*SubscribeRequest)(nil),          // 45: harnessapi.v1.SubscribeRequest
+	(*SubscribeResponse)(nil),         // 46: harnessapi.v1.SubscribeResponse
+	(*timestamppb.Timestamp)(nil),     // 47: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),       // 48: google.protobuf.Duration
+	(*structpb.Value)(nil),            // 49: google.protobuf.Value
 }
 var file_harnessapi_v1_harnessapi_proto_depIdxs = []int32{
-	23, // 0: harnessapi.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
-	2,  // 1: harnessapi.v1.CreateSessionResponse.session:type_name -> harnessapi.v1.SessionView
-	1,  // 2: harnessapi.v1.PromptRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 3: harnessapi.v1.RespondPermissionRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 4: harnessapi.v1.EndSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
-	1,  // 5: harnessapi.v1.GetSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
-	2,  // 6: harnessapi.v1.GetSessionResponse.session:type_name -> harnessapi.v1.SessionView
-	23, // 7: harnessapi.v1.ListSessionsRequest.updated_since:type_name -> google.protobuf.Timestamp
-	2,  // 8: harnessapi.v1.ListSessionsResponse.sessions:type_name -> harnessapi.v1.SessionView
-	4,  // 9: harnessapi.v1.ListTemplatesResponse.templates:type_name -> harnessapi.v1.TemplateSummary
-	1,  // 10: harnessapi.v1.ListEventsRequest.ref:type_name -> harnessapi.v1.SessionRef
-	3,  // 11: harnessapi.v1.ListEventsResponse.events:type_name -> harnessapi.v1.Event
-	1,  // 12: harnessapi.v1.SubscribeRequest.ref:type_name -> harnessapi.v1.SessionRef
-	3,  // 13: harnessapi.v1.SubscribeResponse.event:type_name -> harnessapi.v1.Event
-	5,  // 14: harnessapi.v1.HarnessAPIService.CreateSession:input_type -> harnessapi.v1.CreateSessionRequest
-	7,  // 15: harnessapi.v1.HarnessAPIService.Prompt:input_type -> harnessapi.v1.PromptRequest
-	9,  // 16: harnessapi.v1.HarnessAPIService.RespondPermission:input_type -> harnessapi.v1.RespondPermissionRequest
-	11, // 17: harnessapi.v1.HarnessAPIService.EndSession:input_type -> harnessapi.v1.EndSessionRequest
-	13, // 18: harnessapi.v1.HarnessAPIService.GetSession:input_type -> harnessapi.v1.GetSessionRequest
-	15, // 19: harnessapi.v1.HarnessAPIService.ListSessions:input_type -> harnessapi.v1.ListSessionsRequest
-	17, // 20: harnessapi.v1.HarnessAPIService.ListTemplates:input_type -> harnessapi.v1.ListTemplatesRequest
-	19, // 21: harnessapi.v1.HarnessAPIService.ListEvents:input_type -> harnessapi.v1.ListEventsRequest
-	21, // 22: harnessapi.v1.HarnessAPIService.Subscribe:input_type -> harnessapi.v1.SubscribeRequest
-	6,  // 23: harnessapi.v1.HarnessAPIService.CreateSession:output_type -> harnessapi.v1.CreateSessionResponse
-	8,  // 24: harnessapi.v1.HarnessAPIService.Prompt:output_type -> harnessapi.v1.PromptResponse
-	10, // 25: harnessapi.v1.HarnessAPIService.RespondPermission:output_type -> harnessapi.v1.RespondPermissionResponse
-	12, // 26: harnessapi.v1.HarnessAPIService.EndSession:output_type -> harnessapi.v1.EndSessionResponse
-	14, // 27: harnessapi.v1.HarnessAPIService.GetSession:output_type -> harnessapi.v1.GetSessionResponse
-	16, // 28: harnessapi.v1.HarnessAPIService.ListSessions:output_type -> harnessapi.v1.ListSessionsResponse
-	18, // 29: harnessapi.v1.HarnessAPIService.ListTemplates:output_type -> harnessapi.v1.ListTemplatesResponse
-	20, // 30: harnessapi.v1.HarnessAPIService.ListEvents:output_type -> harnessapi.v1.ListEventsResponse
-	22, // 31: harnessapi.v1.HarnessAPIService.Subscribe:output_type -> harnessapi.v1.SubscribeResponse
-	23, // [23:32] is the sub-list for method output_type
-	14, // [14:23] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	5,  // 0: harnessapi.v1.ErrorInfo.sentinel:type_name -> harnessapi.v1.Sentinel
+	0,  // 1: harnessapi.v1.SessionView.state:type_name -> harnessapi.v1.SessionState
+	47, // 2: harnessapi.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
+	10, // 3: harnessapi.v1.Event.state_changed:type_name -> harnessapi.v1.StateChanged
+	11, // 4: harnessapi.v1.Event.approval_required:type_name -> harnessapi.v1.ApprovalRequired
+	12, // 5: harnessapi.v1.Event.approved:type_name -> harnessapi.v1.Approved
+	13, // 6: harnessapi.v1.Event.launch_stalled:type_name -> harnessapi.v1.LaunchStalled
+	14, // 7: harnessapi.v1.Event.agent_message:type_name -> harnessapi.v1.AgentMessage
+	15, // 8: harnessapi.v1.Event.agent_thought:type_name -> harnessapi.v1.AgentThought
+	16, // 9: harnessapi.v1.Event.tool_call:type_name -> harnessapi.v1.ToolCall
+	18, // 10: harnessapi.v1.Event.permission_request:type_name -> harnessapi.v1.PermissionRequest
+	19, // 11: harnessapi.v1.Event.permission_resolved:type_name -> harnessapi.v1.PermissionResolved
+	20, // 12: harnessapi.v1.Event.turn_completed:type_name -> harnessapi.v1.TurnCompleted
+	21, // 13: harnessapi.v1.Event.turn_failed:type_name -> harnessapi.v1.TurnFailed
+	22, // 14: harnessapi.v1.Event.usage:type_name -> harnessapi.v1.Usage
+	23, // 15: harnessapi.v1.Event.idle_warning:type_name -> harnessapi.v1.IdleWarning
+	24, // 16: harnessapi.v1.Event.suspended:type_name -> harnessapi.v1.Suspended
+	25, // 17: harnessapi.v1.Event.revived:type_name -> harnessapi.v1.Revived
+	26, // 18: harnessapi.v1.Event.released:type_name -> harnessapi.v1.Released
+	27, // 19: harnessapi.v1.Event.session_ended:type_name -> harnessapi.v1.SessionEnded
+	0,  // 20: harnessapi.v1.StateChanged.old:type_name -> harnessapi.v1.SessionState
+	0,  // 21: harnessapi.v1.StateChanged.new:type_name -> harnessapi.v1.SessionState
+	1,  // 22: harnessapi.v1.StateChanged.reason:type_name -> harnessapi.v1.Reason
+	47, // 23: harnessapi.v1.ApprovalRequired.expires_at:type_name -> google.protobuf.Timestamp
+	48, // 24: harnessapi.v1.LaunchStalled.waited:type_name -> google.protobuf.Duration
+	3,  // 25: harnessapi.v1.ToolCall.status:type_name -> harnessapi.v1.ToolCallStatus
+	49, // 26: harnessapi.v1.ToolCall.tool_input:type_name -> google.protobuf.Value
+	17, // 27: harnessapi.v1.PermissionRequest.options:type_name -> harnessapi.v1.PermissionOption
+	47, // 28: harnessapi.v1.PermissionRequest.deadline:type_name -> google.protobuf.Timestamp
+	4,  // 29: harnessapi.v1.PermissionResolved.unanswered:type_name -> harnessapi.v1.Resolution
+	48, // 30: harnessapi.v1.IdleWarning.lead:type_name -> google.protobuf.Duration
+	1,  // 31: harnessapi.v1.Suspended.reason:type_name -> harnessapi.v1.Reason
+	48, // 32: harnessapi.v1.Suspended.retained_for:type_name -> google.protobuf.Duration
+	48, // 33: harnessapi.v1.Released.retained_for:type_name -> google.protobuf.Duration
+	2,  // 34: harnessapi.v1.SessionEnded.reason:type_name -> harnessapi.v1.EndReason
+	8,  // 35: harnessapi.v1.CreateSessionResponse.session:type_name -> harnessapi.v1.SessionView
+	7,  // 36: harnessapi.v1.PromptRequest.ref:type_name -> harnessapi.v1.SessionRef
+	7,  // 37: harnessapi.v1.RespondPermissionRequest.ref:type_name -> harnessapi.v1.SessionRef
+	7,  // 38: harnessapi.v1.EndSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
+	2,  // 39: harnessapi.v1.EndSessionRequest.reason:type_name -> harnessapi.v1.EndReason
+	7,  // 40: harnessapi.v1.GetSessionRequest.ref:type_name -> harnessapi.v1.SessionRef
+	8,  // 41: harnessapi.v1.GetSessionResponse.session:type_name -> harnessapi.v1.SessionView
+	47, // 42: harnessapi.v1.ListSessionsRequest.updated_since:type_name -> google.protobuf.Timestamp
+	8,  // 43: harnessapi.v1.ListSessionsResponse.sessions:type_name -> harnessapi.v1.SessionView
+	28, // 44: harnessapi.v1.ListTemplatesResponse.templates:type_name -> harnessapi.v1.TemplateSummary
+	7,  // 45: harnessapi.v1.ListEventsRequest.ref:type_name -> harnessapi.v1.SessionRef
+	9,  // 46: harnessapi.v1.ListEventsResponse.events:type_name -> harnessapi.v1.Event
+	7,  // 47: harnessapi.v1.SubscribeRequest.ref:type_name -> harnessapi.v1.SessionRef
+	9,  // 48: harnessapi.v1.SubscribeResponse.event:type_name -> harnessapi.v1.Event
+	29, // 49: harnessapi.v1.HarnessAPIService.CreateSession:input_type -> harnessapi.v1.CreateSessionRequest
+	31, // 50: harnessapi.v1.HarnessAPIService.Prompt:input_type -> harnessapi.v1.PromptRequest
+	33, // 51: harnessapi.v1.HarnessAPIService.RespondPermission:input_type -> harnessapi.v1.RespondPermissionRequest
+	35, // 52: harnessapi.v1.HarnessAPIService.EndSession:input_type -> harnessapi.v1.EndSessionRequest
+	37, // 53: harnessapi.v1.HarnessAPIService.GetSession:input_type -> harnessapi.v1.GetSessionRequest
+	39, // 54: harnessapi.v1.HarnessAPIService.ListSessions:input_type -> harnessapi.v1.ListSessionsRequest
+	41, // 55: harnessapi.v1.HarnessAPIService.ListTemplates:input_type -> harnessapi.v1.ListTemplatesRequest
+	43, // 56: harnessapi.v1.HarnessAPIService.ListEvents:input_type -> harnessapi.v1.ListEventsRequest
+	45, // 57: harnessapi.v1.HarnessAPIService.Subscribe:input_type -> harnessapi.v1.SubscribeRequest
+	30, // 58: harnessapi.v1.HarnessAPIService.CreateSession:output_type -> harnessapi.v1.CreateSessionResponse
+	32, // 59: harnessapi.v1.HarnessAPIService.Prompt:output_type -> harnessapi.v1.PromptResponse
+	34, // 60: harnessapi.v1.HarnessAPIService.RespondPermission:output_type -> harnessapi.v1.RespondPermissionResponse
+	36, // 61: harnessapi.v1.HarnessAPIService.EndSession:output_type -> harnessapi.v1.EndSessionResponse
+	38, // 62: harnessapi.v1.HarnessAPIService.GetSession:output_type -> harnessapi.v1.GetSessionResponse
+	40, // 63: harnessapi.v1.HarnessAPIService.ListSessions:output_type -> harnessapi.v1.ListSessionsResponse
+	42, // 64: harnessapi.v1.HarnessAPIService.ListTemplates:output_type -> harnessapi.v1.ListTemplatesResponse
+	44, // 65: harnessapi.v1.HarnessAPIService.ListEvents:output_type -> harnessapi.v1.ListEventsResponse
+	46, // 66: harnessapi.v1.HarnessAPIService.Subscribe:output_type -> harnessapi.v1.SubscribeResponse
+	58, // [58:67] is the sub-list for method output_type
+	49, // [49:58] is the sub-list for method input_type
+	49, // [49:49] is the sub-list for extension type_name
+	49, // [49:49] is the sub-list for extension extendee
+	0,  // [0:49] is the sub-list for field type_name
 }
 
 func init() { file_harnessapi_v1_harnessapi_proto_init() }
@@ -1994,18 +3813,42 @@ func file_harnessapi_v1_harnessapi_proto_init() {
 	if File_harnessapi_v1_harnessapi_proto != nil {
 		return
 	}
+	file_harnessapi_v1_harnessapi_proto_msgTypes[3].OneofWrappers = []any{
+		(*Event_StateChanged)(nil),
+		(*Event_ApprovalRequired)(nil),
+		(*Event_Approved)(nil),
+		(*Event_LaunchStalled)(nil),
+		(*Event_AgentMessage)(nil),
+		(*Event_AgentThought)(nil),
+		(*Event_ToolCall)(nil),
+		(*Event_PermissionRequest)(nil),
+		(*Event_PermissionResolved)(nil),
+		(*Event_TurnCompleted)(nil),
+		(*Event_TurnFailed)(nil),
+		(*Event_Usage)(nil),
+		(*Event_IdleWarning)(nil),
+		(*Event_Suspended)(nil),
+		(*Event_Revived)(nil),
+		(*Event_Released)(nil),
+		(*Event_SessionEnded)(nil),
+	}
+	file_harnessapi_v1_harnessapi_proto_msgTypes[13].OneofWrappers = []any{
+		(*PermissionResolved_OptionId)(nil),
+		(*PermissionResolved_Unanswered)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_harnessapi_v1_harnessapi_proto_rawDesc), len(file_harnessapi_v1_harnessapi_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   23,
+			NumEnums:      6,
+			NumMessages:   41,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_harnessapi_v1_harnessapi_proto_goTypes,
 		DependencyIndexes: file_harnessapi_v1_harnessapi_proto_depIdxs,
+		EnumInfos:         file_harnessapi_v1_harnessapi_proto_enumTypes,
 		MessageInfos:      file_harnessapi_v1_harnessapi_proto_msgTypes,
 	}.Build()
 	File_harnessapi_v1_harnessapi_proto = out.File
