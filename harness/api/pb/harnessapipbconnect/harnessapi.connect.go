@@ -4,19 +4,19 @@
 
 // The Harness API: the client-facing contract of the agentops harness.
 //
-// A client (a Slack bot, a web app, a CI job) uses it to start an agent session,
-// have a human approve it, talk to the agent turn by turn, and read everything
-// the session does back off one durable, ordered event log. This file is the
-// source of truth for that contract. docs/clients.md is the guide to writing a
-// client against it, and `make apistub` builds a conformance server that speaks
-// it with no cluster and no credentials.
+// A client (a Slack bot, a web app, a CI job) uses it to start an agent
+// session, have a human approve it, talk to the agent turn by turn, and read
+// everything the session does back off one durable, ordered event log. This
+// file is the source of truth for that contract. docs/clients.md is the guide
+// to writing a client against it, and `make apistub` builds a conformance
+// server that speaks it with no cluster and no credentials.
 //
 // # Transport
 //
 // Connect (https://connectrpc.com), over HTTP/2 or HTTP/1.1, with either the
 // binary protobuf or the JSON codec. The service is served behind a Pomerium
-// route; a client reaches it at that route's URL and presents the credential the
-// route asks for (for a workload, its projected ServiceAccount token).
+// route; a client reaches it at that route's URL and presents the credential
+// the route asks for (for a workload, its projected ServiceAccount token).
 //
 // # Terms
 //
@@ -78,25 +78,24 @@
 // A failed call returns a Connect error whose code classifies it, with an
 // ErrorInfo detail naming the exact sentinel. Branch on the sentinel; fall back to
 // the code when the detail is absent or names something this client does not
-// know. See ErrorInfo for the full list. Every verb returns ErrForbidden when the
-// calling client has no ClientBinding, i.e. has not been registered to use the
-// platform; the per-verb lists below leave that out.
+// know. See Sentinel for the full list. Every verb returns SENTINEL_FORBIDDEN
+// when the calling client has no ClientBinding, i.e. has not been registered to
+// use the platform; the per-verb lists below leave that out.
 //
 // # Retries
 //
 // Every verb that changes something can be retried without doing it twice:
 // CreateSession because a conversation holds one live session (a retry of a
-// create that succeeded is ErrConflict), Prompt by its idempotency_key,
+// create that succeeded is SENTINEL_CONFLICT), Prompt by its idempotency_key,
 // RespondPermission by its request_id, and EndSession because ending an ended
 // session changes nothing.
 //
 // # Stability
 //
 // The contract grows only by addition. A client must ignore a field it does not
-// know, tolerate a string value it does not know in every vocabulary field
-// (SessionView.state, Event.type, and the enumerated strings inside payloads),
-// and tolerate an event payload key it does not know. Those fields are strings
-// rather than enums precisely so that a new value never breaks an old client.
+// know, tolerate an enum value it does not know (a session state, a reason, a
+// sentinel), and skip an event whose payload it does not know: a payload added
+// later reaches an older client as an Event with no payload set.
 package harnessapipbconnect
 
 import (
@@ -161,37 +160,39 @@ const (
 type HarnessAPIServiceClient interface {
 	// CreateSession opens a session and starts its launch.
 	//
-	// It returns as soon as the session exists, in state "pending"; the launch
-	// then runs on its own and reports itself on the event log. The client's next
-	// job is to deliver the consent-page URL from the approval_required event to
-	// the person who should approve — the platform mints the page, but only the
-	// client knows who to ask. Nothing runs until that person approves; if nobody
-	// does within the approval window, the session ends with reason
-	// "never_approved".
+	// It returns as soon as the session exists, in state SESSION_STATE_PENDING;
+	// the launch then runs on its own and reports itself on the event log. The
+	// client's next job is to deliver the consent-page URL from the
+	// approval_required event to the person who should approve — the platform
+	// mints the page, but only the client knows who to ask. Nothing runs until
+	// that person approves; if nobody does within the approval window, the
+	// session ends with END_REASON_NEVER_APPROVED.
 	//
-	// Errors: ErrInvalidArgument (a required field is blank), ErrForbidden (this
-	// client has no ClientBinding, or may not run this template), ErrQuotaExceeded
-	// (a ClientBinding cap: live sessions, outstanding approvals, or creates per
-	// minute), ErrConflict (the conversation already has a live session),
-	// ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (a required field is blank),
+	// SENTINEL_FORBIDDEN (this client has no ClientBinding, or may not run this
+	// template), SENTINEL_QUOTA_EXCEEDED (a ClientBinding cap: live sessions,
+	// outstanding approvals, or creates per minute), SENTINEL_CONFLICT (the
+	// conversation already has a live session), SENTINEL_UNAVAILABLE.
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
 	// Prompt sends one turn to the agent.
 	//
-	// On a "running" session it opens a turn and returns its id at once; the
-	// turn's output arrives on the event log, every event of it stamped with that
-	// turn id, and ends with turn_completed or turn_failed. A second prompt while a
+	// On a running session it opens a turn and returns its id at once; the turn's
+	// output arrives on the event log, every event of it stamped with that turn
+	// id, and ends with turn_completed or turn_failed. A second prompt while a
 	// turn is still running is accepted, and the turns overlap.
 	//
-	// On a "suspended" session it is the revive: a new pod on the same workspace
+	// On a suspended session it is the revive: a new pod on the same workspace
 	// and conversation, a new run, and a fresh approval_required the client must
-	// deliver again, pinned to the person who approved the session the first time.
-	// A revive counts against the client's quotas like a launch. The log shows a
-	// revived event, then the prompt runs as its first turn once approved.
+	// deliver again, pinned to the person who approved the session the first
+	// time. A revive counts against the client's quotas like a launch. The log
+	// shows a revived event, then the prompt runs as its first turn once
+	// approved.
 	//
-	// Errors: ErrInvalidArgument (empty content), ErrNotFound, ErrInvalidState
-	// (the session is in any other state), ErrNotRevivable (suspended, but it
-	// cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
-	// cap), ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (empty content), SENTINEL_NOT_FOUND,
+	// SENTINEL_INVALID_STATE (the session is in any other state),
+	// SENTINEL_NOT_REVIVABLE (suspended, but it cannot be continued — start a new
+	// session), SENTINEL_QUOTA_EXCEEDED (a revive over a cap),
+	// SENTINEL_UNAVAILABLE.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request: the
 	// agent asked (a permission_request event) and is blocked until the client
@@ -204,46 +205,47 @@ type HarnessAPIServiceClient interface {
 	// The platform remembers how it resolved a request for ten minutes, so a
 	// repeated answer inside that window gets the same result rather than an
 	// error. Past it, or for a request that never existed or belongs to a session
-	// that is no longer live, the answer is ErrUnknownRequest.
+	// that is no longer live, the answer is SENTINEL_UNKNOWN_REQUEST.
 	//
-	// Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
-	// ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (no request_id), SENTINEL_NOT_FOUND,
+	// SENTINEL_UNKNOWN_REQUEST, SENTINEL_UNAVAILABLE.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
 	// EndSession ends a session: its pod and its workspace are released, and the
 	// log closes with a session_ended event. Ending a session that has already
 	// ended succeeds and changes nothing.
 	//
-	// Errors: ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
 	// GetSession returns one session, by id or by conversation ref.
 	//
-	// Errors: ErrInvalidArgument (neither or both of session_id and
-	// conversation_ref), ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (neither or both of session_id and
+	// conversation_ref), SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
 	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
 	// ListSessions enumerates the calling client's sessions, newest first, and
 	// nobody else's.
 	//
-	// Errors: ErrUnavailable.
+	// Errors: SENTINEL_UNAVAILABLE.
 	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
 	// ListTemplates reports the agent templates this client may run: exactly the
 	// names CreateSession accepts in its template field.
 	//
-	// Errors: ErrForbidden (this client has no ClientBinding), ErrUnavailable.
+	// Errors: SENTINEL_FORBIDDEN (this client has no ClientBinding),
+	// SENTINEL_UNAVAILABLE.
 	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
 	// ListEvents reads one page of a session's event history, in sequence order.
 	// Page by passing the last seq you received as after_seq; an empty page means
-	// you have everything so far. It is the polling alternative to Subscribe, for a
-	// client that cannot hold a stream open.
+	// you have everything so far. It is the polling alternative to Subscribe, for
+	// a client that cannot hold a stream open.
 	//
-	// Errors: ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
 	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
-	// Subscribe streams a session's events: everything after after_seq first, then
-	// each new event as it is recorded.
+	// Subscribe streams a session's events: everything after after_seq first,
+	// then each new event as it is recorded.
 	//
 	// The first message is always a keepalive, sent once the subscription is
-	// accepted; a refusal (ErrNotFound and the like) arrives as the stream's error
-	// before it. After that the stream carries events and a keepalive every 20
-	// seconds while nothing else happens.
+	// accepted; a refusal (SENTINEL_NOT_FOUND and the like) arrives as the
+	// stream's error before it. After that the stream carries events and a
+	// keepalive every 20 seconds while nothing else happens.
 	//
 	// Stop on the session_ended EVENT. The server ends the stream cleanly only
 	// once the log is finished, and a clean end of stream means exactly that: the
@@ -253,7 +255,8 @@ type HarnessAPIServiceClient interface {
 	// at-least-once across reconnects: drop any event whose seq you have already
 	// seen.
 	//
-	// Errors: ErrInvalidArgument, ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT, SENTINEL_NOT_FOUND,
+	// SENTINEL_UNAVAILABLE.
 	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest]) (*connect.ServerStreamForClient[pb.SubscribeResponse], error)
 }
 
@@ -387,37 +390,39 @@ func (c *harnessAPIServiceClient) Subscribe(ctx context.Context, req *connect.Re
 type HarnessAPIServiceHandler interface {
 	// CreateSession opens a session and starts its launch.
 	//
-	// It returns as soon as the session exists, in state "pending"; the launch
-	// then runs on its own and reports itself on the event log. The client's next
-	// job is to deliver the consent-page URL from the approval_required event to
-	// the person who should approve — the platform mints the page, but only the
-	// client knows who to ask. Nothing runs until that person approves; if nobody
-	// does within the approval window, the session ends with reason
-	// "never_approved".
+	// It returns as soon as the session exists, in state SESSION_STATE_PENDING;
+	// the launch then runs on its own and reports itself on the event log. The
+	// client's next job is to deliver the consent-page URL from the
+	// approval_required event to the person who should approve — the platform
+	// mints the page, but only the client knows who to ask. Nothing runs until
+	// that person approves; if nobody does within the approval window, the
+	// session ends with END_REASON_NEVER_APPROVED.
 	//
-	// Errors: ErrInvalidArgument (a required field is blank), ErrForbidden (this
-	// client has no ClientBinding, or may not run this template), ErrQuotaExceeded
-	// (a ClientBinding cap: live sessions, outstanding approvals, or creates per
-	// minute), ErrConflict (the conversation already has a live session),
-	// ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (a required field is blank),
+	// SENTINEL_FORBIDDEN (this client has no ClientBinding, or may not run this
+	// template), SENTINEL_QUOTA_EXCEEDED (a ClientBinding cap: live sessions,
+	// outstanding approvals, or creates per minute), SENTINEL_CONFLICT (the
+	// conversation already has a live session), SENTINEL_UNAVAILABLE.
 	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
 	// Prompt sends one turn to the agent.
 	//
-	// On a "running" session it opens a turn and returns its id at once; the
-	// turn's output arrives on the event log, every event of it stamped with that
-	// turn id, and ends with turn_completed or turn_failed. A second prompt while a
+	// On a running session it opens a turn and returns its id at once; the turn's
+	// output arrives on the event log, every event of it stamped with that turn
+	// id, and ends with turn_completed or turn_failed. A second prompt while a
 	// turn is still running is accepted, and the turns overlap.
 	//
-	// On a "suspended" session it is the revive: a new pod on the same workspace
+	// On a suspended session it is the revive: a new pod on the same workspace
 	// and conversation, a new run, and a fresh approval_required the client must
-	// deliver again, pinned to the person who approved the session the first time.
-	// A revive counts against the client's quotas like a launch. The log shows a
-	// revived event, then the prompt runs as its first turn once approved.
+	// deliver again, pinned to the person who approved the session the first
+	// time. A revive counts against the client's quotas like a launch. The log
+	// shows a revived event, then the prompt runs as its first turn once
+	// approved.
 	//
-	// Errors: ErrInvalidArgument (empty content), ErrNotFound, ErrInvalidState
-	// (the session is in any other state), ErrNotRevivable (suspended, but it
-	// cannot be continued — start a new session), ErrQuotaExceeded (a revive over a
-	// cap), ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (empty content), SENTINEL_NOT_FOUND,
+	// SENTINEL_INVALID_STATE (the session is in any other state),
+	// SENTINEL_NOT_REVIVABLE (suspended, but it cannot be continued — start a new
+	// session), SENTINEL_QUOTA_EXCEEDED (a revive over a cap),
+	// SENTINEL_UNAVAILABLE.
 	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
 	// RespondPermission answers an outstanding tool-call permission request: the
 	// agent asked (a permission_request event) and is blocked until the client
@@ -430,46 +435,47 @@ type HarnessAPIServiceHandler interface {
 	// The platform remembers how it resolved a request for ten minutes, so a
 	// repeated answer inside that window gets the same result rather than an
 	// error. Past it, or for a request that never existed or belongs to a session
-	// that is no longer live, the answer is ErrUnknownRequest.
+	// that is no longer live, the answer is SENTINEL_UNKNOWN_REQUEST.
 	//
-	// Errors: ErrInvalidArgument (no request_id), ErrNotFound, ErrUnknownRequest,
-	// ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (no request_id), SENTINEL_NOT_FOUND,
+	// SENTINEL_UNKNOWN_REQUEST, SENTINEL_UNAVAILABLE.
 	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
 	// EndSession ends a session: its pod and its workspace are released, and the
 	// log closes with a session_ended event. Ending a session that has already
 	// ended succeeds and changes nothing.
 	//
-	// Errors: ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
 	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
 	// GetSession returns one session, by id or by conversation ref.
 	//
-	// Errors: ErrInvalidArgument (neither or both of session_id and
-	// conversation_ref), ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT (neither or both of session_id and
+	// conversation_ref), SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
 	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
 	// ListSessions enumerates the calling client's sessions, newest first, and
 	// nobody else's.
 	//
-	// Errors: ErrUnavailable.
+	// Errors: SENTINEL_UNAVAILABLE.
 	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
 	// ListTemplates reports the agent templates this client may run: exactly the
 	// names CreateSession accepts in its template field.
 	//
-	// Errors: ErrForbidden (this client has no ClientBinding), ErrUnavailable.
+	// Errors: SENTINEL_FORBIDDEN (this client has no ClientBinding),
+	// SENTINEL_UNAVAILABLE.
 	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
 	// ListEvents reads one page of a session's event history, in sequence order.
 	// Page by passing the last seq you received as after_seq; an empty page means
-	// you have everything so far. It is the polling alternative to Subscribe, for a
-	// client that cannot hold a stream open.
+	// you have everything so far. It is the polling alternative to Subscribe, for
+	// a client that cannot hold a stream open.
 	//
-	// Errors: ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
 	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
-	// Subscribe streams a session's events: everything after after_seq first, then
-	// each new event as it is recorded.
+	// Subscribe streams a session's events: everything after after_seq first,
+	// then each new event as it is recorded.
 	//
 	// The first message is always a keepalive, sent once the subscription is
-	// accepted; a refusal (ErrNotFound and the like) arrives as the stream's error
-	// before it. After that the stream carries events and a keepalive every 20
-	// seconds while nothing else happens.
+	// accepted; a refusal (SENTINEL_NOT_FOUND and the like) arrives as the
+	// stream's error before it. After that the stream carries events and a
+	// keepalive every 20 seconds while nothing else happens.
 	//
 	// Stop on the session_ended EVENT. The server ends the stream cleanly only
 	// once the log is finished, and a clean end of stream means exactly that: the
@@ -479,7 +485,8 @@ type HarnessAPIServiceHandler interface {
 	// at-least-once across reconnects: drop any event whose seq you have already
 	// seen.
 	//
-	// Errors: ErrInvalidArgument, ErrNotFound, ErrUnavailable.
+	// Errors: SENTINEL_INVALID_ARGUMENT, SENTINEL_NOT_FOUND,
+	// SENTINEL_UNAVAILABLE.
 	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest], *connect.ServerStream[pb.SubscribeResponse]) error
 }
 
