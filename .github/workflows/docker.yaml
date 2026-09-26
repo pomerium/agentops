@@ -10,7 +10,15 @@ on:
       - "v*"
 
 jobs:
+  stack:
+    uses: ./.github/workflows/stack-top.yaml
+    permissions:
+      contents: read
+      pull-requests: read
+
   docker:
+    needs: stack
+    if: needs.stack.outputs.top == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

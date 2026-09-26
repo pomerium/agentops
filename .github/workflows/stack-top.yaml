@@ -1,0 +1,43 @@
+name: Stack top
+# Reusable gate: is this run worth doing?
+#
+# A pull request is the top of its stack when no open pull request uses its head
+# branch as a base. Only the top runs the suites: its merge ref already contains
+# every layer beneath it, so running them on each lower layer as well would test
+# the same code once per layer. Anything other than a pull request (a push to
+# main, a tag, a release) always runs.
+#
+# Callers need `pull-requests: read` on the job that uses this.
+permissions:
+  contents: read
+on:
+  workflow_call:
+    outputs:
+      top:
+        description: "'true' when the calling run should do its work"
+        value: ${{ jobs.gate.outputs.top }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      top: ${{ steps.check.outputs.top }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # The decision lives in a script so it can be tested
+      # (.github/scripts/stack-top_test.sh, run by the test workflow).
+      - name: Look for pull requests stacked on this one
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: .github/scripts/stack-top.sh
