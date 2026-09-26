@@ -162,11 +162,7 @@ func (h *handler) ListEvents(ctx context.Context, req *connect.Request[pb.ListEv
 	if err != nil {
 		return nil, wire.ToConnect(err)
 	}
-	out := &pb.ListEventsResponse{Events: make([]*pb.Event, 0, len(events))}
-	for _, ev := range events {
-		out.Events = append(out.Events, wire.Event(ev))
-	}
-	return connect.NewResponse(out), nil
+	return connect.NewResponse(&pb.ListEventsResponse{Events: events}), nil
 }
 
 func (h *handler) Subscribe(ctx context.Context, req *connect.Request[pb.SubscribeRequest], stream *connect.ServerStream[pb.SubscribeResponse]) error {
@@ -203,7 +199,7 @@ func (h *handler) Subscribe(ctx context.Context, req *connect.Request[pb.Subscri
 				// there is nothing further to deliver and a client should stop asking.
 				return nil
 			}
-			if err := stream.Send(&pb.SubscribeResponse{Event: wire.Event(ev)}); err != nil {
+			if err := stream.Send(&pb.SubscribeResponse{Event: ev}); err != nil {
 				return err
 			}
 		case <-ticker.C:

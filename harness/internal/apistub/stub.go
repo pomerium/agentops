@@ -22,42 +22,51 @@ package apistub
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"github.com/pomerium/agentops/harness/api"
+	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/api/wire"
 )
 
 // SentinelPrefix addresses a scripted error rather than a session: a ref whose
-// session_id is "sentinel/ErrNotRevivable", or a CreateSession whose template
-// is, fails with that published sentinel from whichever verb was called.
+// session_id is "sentinel/SENTINEL_NOT_REVIVABLE", or a CreateSession whose
+// template is, fails with that published sentinel from whichever verb was called.
 //
 // It is a ref value rather than a control endpoint so that a conformance test
-// can provoke all ten errors with nothing but the SDK under test — an SDK that
+// can provoke every error with nothing but the SDK under test — an SDK that
 // needed a side channel to be tested would be tested through code no user runs.
 const SentinelPrefix = "sentinel/"
 
 // The scripted turns, addressed by prompt content. A conformance suite needs a
 // turn to unfold a particular way — with a permission request in the middle, or
-// carrying an event type the SDK has never heard of — and asking for it by
+// carrying a payload the SDK has never heard of — and asking for it by
 // content keeps the whole scenario expressible through the SDK's own verbs.
 const (
 	// PromptPermission runs a turn that stops on a permission request and waits
 	// for RespondPermission before finishing.
 	PromptPermission = "stub:permission"
-	// PromptUnknownEvent runs a turn that emits an event type and payload from a
-	// future version of the platform, then finishes normally. A client must
-	// deliver the unknown event and carry on.
+	// PromptUnknownEvent runs a turn that emits an event whose payload is from a
+	// future version of the platform — a payload field this build does not
+	// define — then finishes normally. A client must deliver the event, with no
+	// payload it recognizes, and carry on.
 	PromptUnknownEvent = "stub:unknown-event"
 	// PromptZeroEvent runs a turn that emits an entirely zero-valued event —
 	// which on the JSON path arrives as the object {}, since proto3 omits zero
 	// fields — then finishes normally. Absent must read as the proto3 default,
 	// and a seq of 0 must not break dedup.
+	//
+	// The two differ in what a client can get wrong: the zero event has a seq of
+	// 0 and is dropped as already seen, while the unknown one is new and must be
+	// delivered.
 	PromptZeroEvent = "stub:zero-event"
 )
 
@@ -113,7 +122,7 @@ type session struct {
 	clientID  string
 	createdAt time.Time
 	updatedAt time.Time
-	events    []api.Event
+	events    []*pb.Event
 	subs      map[*subscription]struct{}
 	// finished marks a log that will never grow again. A later Subscribe gets the
 	// backlog and then a clean end rather than a feed that hangs; a feed already
@@ -152,7 +161,7 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 		if sess.clientID != req.ClientID {
 			continue
 		}
-		if sess.view.ConversationRef == req.ConversationRef && sess.view.State.Live() {
+		if sess.view.ConversationRef == req.ConversationRef && api.Live(sess.view.State) {
 			return api.SessionView{}, api.Errorf(api.ErrConflict,
 				"conversation %q already has a live session", req.ConversationRef)
 		}
@@ -184,13 +193,13 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	// The launch, played out. A real one takes a human; here the approval lands
 	// immediately so a suite can get to a turn without one.
 	s.transition(sess, api.StateLaunching, api.ReasonLaunch)
-	s.transition(sess, api.StateAwaitingApproval, "")
-	s.emit(sess, api.EventApprovalRequired, "", api.ApprovalRequired{
-		ApprovalURL: "https://stub.invalid/approve/" + id,
-		ExpiresAt:   s.peek().Add(10 * time.Minute),
-	})
-	s.emit(sess, api.EventApproved, "", api.Approved{ApproverSubject: StubApproverSubject})
-	s.transition(sess, api.StateRunning, "")
+	s.transition(sess, api.StateAwaitingApproval, api.ReasonLaunch)
+	s.emit(sess, &pb.Event{Payload: &pb.Event_ApprovalRequired{ApprovalRequired: &pb.ApprovalRequired{
+		ApprovalUrl: "https://stub.invalid/approve/" + id,
+		ExpiresAt:   timestamppb.New(s.peek().Add(10 * time.Minute)),
+	}}})
+	s.emit(sess, &pb.Event{Payload: &pb.Event_Approved{Approved: &pb.Approved{ApproverSubject: StubApproverSubject}}})
+	s.transition(sess, api.StateRunning, api.ReasonLaunch)
 
 	if req.InitialPrompt != "" {
 		s.runTurn(sess, req.InitialPrompt)
@@ -245,14 +254,14 @@ func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionReq
 	}
 	turn := sess.turn
 	sess.pending = ""
-	s.emit(sess, api.EventPermissionResolved, turn, api.PermissionResolved{
-		RequestID: req.RequestID, Resolution: req.OptionID,
-	})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
+		RequestId: req.RequestID, Resolution: &pb.PermissionResolved_OptionId{OptionId: req.OptionID},
+	}}})
 	// The turn the request blocked now finishes, so a suite sees a permission
 	// answered and a turn completed rather than a session that stops mid-turn.
-	s.emit(sess, api.EventToolCall, turn, api.ToolCall{
-		ID: "call-1", Title: "deploy", Status: api.ToolCallCompleted, Update: true,
-	})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
+		Id: "call-1", Title: "deploy", Status: api.ToolCallCompleted, Update: true,
+	}}})
 	s.finishTurn(sess, turn)
 	return nil
 }
@@ -264,15 +273,16 @@ func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
 	if err != nil {
 		return err
 	}
-	if sess.view.State.Terminal() {
+	if api.Terminal(sess.view.State) {
 		return nil // idempotent, as on the platform: ending an ended session is done
 	}
 	reason := req.Reason
-	if reason == "" {
+	if reason == pb.EndReason_END_REASON_UNSPECIFIED {
 		reason = api.EndEnded
 	}
-	s.transition(sess, api.StateEnded, reason)
-	s.emit(sess, api.EventSessionEnded, "", api.SessionEnded{Reason: reason})
+	// No reason on the transition itself: session_ended, right behind it, carries it.
+	s.transition(sess, api.StateEnded, pb.Reason_REASON_UNSPECIFIED)
+	s.emit(sess, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason}}})
 	s.finish(sess)
 	return nil
 }
@@ -295,7 +305,7 @@ func (s *Stub) ListSessions(_ context.Context, req api.ListSessionsRequest) ([]a
 		if sess.clientID != req.ClientID {
 			continue
 		}
-		if req.LiveOnly && !sess.view.State.Live() {
+		if req.LiveOnly && !api.Live(sess.view.State) {
 			continue
 		}
 		if !req.UpdatedSince.IsZero() && sess.updatedAt.Before(req.UpdatedSince) {
@@ -315,7 +325,7 @@ func (s *Stub) ListTemplates(_ context.Context, _ string) ([]api.TemplateSummary
 	return append([]api.TemplateSummary(nil), s.tmpls...), nil
 }
 
-func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]api.Event, error) {
+func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]*pb.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, err := s.find(req.Ref)
@@ -326,7 +336,7 @@ func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]api.Event
 	if limit <= 0 || limit > maxEventPage {
 		limit = maxEventPage
 	}
-	out := make([]api.Event, 0, min(limit, len(sess.events)))
+	out := make([]*pb.Event, 0, min(limit, len(sess.events)))
 	for _, ev := range sess.events {
 		if ev.Seq <= req.AfterSeq {
 			continue
@@ -347,7 +357,7 @@ func (s *Stub) Subscribe(_ context.Context, req api.SubscribeRequest) (api.Subsc
 		return nil, err
 	}
 
-	var backlog []api.Event
+	var backlog []*pb.Event
 	for _, ev := range sess.events {
 		if ev.Seq > req.AfterSeq {
 			backlog = append(backlog, ev)
@@ -375,10 +385,10 @@ func (s *Stub) Subscribe(_ context.Context, req api.SubscribeRequest) (api.Subsc
 type subscription struct {
 	stub *Stub
 	sess *session
-	out  chan api.Event
+	out  chan *pb.Event
 
 	mu    sync.Mutex
-	queue []api.Event
+	queue []*pb.Event
 	ended bool
 	wake  chan struct{}
 	done  chan struct{}
@@ -389,7 +399,7 @@ func newSubscription(stub *Stub, sess *session) *subscription {
 	sub := &subscription{
 		stub: stub,
 		sess: sess,
-		out:  make(chan api.Event),
+		out:  make(chan *pb.Event),
 		wake: make(chan struct{}, 1),
 		done: make(chan struct{}),
 	}
@@ -397,7 +407,7 @@ func newSubscription(stub *Stub, sess *session) *subscription {
 	return sub
 }
 
-func (s *subscription) Events() <-chan api.Event { return s.out }
+func (s *subscription) Events() <-chan *pb.Event { return s.out }
 
 func (s *subscription) Close() {
 	s.stub.mu.Lock()
@@ -407,7 +417,7 @@ func (s *subscription) Close() {
 }
 
 // push queues an event for the feed.
-func (s *subscription) push(ev api.Event) {
+func (s *subscription) push(ev *pb.Event) {
 	s.mu.Lock()
 	s.queue = append(s.queue, ev)
 	s.mu.Unlock()
@@ -467,89 +477,87 @@ func (s *Stub) runTurn(sess *session, content string) string {
 	case PromptPermission:
 		// The turn stops here. RespondPermission resumes it, which is what lets a
 		// suite test the round trip rather than just the rendering.
-		s.emit(sess, api.EventToolCall, turn, api.ToolCall{
-			ID: "call-1", Title: "deploy", Kind: "execute", Status: api.ToolCallPending,
+		s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
+			Id: "call-1", Title: "deploy", Kind: "execute", Status: api.ToolCallPending,
 			InvocationMessage: "deploy to production",
-			ToolInput:         json.RawMessage(`{"target":"production"}`),
-		})
+			ToolInput: structpb.NewStructValue(&structpb.Struct{Fields: map[string]*structpb.Value{
+				"target": structpb.NewStringValue("production"),
+			}}),
+		}}})
 		sess.pending = "req-1"
 		sess.turn = turn
-		s.emit(sess, api.EventPermissionRequest, turn, api.PermissionRequest{
-			RequestID: "req-1",
+		s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_PermissionRequest{PermissionRequest: &pb.PermissionRequest{
+			RequestId: "req-1",
 			Summary:   "Deploy to production?",
-			Options: []api.PermissionOption{
-				{ID: "allow", Name: "Allow", Kind: "allow_once"},
-				{ID: "deny", Name: "Deny", Kind: "reject_once"},
+			Options: []*pb.PermissionOption{
+				{Id: "allow", Name: "Allow", Kind: "allow_once"},
+				{Id: "deny", Name: "Deny", Kind: "reject_once"},
 			},
-			Deadline:   s.peek().Add(5 * time.Minute),
-			ToolCallID: "call-1",
-		})
+			Deadline:   timestamppb.New(s.peek().Add(5 * time.Minute)),
+			ToolCallId: "call-1",
+		}}})
 		return turn
 
 	case PromptUnknownEvent:
-		// An event from a later version of the platform. Types are additive and a
-		// client must pass one it does not know through rather than fail on it.
-		s.emitRaw(sess, api.Event{
-			Type:    "future_event_type",
-			TurnID:  turn,
-			Payload: json.RawMessage(`{"shape":"nobody here has ever seen","count":7}`),
-		})
+		// An event from a later version of the platform: its payload is a field of
+		// the oneof this build does not define. Payloads are additive, and a client
+		// must pass the event through rather than fail on it.
+		ev := &pb.Event{TurnId: turn}
+		ev.ProtoReflect().SetUnknown(futurePayload)
+		s.emit(sess, ev)
 
 	case PromptZeroEvent:
 		// Every field zero. On the JSON path proto3 omits them all, so this arrives
-		// as {"event":{}} — no seq, no type, no timestamp — and absent has to read
-		// as the default rather than as missing data. Its seq of 0 also means a
-		// correct client drops it as already-seen, which is the right behaviour and
-		// not a crash.
-		s.broadcast(sess, api.Event{})
+		// as {"event":{}} — no seq, no payload, no timestamp — and absent has to
+		// read as the default rather than as missing data. Its seq of 0 also means
+		// a correct client drops it as already-seen, which is the right behaviour
+		// and not a crash.
+		s.broadcast(sess, &pb.Event{})
 	}
 
-	s.emit(sess, api.EventAgentMessage, turn, api.AgentMessage{
-		PartID: turn + "-p1", Text: "working on it", Final: false,
-	})
-	s.emit(sess, api.EventToolCall, turn, api.ToolCall{
-		ID: "call-1", Title: "read the file", Kind: "read", Status: api.ToolCallPending,
-	})
-	s.emit(sess, api.EventToolCall, turn, api.ToolCall{
-		ID: "call-1", Title: "read the file", Kind: "read", Status: api.ToolCallCompleted, Update: true,
-	})
-	s.emit(sess, api.EventAgentMessage, turn, api.AgentMessage{
-		PartID: turn + "-p2", Text: "done: " + content, Final: true,
-	})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{
+		PartId: turn + "-p1", Text: "working on it", Final: false,
+	}}})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
+		Id: "call-1", Title: "read the file", Kind: "read", Status: api.ToolCallPending,
+	}}})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
+		Id: "call-1", Title: "read the file", Kind: "read", Status: api.ToolCallCompleted, Update: true,
+	}}})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{
+		PartId: turn + "-p2", Text: "done: " + content, Final: true,
+	}}})
 	s.finishTurn(sess, turn)
 	return turn
 }
 
+// futurePayload is a payload field no build defines — a message at a field
+// number past every payload the oneof has — encoded as the unknown field it is.
+var futurePayload = protowire.AppendBytes(
+	protowire.AppendTag(nil, unknownFieldNumber, protowire.BytesType),
+	protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), "nobody here has ever seen"),
+)
+
 // finishTurn closes a turn out with its counters and its stop reason.
 func (s *Stub) finishTurn(sess *session, turn string) {
 	sess.turns++
-	s.emit(sess, api.EventUsage, turn, api.Usage{
-		InputTokens: 120, OutputTokens: 40, TotalTokens: 160, CostUSD: 0.0012,
-	})
-	s.emit(sess, api.EventTurnCompleted, turn, api.TurnCompleted{StopReason: "end_turn"})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_Usage{Usage: &pb.Usage{
+		InputTokens: 120, OutputTokens: 40, TotalTokens: 160, CostUsd: 0.0012,
+	}}})
+	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_TurnCompleted{TurnCompleted: &pb.TurnCompleted{StopReason: "end_turn"}}})
 }
 
 // --- log mechanics -----------------------------------------------------------
 
-// emit appends a typed event to the log and hands it to every subscriber.
-// Called with the lock held.
-func (s *Stub) emit(sess *session, typ api.EventType, turnID string, payload any) {
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		// A payload this package cannot marshal is a bug in this package, and a
-		// silently empty payload would send a conformance suite hunting in the SDK.
-		panic(fmt.Sprintf("apistub: marshal %s payload: %v", typ, err))
-	}
-	s.emitRaw(sess, api.Event{Type: typ, TurnID: turnID, Payload: raw})
-}
-
-// emitRaw appends an event, allocating its sequence and stamping its time.
-func (s *Stub) emitRaw(sess *session, ev api.Event) {
-	ev.SessionID = sess.view.ID
+// emit appends an event to the log, allocating its sequence and stamping its
+// time, and hands it to every subscriber. Called with the lock held.
+func (s *Stub) emit(sess *session, ev *pb.Event) {
+	at := s.tick()
+	ev.SessionId = sess.view.ID
 	ev.Seq = sess.view.LastSeq + 1
-	ev.At = s.tick()
+	ev.Timestamp = timestamppb.New(at)
 	sess.view.LastSeq = ev.Seq
-	sess.updatedAt = ev.At
+	sess.updatedAt = at
 	sess.events = append(sess.events, ev)
 	s.broadcast(sess, ev)
 }
@@ -557,7 +565,7 @@ func (s *Stub) emitRaw(sess *session, ev api.Event) {
 // broadcast delivers an event to the live subscribers without recording it. The
 // zero-event scenario is the only caller that wants that split: an event with
 // seq 0 must not disturb the log's sequence or its history.
-func (s *Stub) broadcast(sess *session, ev api.Event) {
+func (s *Stub) broadcast(sess *session, ev *pb.Event) {
 	for sub := range sess.subs {
 		sub.push(ev)
 	}
@@ -566,10 +574,10 @@ func (s *Stub) broadcast(sess *session, ev api.Event) {
 // transition moves a session's state and records the move, in that order, so
 // the event's "old" is what the session actually left rather than whatever the
 // last caller happened to leave on the view.
-func (s *Stub) transition(sess *session, next api.SessionState, reason string) {
+func (s *Stub) transition(sess *session, next api.SessionState, reason api.Reason) {
 	prev := sess.view.State
 	sess.view.State = next
-	s.emit(sess, api.EventStateChanged, "", api.StateChanged{Old: prev, New: next, Reason: reason})
+	s.emit(sess, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: prev, New: next, Reason: reason}}})
 }
 
 // finish marks a log as never growing again. A feed opened after this gets the
@@ -625,7 +633,7 @@ func (s *Stub) find(ref api.SessionRef) (*session, error) {
 		if sess.clientID != ref.ClientID || sess.view.ConversationRef != ref.ConversationRef {
 			continue
 		}
-		if !ref.IncludeTerminal && sess.view.State.Terminal() {
+		if !ref.IncludeTerminal && api.Terminal(sess.view.State) {
 			continue
 		}
 		if best == nil || sess.createdAt.After(best.createdAt) {
@@ -652,7 +660,7 @@ func scriptedError(value string) error {
 	if !ok {
 		return nil
 	}
-	entry, ok := wire.Sentinels()[name]
+	entry, ok := wire.Sentinels()[pb.Sentinel(pb.Sentinel_value[name])]
 	if !ok {
 		return api.Errorf(api.ErrInvalidArgument, "%q names no published sentinel", name)
 	}
