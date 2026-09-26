@@ -50,13 +50,14 @@ A bearer token is also accepted as an identity, so a client that can only set
 
 Two more levers ride on ordinary request fields:
 
-- **`sentinel/<Name>` as a session id** — or as a template on `CreateSession` —
-  fails with that published sentinel from whichever verb you called. All ten
-  names are in [`clients.md`](clients.md#errors).
+- **`sentinel/<name>` as a session id** — or as a template on `CreateSession` —
+  fails with that published sentinel from whichever verb you called. The name is
+  the `Sentinel` value's proto name, `sentinel/SENTINEL_NOT_REVIVABLE`; every
+  one is in [`clients.md`](clients.md#errors).
 - **Scripted prompts** make a turn unfold a particular way:
   `stub:permission` stops on a permission request and waits for an answer;
-  `stub:unknown-event` emits an event type from a later version of the platform;
-  `stub:zero-event` emits an entirely zero-valued event.
+  `stub:unknown-event` emits an event whose payload is a oneof field from a later
+  version of the platform; `stub:zero-event` emits an entirely zero-valued event.
 
 ## The scenarios
 
@@ -127,8 +128,8 @@ The two reference suites also cover, with no scenario header:
 - **the full lifecycle** — create, read the approval URL **off the log** (never
   off the `createSession` response), prompt, end;
 - **every published sentinel** — the suites assert their table covers the whole
-  generated set, so an eleventh cannot slip in untested — including that the two
-  pairs sharing a Connect code remain distinguishable by name;
+  generated `Sentinel` enum, so a new one cannot slip in untested — including
+  that the two pairs sharing a Connect code remain distinguishable;
 - **cross-client isolation** — another client's session is `not_found` from every
   verb, and a refused subscribe fails at *open* rather than becoming a silent
   feed;
@@ -136,15 +137,16 @@ The two reference suites also cover, with no scenario header:
   open after it, so a client that waits for end-of-stream instead hangs here;
 - **an already-finished log** — subscribing succeeds and the feed ends
   immediately;
-- **an unknown event type** passes through, and the turn either side of it still
+- **an unknown payload** — an event whose oneof field this build does not define
+  — is delivered with no payload set, and the turn either side of it still
   parses;
 - **a zero-valued event.** On the JSON codec it is literally `{}` — no `seq`, no
-  `type`, no `timestamp`. It must decode to the proto3 defaults rather than
+  payload, no `timestamp`. It must decode to the proto3 defaults rather than
   raise, and its `seq` of 0 must be dropped as already-seen rather than break the
   feed;
 - **int64 as a JSON string** survives the round trip and stays an integer;
 - **the permission round trip**, including that answering twice is
-  `ErrUnknownRequest` rather than a second decision;
+  `SENTINEL_UNKNOWN_REQUEST` rather than a second decision;
 - **conversation-ref addressing**, including `include_terminal` for "what ran
   here before?";
 - **conflict** — a second live session on one conversation is refused;

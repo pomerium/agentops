@@ -15,6 +15,7 @@ import (
 
 	"github.com/pomerium/agentops/harness/api"
 	apiclient "github.com/pomerium/agentops/harness/api/client"
+	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/api/wire"
 	"github.com/pomerium/agentops/harness/internal/apistub"
 )
@@ -104,14 +105,9 @@ func TestLifecycle(t *testing.T) {
 	}
 	var approvalURL string
 	for _, ev := range events {
-		if ev.Type != api.EventApprovalRequired {
-			continue
+		if p := ev.GetApprovalRequired(); p != nil {
+			approvalURL = p.GetApprovalUrl()
 		}
-		var p api.ApprovalRequired
-		if err := ev.Decode(&p); err != nil {
-			t.Fatalf("decode approval_required: %v", err)
-		}
-		approvalURL = p.ApprovalURL
 	}
 	if approvalURL == "" {
 		t.Fatal("no approval_required event carried a URL")
@@ -155,7 +151,8 @@ func TestSentinels(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	for name, entry := range wire.Sentinels() {
+	for sentinel, entry := range wire.Sentinels() {
+		name := sentinel.String()
 		t.Run(name, func(t *testing.T) {
 			_, err := c.GetSession(ctx, api.SessionRef{SessionID: apistub.SentinelPrefix + name})
 			if err == nil {
@@ -235,8 +232,8 @@ func TestSubscribeStopsOnSessionEnded(t *testing.T) {
 	if len(last) == 0 {
 		t.Fatal("the feed delivered nothing")
 	}
-	if got := last[len(last)-1].Type; got != api.EventSessionEnded {
-		t.Errorf("the feed's last event is %s, want session_ended", got)
+	if got := last[len(last)-1]; got.GetSessionEnded() == nil {
+		t.Errorf("the feed's last event is %s, want session_ended", api.Kind(got))
 	}
 }
 
@@ -365,7 +362,8 @@ func TestSilentStreamReconnects(t *testing.T) {
 }
 
 // TestUnknownFieldAndEventTolerated: a response carrying a field this build has
-// never heard of, and an event type it has never heard of, both pass through.
+// never heard of, and an event whose payload it has never heard of, both pass
+// through.
 // The additive-only contract is worth nothing if a client refuses to parse.
 func TestUnknownFieldAndEventTolerated(t *testing.T) {
 	ctx := context.Background()
@@ -389,12 +387,12 @@ func TestUnknownFieldAndEventTolerated(t *testing.T) {
 	}
 	var sawFuture bool
 	for _, ev := range events {
-		if ev.Type == "future_event_type" {
+		if ev.GetPayload() == nil && len(ev.ProtoReflect().GetUnknown()) > 0 {
 			sawFuture = true
 		}
 	}
 	if !sawFuture {
-		t.Error("the unknown event type did not survive the round trip")
+		t.Error("the unknown payload did not survive the round trip")
 	}
 }
 
@@ -433,8 +431,8 @@ func TestZeroValuedEvent(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("the zero-valued event killed the feed")
 	}
-	if got[len(got)-1].Type != api.EventSessionEnded {
-		t.Errorf("the feed ended on %s, want session_ended", got[len(got)-1].Type)
+	if last := got[len(got)-1]; last.GetSessionEnded() == nil {
+		t.Errorf("the feed ended on %s, want session_ended", api.Kind(last))
 	}
 	for _, ev := range got {
 		if ev.Seq == 0 {
@@ -461,18 +459,16 @@ func TestPermissionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	var req api.PermissionRequest
+	var req *pb.PermissionRequest
 	for _, ev := range events {
-		if ev.Type == api.EventPermissionRequest {
-			if err := ev.Decode(&req); err != nil {
-				t.Fatalf("decode permission_request: %v", err)
-			}
+		if p := ev.GetPermissionRequest(); p != nil {
+			req = p
 		}
-		if ev.Type == api.EventTurnCompleted {
+		if ev.GetTurnCompleted() != nil {
 			t.Fatal("the turn completed while a permission request was outstanding")
 		}
 	}
-	if req.RequestID == "" {
+	if req.GetRequestId() == "" {
 		t.Fatal("no permission_request on the log")
 	}
 	if len(req.Options) == 0 {
@@ -480,13 +476,13 @@ func TestPermissionRoundTrip(t *testing.T) {
 	}
 
 	if err := c.RespondPermission(ctx, api.RespondPermissionRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, RequestID: req.RequestID, OptionID: "allow",
+		Ref: api.SessionRef{SessionID: view.ID}, RequestID: req.GetRequestId(), OptionID: "allow",
 	}); err != nil {
 		t.Fatalf("RespondPermission: %v", err)
 	}
 	// Answering twice is an unknown request, not a second decision.
 	if err := c.RespondPermission(ctx, api.RespondPermissionRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, RequestID: req.RequestID, OptionID: "allow",
+		Ref: api.SessionRef{SessionID: view.ID}, RequestID: req.GetRequestId(), OptionID: "allow",
 	}); !errors.Is(err, api.ErrUnknownRequest) {
 		t.Errorf("answering twice: %v, want ErrUnknownRequest", err)
 	}
@@ -497,10 +493,10 @@ func TestPermissionRoundTrip(t *testing.T) {
 	}
 	var resolved, completed bool
 	for _, ev := range events {
-		switch ev.Type {
-		case api.EventPermissionResolved:
+		switch ev.GetPayload().(type) {
+		case *pb.Event_PermissionResolved:
 			resolved = true
-		case api.EventTurnCompleted:
+		case *pb.Event_TurnCompleted:
 			completed = true
 		}
 	}
@@ -526,9 +522,9 @@ func TestConflict(t *testing.T) {
 }
 
 // drain collects a feed until it closes or the budget runs out.
-func drain(t *testing.T, sub api.Subscription, budget time.Duration) []api.Event {
+func drain(t *testing.T, sub api.Subscription, budget time.Duration) []*pb.Event {
 	t.Helper()
-	var out []api.Event
+	var out []*pb.Event
 	deadline := time.After(budget)
 	for {
 		select {
@@ -593,7 +589,7 @@ func TestALostPromptResponseIsNotRetried(t *testing.T) {
 	}
 	turns := 0
 	for _, ev := range events {
-		if ev.Type == api.EventTurnCompleted {
+		if ev.GetTurnCompleted() != nil {
 			turns++
 		}
 	}
@@ -631,8 +627,8 @@ func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 	}
 	var turns []string
 	for _, ev := range events {
-		if ev.Type == api.EventTurnCompleted {
-			turns = append(turns, ev.TurnID)
+		if ev.GetTurnCompleted() != nil {
+			turns = append(turns, ev.GetTurnId())
 		}
 	}
 	if len(turns) != 1 {
@@ -694,7 +690,7 @@ func TestEndedEventLeavesALiveFeedOpen(t *testing.T) {
 		t.Fatalf("EndSession: %v", err)
 	}
 	for ev := range sub.Events() {
-		if ev.Type != api.EventSessionEnded {
+		if ev.GetSessionEnded() == nil {
 			continue
 		}
 		select {
