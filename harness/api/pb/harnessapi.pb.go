@@ -22,6 +22,11 @@
 // ErrorInfo. The Sentinel tells you the cause. Errors without an ErrorInfo
 // are Unauthenticated, Canceled, DeadlineExceeded and Internal.
 //
+// Retries: a client can send a call again after a transient error if the
+// RPC has an idempotency_level, or if the request has a non-empty
+// idempotency_key. Do not send other calls again automatically: a lost
+// response can hide a change that the server made.
+//
 // Optional timestamps and durations: if the field is not set, the value is
 // not known.
 
@@ -3442,19 +3447,19 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\x16SENTINEL_NOT_REVIVABLE\x10\x06\x12\x1d\n" +
 	"\x19SENTINEL_INVALID_ARGUMENT\x10\a\x12\x18\n" +
 	"\x14SENTINEL_UNAVAILABLE\x10\b\x12\x1b\n" +
-	"\x17SENTINEL_QUOTA_EXCEEDED\x10\t2\x9e\x06\n" +
+	"\x17SENTINEL_QUOTA_EXCEEDED\x10\t2\xb2\x06\n" +
 	"\x11HarnessAPIService\x12Z\n" +
 	"\rCreateSession\x12#.harnessapi.v1.CreateSessionRequest\x1a$.harnessapi.v1.CreateSessionResponse\x12E\n" +
 	"\x06Prompt\x12\x1c.harnessapi.v1.PromptRequest\x1a\x1d.harnessapi.v1.PromptResponse\x12f\n" +
 	"\x11RespondPermission\x12'.harnessapi.v1.RespondPermissionRequest\x1a(.harnessapi.v1.RespondPermissionResponse\x12Q\n" +
 	"\n" +
-	"EndSession\x12 .harnessapi.v1.EndSessionRequest\x1a!.harnessapi.v1.EndSessionResponse\x12Q\n" +
+	"EndSession\x12 .harnessapi.v1.EndSessionRequest\x1a!.harnessapi.v1.EndSessionResponse\x12V\n" +
 	"\n" +
-	"GetSession\x12 .harnessapi.v1.GetSessionRequest\x1a!.harnessapi.v1.GetSessionResponse\x12W\n" +
-	"\fListSessions\x12\".harnessapi.v1.ListSessionsRequest\x1a#.harnessapi.v1.ListSessionsResponse\x12Z\n" +
-	"\rListTemplates\x12#.harnessapi.v1.ListTemplatesRequest\x1a$.harnessapi.v1.ListTemplatesResponse\x12Q\n" +
+	"GetSession\x12 .harnessapi.v1.GetSessionRequest\x1a!.harnessapi.v1.GetSessionResponse\"\x03\x90\x02\x01\x12\\\n" +
+	"\fListSessions\x12\".harnessapi.v1.ListSessionsRequest\x1a#.harnessapi.v1.ListSessionsResponse\"\x03\x90\x02\x01\x12_\n" +
+	"\rListTemplates\x12#.harnessapi.v1.ListTemplatesRequest\x1a$.harnessapi.v1.ListTemplatesResponse\"\x03\x90\x02\x01\x12V\n" +
 	"\n" +
-	"ListEvents\x12 .harnessapi.v1.ListEventsRequest\x1a!.harnessapi.v1.ListEventsResponse\x12P\n" +
+	"ListEvents\x12 .harnessapi.v1.ListEventsRequest\x1a!.harnessapi.v1.ListEventsResponse\"\x03\x90\x02\x01\x12P\n" +
 	"\tSubscribe\x12\x1f.harnessapi.v1.SubscribeRequest\x1a .harnessapi.v1.SubscribeResponse0\x01B:Z8github.com/pomerium/agentops/harness/api/pb;harnessapipbb\x06proto3"
 
 var (

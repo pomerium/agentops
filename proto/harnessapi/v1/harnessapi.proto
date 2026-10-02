@@ -22,6 +22,11 @@
 // ErrorInfo. The Sentinel tells you the cause. Errors without an ErrorInfo
 // are Unauthenticated, Canceled, DeadlineExceeded and Internal.
 //
+// Retries: a client can send a call again after a transient error if the
+// RPC has an idempotency_level, or if the request has a non-empty
+// idempotency_key. Do not send other calls again automatically: a lost
+// response can hide a change that the server made.
+//
 // Optional timestamps and durations: if the field is not set, the value is
 // not known.
 syntax = "proto3";
@@ -105,16 +110,22 @@ service HarnessAPIService {
   //
   // Errors:
   //   - SENTINEL_NOT_FOUND: no session matches the ref.
-  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
   // ListSessions returns the sessions of the client, newest first.
   //
   // The response has all matching sessions. It has no pages.
-  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
   // ListTemplates returns the templates that the client can use in
   // CreateSession, in name order.
-  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
+  rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
   // ListEvents reads one page of a session's event log.
   //
@@ -124,7 +135,9 @@ service HarnessAPIService {
   //
   // Errors:
   //   - SENTINEL_NOT_FOUND: no session matches the ref.
-  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
 
   // Subscribe sends a session's events as they occur.
   //

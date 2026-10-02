@@ -22,6 +22,11 @@
 // ErrorInfo. The Sentinel tells you the cause. Errors without an ErrorInfo
 // are Unauthenticated, Canceled, DeadlineExceeded and Internal.
 //
+// Retries: a client can send a call again after a transient error if the
+// RPC has an idempotency_level, or if the request has a non-empty
+// idempotency_key. Do not send other calls again automatically: a lost
+// response can hide a change that the server made.
+//
 // Optional timestamps and durations: if the field is not set, the value is
 // not known.
 
@@ -232,24 +237,28 @@ func NewHarnessAPIServiceClient(httpClient connect.HTTPClient, baseURL string, o
 			httpClient,
 			baseURL+HarnessAPIServiceGetSessionProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("GetSession")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
 		listSessions: connect.NewClient[pb.ListSessionsRequest, pb.ListSessionsResponse](
 			httpClient,
 			baseURL+HarnessAPIServiceListSessionsProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("ListSessions")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
 		listTemplates: connect.NewClient[pb.ListTemplatesRequest, pb.ListTemplatesResponse](
 			httpClient,
 			baseURL+HarnessAPIServiceListTemplatesProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("ListTemplates")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
 		listEvents: connect.NewClient[pb.ListEventsRequest, pb.ListEventsResponse](
 			httpClient,
 			baseURL+HarnessAPIServiceListEventsProcedure,
 			connect.WithSchema(harnessAPIServiceMethods.ByName("ListEvents")),
+			connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 			connect.WithClientOptions(opts...),
 		),
 		subscribe: connect.NewClient[pb.SubscribeRequest, pb.SubscribeResponse](
@@ -490,24 +499,28 @@ func NewHarnessAPIServiceHandler(svc HarnessAPIServiceHandler, opts ...connect.H
 		HarnessAPIServiceGetSessionProcedure,
 		svc.GetSession,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("GetSession")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
 	harnessAPIServiceListSessionsHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceListSessionsProcedure,
 		svc.ListSessions,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListSessions")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
 	harnessAPIServiceListTemplatesHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceListTemplatesProcedure,
 		svc.ListTemplates,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListTemplates")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
 	harnessAPIServiceListEventsHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceListEventsProcedure,
 		svc.ListEvents,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListEvents")),
+		connect.WithIdempotency(connect.IdempotencyNoSideEffects),
 		connect.WithHandlerOptions(opts...),
 	)
 	harnessAPIServiceSubscribeHandler := connect.NewServerStreamHandlerSimple(
