@@ -10,8 +10,6 @@ import (
 	pb "github.com/pomerium/agentops/harness/api/pb"
 )
 
-// blockingHTTPClient never answers: a transport that hangs until the request's
-// own context gives up.
 type blockingHTTPClient struct{}
 
 func (blockingHTTPClient) Do(r *http.Request) (*http.Response, error) {
@@ -19,8 +17,6 @@ func (blockingHTTPClient) Do(r *http.Request) (*http.Response, error) {
 	return nil, r.Context().Err()
 }
 
-// TestRequestTimeoutAppliesToACustomHTTPClient: RequestTimeout bounds a unary
-// call whatever transport the caller supplies, not only the one New builds.
 func TestRequestTimeoutAppliesToACustomHTTPClient(t *testing.T) {
 	c, err := client.New(client.Config{
 		BaseURL:        "http://example.invalid",

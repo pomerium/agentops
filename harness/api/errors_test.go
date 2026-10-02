@@ -10,10 +10,6 @@ import (
 	pb "github.com/pomerium/agentops/harness/api/pb"
 )
 
-// TestEverySentinelIsPublished: each value of the proto's Sentinel enum has a
-// Go error and a Connect code behind it, and survives the trip through both.
-// Walked from the descriptor, so a sentinel added to the proto and not to the
-// table fails here rather than arriving as an unclassified error.
 func TestEverySentinelIsPublished(t *testing.T) {
 	published := api.Sentinels()
 	values := pb.Sentinel_SENTINEL_UNSPECIFIED.Descriptor().Values()
@@ -34,8 +30,7 @@ func TestEverySentinelIsPublished(t *testing.T) {
 			if cerr.Code() != s.Code {
 				t.Errorf("travels as %v, want %v", cerr.Code(), s.Code)
 			}
-			// What a client sees: the error as it arrives off the wire, which
-			// carries the code and the detail but not the Go value.
+
 			wired := connect.NewError(cerr.Code(), errors.New(cerr.Message()))
 			for _, d := range cerr.Details() {
 				wired.AddDetail(d)

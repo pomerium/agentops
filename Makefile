@@ -54,8 +54,6 @@ vet:
 
 ## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
 ## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
-## the sidecar control protocol stubs (buf, from proto/sidecar), and the Harness
-## API's Connect stubs (generate-harness-api).
 generate: generate-harness-api
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
