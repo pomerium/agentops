@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pomerium/agentops/harness/api/client"
+	pb "github.com/pomerium/agentops/harness/api/pb"
 )
 
 // blockingHTTPClient never answers: a transport that hangs until the request's
@@ -34,7 +35,7 @@ func TestRequestTimeoutAppliesToACustomHTTPClient(t *testing.T) {
 	defer cancel()
 
 	started := time.Now()
-	if _, err := c.ListTemplates(ctx, ""); err == nil {
+	if _, err := c.ListTemplates(ctx, &pb.ListTemplatesRequest{}); err == nil {
 		t.Fatal("a call to a transport that never answers succeeded")
 	}
 	if waited := time.Since(started); waited > 2*time.Second {

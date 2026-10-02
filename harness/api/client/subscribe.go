@@ -1,75 +1,119 @@
 package client
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
-	"github.com/pomerium/agentops/harness/api/wire"
+	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
 )
 
-// Subscribe opens a live event feed that survives the network.
+// SubscribeOptions tunes Subscribe's liveness detection. The zero value is the
+// contract's defaults.
+type SubscribeOptions struct {
+	// KeepaliveInterval is how often the server promises a keepalive on an idle
+	// subscription. Zero means api.KeepaliveInterval.
+	KeepaliveInterval time.Duration
+	// MissedKeepalives is how many intervals of silence are tolerated before the
+	// stream is declared dead. Zero means three.
+	MissedKeepalives int
+	// Logger receives reconnects. Nil means slog.Default.
+	Logger *slog.Logger
+}
+
+const (
+	defaultMissedKeepalives = 3
+	// reconnectBackoff paces subscription retries. Short, because the thing being
+	// waited on is a proxy or a pod coming back, not a human.
+	reconnectBackoff = 2 * time.Second
+)
+
+// silenceWindow is how long a subscription may say nothing at all — not even a
+// keepalive — before it is presumed dead.
 //
-// In-process, a subscription ends only when the session's log does. Over the
-// wire it can also end because a proxy recycled a connection, a pod moved, or a
-// path went quiet — none of which the caller should have to know about, and none
-// of which mean the session is over. So the returned Subscription is not one
-// stream: it is a loop that reopens the stream from the last sequence it
-// delivered, and the channel it exposes closes only when the log truly ends or
-// the caller stops listening.
+// It has one definition because both ends of a subscription's life depend on it:
+// the opening frame is bounded by it, and so is every frame after. A client that
+// waited longer to notice a dead handshake than a dead stream would be strictly
+// harder to reason about than one that waits the same time for both.
+func (o SubscribeOptions) silenceWindow() time.Duration {
+	return time.Duration(o.MissedKeepalives) * o.KeepaliveInterval
+}
+
+// Subscribe opens a live event feed on c that survives the network.
+//
+// The generated Subscribe is one stream, and a stream can end because a proxy
+// recycled a connection, a pod moved, or a path went quiet — none of which mean
+// the session is over. So the Subscription returned here is a loop that reopens
+// the stream from the last sequence it delivered, and the channel it exposes
+// closes only when the log truly ends or the caller stops listening.
 //
 // Two properties make that safe, and both come from the published delivery
 // contract rather than from anything invented here. Delivery is at-least-once
 // and ordered by Seq, so resuming from the last sequence seen can duplicate but
 // cannot skip; and this loop drops anything it has already delivered, so the
 // caller sees each event once even though the transport may deliver it twice.
-func (c *Client) Subscribe(ctx context.Context, req api.SubscribeRequest) (api.Subscription, error) {
-	// Opening is synchronous, so a subscription to a session that does not exist —
-	// or that belongs to somebody else — fails here where the caller can see it,
-	// rather than as a channel that silently never yields. That is what the
-	// server's opening keepalive buys: a server-streaming call returns before the
-	// server has looked at the request, so the acknowledgement has to be a message.
-	stream, first, err := c.openStream(ctx, req, req.AfterSeq)
+//
+// Opening is synchronous, so a subscription to a session that does not exist —
+// or that belongs to somebody else — fails here where the caller can see it,
+// rather than as a channel that silently never yields. That is what the
+// server's opening keepalive buys: a server-streaming call returns before the
+// server has looked at the request, so the acknowledgement has to be a message.
+func Subscribe(ctx context.Context, c harnessapipbconnect.HarnessAPIServiceClient, req *pb.SubscribeRequest, opts SubscribeOptions) (*Subscription, error) {
+	if opts.KeepaliveInterval == 0 {
+		opts.KeepaliveInterval = api.KeepaliveInterval
+	}
+	if opts.MissedKeepalives == 0 {
+		opts.MissedKeepalives = defaultMissedKeepalives
+	}
+	opts.Logger = cmp.Or(opts.Logger, slog.Default())
+
+	s := &Subscription{c: c, req: req, opts: opts, out: make(chan *pb.Event)}
+	stream, first, err := s.open(ctx, req.GetAfterSeq())
 	if err != nil && !errors.Is(err, errLogFinished) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	s := &subscription{client: c, req: req, out: make(chan *pb.Event), cancel: cancel}
+	ctx, s.cancel = context.WithCancel(ctx)
 	if errors.Is(err, errLogFinished) {
 		// A subscription to a session whose log is already over. Accepted, and
 		// immediately closed: there is nothing wrong and nothing to deliver, and a
 		// caller ranging over Events() sees it end straight away.
-		cancel()
+		s.cancel()
 		close(s.out)
 		return s, nil
 	}
-	go s.run(ctx, stream, first, req.AfterSeq)
+	go s.run(ctx, stream, first, req.GetAfterSeq())
 	return s, nil
 }
 
-// subscription is one logical feed across however many connections it takes.
-type subscription struct {
-	client *Client
-	req    api.SubscribeRequest
+// Subscription is one logical feed across however many connections it takes.
+// Events arrive in Seq order, each once.
+type Subscription struct {
+	c      harnessapipbconnect.HarnessAPIServiceClient
+	req    *pb.SubscribeRequest
+	opts   SubscribeOptions
 	out    chan *pb.Event
 	cancel context.CancelFunc
 }
 
-func (s *subscription) Events() <-chan *pb.Event { return s.out }
+// Events yields the feed. It is closed when nothing further will arrive.
+func (s *Subscription) Events() <-chan *pb.Event { return s.out }
 
-// Close is idempotent, as the interface promises — a CancelFunc already is, and
-// the loop it cancels is what closes the channel, so a caller ranging over
+// Close releases the subscription. It is idempotent — a CancelFunc already is,
+// and the loop it cancels is what closes the channel, so a caller ranging over
 // Events() always sees it end.
-func (s *subscription) Close() { s.cancel() }
+func (s *Subscription) Close() { s.cancel() }
 
-func (s *subscription) run(ctx context.Context, stream *connect.ServerStreamForClient[pb.SubscribeResponse], first *pb.SubscribeResponse, afterSeq int64) {
+func (s *Subscription) run(ctx context.Context, stream *connect.ServerStreamForClient[pb.SubscribeResponse], first *pb.SubscribeResponse, afterSeq int64) {
 	defer close(s.out)
 	for {
 		last, ended, err := s.drain(ctx, stream, first, afterSeq)
@@ -89,22 +133,22 @@ func (s *subscription) run(ctx context.Context, stream *connect.ServerStreamForC
 			return
 		}
 		if err != nil {
-			s.client.log.WarnContext(ctx, "event subscription dropped; reconnecting",
-				"session", s.req.Ref.SessionID, "after_seq", afterSeq, "err", err)
+			s.opts.Logger.WarnContext(ctx, "event subscription dropped; reconnecting",
+				"session", s.req.GetRef().GetSessionId(), "after_seq", afterSeq, "err", err)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(reconnectBackoff):
 		}
-		next, opening, err := s.client.openStream(ctx, s.req, afterSeq)
+		next, opening, err := s.open(ctx, afterSeq)
 		if err != nil {
 			// A refusal is final — the session was deleted, is no longer ours, or its
 			// log is over — and retrying it forever would hide that from the caller.
 			// Anything else is worth another attempt after the same backoff.
 			if final(err) {
-				s.client.log.WarnContext(ctx, "event subscription cannot be resumed",
-					"session", s.req.Ref.SessionID, "err", err)
+				s.opts.Logger.WarnContext(ctx, "event subscription cannot be resumed",
+					"session", s.req.GetRef().GetSessionId(), "err", err)
 				return
 			}
 			stream = nil
@@ -116,7 +160,7 @@ func (s *subscription) run(ctx context.Context, stream *connect.ServerStreamForC
 
 // drain delivers one connection's events, reporting the last sequence it
 // delivered and whether the log ended.
-func (s *subscription) drain(ctx context.Context, stream *connect.ServerStreamForClient[pb.SubscribeResponse], first *pb.SubscribeResponse, afterSeq int64) (last int64, ended bool, err error) {
+func (s *Subscription) drain(ctx context.Context, stream *connect.ServerStreamForClient[pb.SubscribeResponse], first *pb.SubscribeResponse, afterSeq int64) (last int64, ended bool, err error) {
 	if stream == nil {
 		return afterSeq, false, nil
 	}
@@ -124,7 +168,7 @@ func (s *subscription) drain(ctx context.Context, stream *connect.ServerStreamFo
 	// A stream that says nothing at all — not even a keepalive — for this long is
 	// dead however healthy the socket looks. HTTP/2 PINGs terminate at each hop,
 	// so the proxy in front can answer them on behalf of a harness that is gone.
-	deadline := s.client.cfg.silenceWindow()
+	deadline := s.opts.silenceWindow()
 	silence := time.NewTimer(deadline)
 	defer silence.Stop()
 
@@ -162,7 +206,7 @@ func (s *subscription) drain(ctx context.Context, stream *connect.ServerStreamFo
 			if err == nil || errors.Is(err, io.EOF) {
 				return last, true, nil
 			}
-			return last, false, err
+			return last, false, api.FromConnect(err)
 		case msg, ok := <-recv:
 			if !ok {
 				// Drained; the receive goroutine reports why on recvErr. Nil'd so this
@@ -180,7 +224,7 @@ func (s *subscription) drain(ctx context.Context, stream *connect.ServerStreamFo
 
 // deliver hands one stream message to the caller, reporting whether the log
 // ended. Draining stops on either an ended log or an error.
-func (s *subscription) deliver(ctx context.Context, msg *pb.SubscribeResponse, last *int64) (ended bool, err error) {
+func (s *Subscription) deliver(ctx context.Context, msg *pb.SubscribeResponse, last *int64) (ended bool, err error) {
 	if msg.GetKeepalive() {
 		return false, nil // liveness only; never surfaced to the caller
 	}
@@ -197,28 +241,29 @@ func (s *subscription) deliver(ctx context.Context, msg *pb.SubscribeResponse, l
 	return ev.GetSessionEnded() != nil, nil
 }
 
-// openStream opens one subscription connection at a sequence and waits for the
+// open opens one subscription connection at a sequence and waits for the
 // server's opening message, which is what turns a refusal into an error the
 // caller sees rather than a stream that never speaks.
-func (c *Client) openStream(ctx context.Context, req api.SubscribeRequest, afterSeq int64) (*connect.ServerStreamForClient[pb.SubscribeResponse], *pb.SubscribeResponse, error) {
-	creq := connect.NewRequest(&pb.SubscribeRequest{Ref: wire.Ref(req.Ref), AfterSeq: afterSeq})
-	stream, err := c.stream.Subscribe(ctx, creq)
+func (s *Subscription) open(ctx context.Context, afterSeq int64) (*connect.ServerStreamForClient[pb.SubscribeResponse], *pb.SubscribeResponse, error) {
+	req := proto.CloneOf(s.req)
+	req.AfterSeq = afterSeq
+	stream, err := s.c.Subscribe(ctx, req)
 	if err != nil {
-		return nil, nil, wire.FromConnect(err)
+		return nil, nil, api.FromConnect(err)
 	}
 
 	// The opening frame gets the same liveness budget an established stream does.
 	//
-	// It needs one for the same reason drain does, and more urgently: the
-	// streaming transport deliberately carries no timeout, so a hop that accepts
-	// the connection and then says nothing leaves this Receive blocked forever —
-	// and because opening is synchronous, that is a caller stuck inside
-	// Subscribe with no error and no stream, rather than a subscription that
-	// reconnects. A proxy restarting mid-handshake is enough to produce it.
+	// It needs one for the same reason drain does, and more urgently: a
+	// subscription carries no request timeout, so a hop that accepts the
+	// connection and then says nothing leaves this Receive blocked forever — and
+	// because opening is synchronous, that is a caller stuck inside Subscribe with
+	// no error and no stream, rather than a subscription that reconnects. A proxy
+	// restarting mid-handshake is enough to produce it.
 	received := make(chan bool, 1)
 	go func() { received <- stream.Receive() }()
 
-	deadline := c.cfg.silenceWindow()
+	deadline := s.opts.silenceWindow()
 	silence := time.NewTimer(deadline)
 	defer silence.Stop()
 
@@ -246,7 +291,7 @@ func (c *Client) openStream(ctx context.Context, req api.SubscribeRequest, after
 			// reconnect loop must stop rather than re-open a closed log forever.
 			return nil, nil, errLogFinished
 		}
-		return nil, nil, wire.FromConnect(err)
+		return nil, nil, api.FromConnect(err)
 	}
 	return stream, stream.Msg(), nil
 }

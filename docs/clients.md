@@ -146,11 +146,18 @@ container.
 
 ## Tier 2 — an SDK
 
-TypeScript and Python SDKs arrive in a follow-up change; the Go client is
-`harness/api/client`, which satisfies the same `api.API` interface the
-in-process implementation does. All of them hide the same six subscription
-semantics, listed under [Subscribing](#subscribing) — mirror all six, not a
-subset, if you write another.
+TypeScript and Python SDKs arrive in a follow-up change. The Go client is the
+generated Connect client itself (`harness/api/pb/harnessapipbconnect`), called
+with the contract's own messages: `harness/api/client.New` returns it with the
+bearer token, the retry policy and sentinel-restoring errors added as
+interceptors, `client.Subscribe` wraps its one-shot stream in the resumable
+feed, and `harness/api` carries the enums' short names and the error sentinels
+that `errors.Is` matches. A Go test fake implements the generated handler and
+installs `harness/api/server` — the same error interceptor and subscription
+framing the platform uses — so the client under test meets the real wire
+behaviour. All of them hide the same six subscription semantics, listed under
+[Subscribing](#subscribing) — mirror all six, not a subset, if you write
+another.
 
 ## Tier 3 — polling
 

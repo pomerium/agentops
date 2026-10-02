@@ -83,8 +83,8 @@ const (
 )
 
 // The platform's published error set. Each travels as the Connect code and the
-// Sentinel value package wire pairs it with, and comes back out of the client as
-// itself, so errors.Is works the same on either side of the wire.
+// Sentinel value ToConnect pairs it with, and FromConnect restores it on the
+// client, so errors.Is works the same on either side of the wire.
 var (
 	// ErrNotFound: no such session, or none this client may see.
 	ErrNotFound = errors.New("harnessapi: session not found")
