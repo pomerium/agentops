@@ -27,7 +27,7 @@ OVERLAY ?= dev
 HELM      ?= helm
 CHART_DIR ?= deploy/helm
 
-.PHONY: build test test-e2e vet generate generate-harness-api apistub proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
+.PHONY: build test test-e2e vet generate generate-harness-api apistub sdk-generate sdk-generate-check sdk-test proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
         helm-sync-crds helm-lint helm-template helm-package
 
 ## build: compile all packages.
@@ -59,6 +59,7 @@ generate: generate-harness-api
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	cd internal/chatops/db && $(SQLC) generate
 	$(BUF) generate
+	$(MAKE) sdk-generate
 	$(MAKE) helm-sync-crds
 
 generate-harness-api:
@@ -67,6 +68,24 @@ generate-harness-api:
 APISTUB_BIN ?= $(CURDIR)/bin/apistub
 apistub:
 	$(HARNESS_GO) build -o $(APISTUB_BIN) ./cmd/apistub
+
+sdk-generate: sdk-generate-ts
+
+sdk-generate-ts:
+	npm --prefix sdk/ts install --no-audit --no-fund
+	npm --prefix sdk/ts run generate $(if $(PB_OUT),-- -o $(PB_OUT)/ts)
+
+sdk-generate-check:
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; set -e; \
+	  $(MAKE) --no-print-directory sdk-generate PB_OUT="$$tmp" >/dev/null; \
+	  diff -r "$$tmp/ts/src/gen" sdk/ts/src/gen || { echo "sdk/ts/src/gen is stale; run make sdk-generate"; exit 1; }; \
+	  echo "the SDK protobuf code matches the protos"
+
+sdk-test: sdk-test-ts
+
+sdk-test-ts: apistub
+	npm --prefix sdk/ts install --no-audit --no-fund
+	APISTUB_BIN=$(APISTUB_BIN) npm --prefix sdk/ts test
 
 ## helm-sync-crds: copy the generated CRDs into the Helm chart, wrapped in an
 ## `installCRDs` toggle. Kept in sync via `generate`; the kustomize base reads

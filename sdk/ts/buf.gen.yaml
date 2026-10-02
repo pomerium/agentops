@@ -1,0 +1,23 @@
+# Code generation for the TypeScript SDK.
+#
+# It runs through npm (`npm run generate`), not through the Go-tool buf the rest
+# of the repo uses: protoc-gen-es is an npm package, and a `local` plugin is
+# resolved from PATH — which only has node_modules/.bin on it inside an npm
+# script. `make sdk-generate` is the wrapper, and `make generate` calls it so the
+# committed output cannot drift from the proto.
+#
+# One plugin, unlike the Go side's two: protobuf-es v2 emits the message types
+# AND the service descriptors the Connect transport needs.
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=ts
+      # The generated files import from the SDK's own dependency, not from a
+      # bundled copy.
+      - import_extension=js
+inputs:
+  - directory: ../../proto
+    paths:
+      - ../../proto/harnessapi
