@@ -1,6 +1,7 @@
 import { Code, ConnectError, createClient, type Client, type Interceptor } from "@connectrpc/connect";
 import { createConnectTransport as createWebTransport } from "@connectrpc/connect-web";
-import { HarnessAPIService, type PromptRequest } from "./gen/harnessapi/v1/harnessapi_pb.js";
+import { MethodOptions_IdempotencyLevel } from "@bufbuild/protobuf/wkt";
+import { HarnessAPIService } from "./gen/harnessapi/v1/harnessapi_pb.js";
 
 export type HarnessClient = Client<typeof HarnessAPIService>;
 
@@ -54,8 +55,11 @@ function retry(opts: ClientOptions): Interceptor {
         clearTimeout(timer);
       }
     };
-    const unkeyedPrompt = req.method.name === "Prompt" && (req.message as PromptRequest).idempotencyKey === "";
-    for (let n = 0; n < (unkeyedPrompt ? 0 : retries); n++) {
+    const keyed = (req.message as { idempotencyKey?: unknown }).idempotencyKey;
+    const repeatable =
+      req.method.idempotency !== MethodOptions_IdempotencyLevel.IDEMPOTENCY_UNKNOWN ||
+      (typeof keyed === "string" && keyed !== "");
+    for (let n = 0; n < (repeatable ? retries : 0); n++) {
       try {
         return await attempt();
       } catch (err) {

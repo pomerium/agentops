@@ -353,6 +353,25 @@ describe("retries", () => {
     expect(Date.now() - started).toBeLessThan(400);
   });
 
+  it("never resends a CreateSession", async () => {
+    const started = Date.now();
+    const err = await failure(
+      stub.client({ retries: 2 }).createSession({
+        template: Stubbed.sentinelRef(Sentinel.UNAVAILABLE),
+        conversationRef: "no-resend",
+        approvalPrompt: "ship it",
+      }),
+    );
+    expect(sentinelOf(err)).toBe(Sentinel.UNAVAILABLE);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("never resends an EndSession", async () => {
+    const started = Date.now();
+    await failure(stub.client({ retries: 2 }).endSession(unavailable));
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it("does not retry a considered refusal", async () => {
     const started = Date.now();
     await failure(stub.client({ retries: 2 }).getSession(byId(Stubbed.sentinelRef(Sentinel.FORBIDDEN))));
