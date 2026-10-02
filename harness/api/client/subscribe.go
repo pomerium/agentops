@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/cenkalti/backoff/v7"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/pomerium/agentops/harness/api"
@@ -35,8 +36,6 @@ func WithMissedKeepalives(n int) SubscribeOption {
 func WithLogger(l *slog.Logger) SubscribeOption {
 	return func(o *subscribeOptions) { o.logger = l }
 }
-
-const reconnectBackoff = 2 * time.Second
 
 func (o subscribeOptions) silenceWindow() time.Duration {
 	return time.Duration(o.missedKeepalives) * o.keepaliveInterval
@@ -78,44 +77,40 @@ func (s *Subscription) Close() { s.cancel() }
 
 func (s *Subscription) run(ctx context.Context, stream *connect.ServerStreamForClient[pb.SubscribeResponse], first *pb.SubscribeResponse, afterSeq int64) {
 	defer close(s.out)
-	for {
+	policy := backoff.NewExponentialBackOff()
+	policy.InitialInterval = 2 * time.Second
+	policy.MaxInterval = 30 * time.Second
+	_, _ = backoff.Retry(ctx, func() (struct{}, error) {
+		if stream == nil {
+			next, opening, err := s.open(ctx, afterSeq)
+			if err != nil {
+				if final(err) {
+					s.opts.logger.WarnContext(ctx, "event subscription cannot be resumed",
+						"session", s.req.GetRef().GetSessionId(), "err", err)
+					return struct{}{}, backoff.Permanent(err)
+				}
+				return struct{}{}, err
+			}
+			stream, first = next, opening
+			policy.Reset()
+		}
 		last, ended, err := s.drain(ctx, stream, first, afterSeq)
-		first = nil
-		if last > afterSeq {
-			afterSeq = last
-		}
-		if stream != nil {
-			_ = stream.Close()
-		}
+		_ = stream.Close()
+		stream, first = nil, nil
+		afterSeq = max(afterSeq, last)
 		switch {
 		case ended:
-
-			return
+			return struct{}{}, nil
 		case ctx.Err() != nil:
-			return
+			return struct{}{}, backoff.Permanent(ctx.Err())
 		}
-		if err != nil {
-			s.opts.logger.WarnContext(ctx, "event subscription dropped; reconnecting",
-				"session", s.req.GetRef().GetSessionId(), "after_seq", afterSeq, "err", err)
+		if err == nil {
+			err = errors.New("the subscription stream ended early")
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(reconnectBackoff):
-		}
-		next, opening, err := s.open(ctx, afterSeq)
-		if err != nil {
-
-			if final(err) {
-				s.opts.logger.WarnContext(ctx, "event subscription cannot be resumed",
-					"session", s.req.GetRef().GetSessionId(), "err", err)
-				return
-			}
-			stream = nil
-			continue
-		}
-		stream, first = next, opening
-	}
+		s.opts.logger.WarnContext(ctx, "event subscription dropped; reconnecting",
+			"session", s.req.GetRef().GetSessionId(), "after_seq", afterSeq, "err", err)
+		return struct{}{}, err
+	}, backoff.WithBackOff(policy), backoff.WithMaxElapsedTime(0))
 }
 
 func (s *Subscription) drain(ctx context.Context, stream *connect.ServerStreamForClient[pb.SubscribeResponse], first *pb.SubscribeResponse, afterSeq int64) (last int64, ended bool, err error) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/cenkalti/backoff/v7"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -102,22 +103,26 @@ func errorInterceptor() connect.UnaryInterceptorFunc {
 func retryInterceptor(retries int, timeout time.Duration) connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			if req.Spec().IdempotencyLevel == connect.IdempotencyUnknown && !hasIdempotencyKey(req.Any()) {
-				retries = 0
+			tries := uint(1)
+			if req.Spec().IdempotencyLevel != connect.IdempotencyUnknown || hasIdempotencyKey(req.Any()) {
+				tries += uint(retries)
 			}
-			for attempt := 0; ; attempt++ {
+			policy := backoff.NewExponentialBackOff()
+			policy.InitialInterval = 200 * time.Millisecond
+			policy.MaxInterval = 2 * time.Second
+			res, err := backoff.Retry(ctx, func() (connect.AnyResponse, error) {
 				actx, cancel := context.WithTimeout(ctx, timeout)
+				defer cancel()
 				res, err := next(actx, req)
-				cancel()
-				if err == nil || attempt >= retries || !retryable(err) || ctx.Err() != nil {
-					return res, err
+				if err != nil && !retryable(err) {
+					return nil, backoff.Permanent(err)
 				}
-				select {
-				case <-ctx.Done():
-					return nil, err
-				case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
-				}
+				return res, err
+			}, backoff.WithBackOff(policy), backoff.WithMaxTries(tries), backoff.WithMaxElapsedTime(0))
+			if re := backoff.AsRetryError(err); re != nil && re.LastErr != nil {
+				return nil, re.LastErr
 			}
+			return res, err
 		}
 	}
 }
