@@ -1,6 +1,6 @@
 // Package apistub is a conformance server for the Harness API: the real
 // apiserver, on the real Connect transport, in front of a scripted in-memory
-// api.API.
+// implementation of the generated Harness API handler.
 //
 // It exists so an SDK in any language can be tested against the wire the
 // harness actually speaks with no cluster, no Pomerium and no human approval
@@ -28,13 +28,17 @@ import (
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
-	"github.com/pomerium/agentops/harness/api/wire"
+	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
+	"github.com/pomerium/agentops/harness/api/server"
+	"github.com/pomerium/agentops/harness/internal/apiserver"
 )
 
 // SentinelPrefix addresses a scripted error rather than a session: a ref whose
@@ -84,7 +88,7 @@ const maxEventPage = 500
 // sent at all.
 var clockEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// Stub is a scripted in-memory api.API. It is safe for concurrent use, which it
+// Stub is a scripted in-memory Harness API handler. It is safe for concurrent use, which it
 // has to be: a conformance suite drives verbs on one connection while reading
 // the event stream on another, and that interleaving is half of what it tests.
 type Stub struct {
@@ -92,15 +96,15 @@ type Stub struct {
 	sessions map[string]*session
 	nextID   int
 	clock    time.Time
-	tmpls    []api.TemplateSummary
+	tmpls    []*pb.TemplateSummary
 }
 
 // New builds a stub with the given templates. An empty list gets a default
 // pair, because ListTemplates returning nothing is a poor thing to write a
 // conformance test against.
-func New(templates ...api.TemplateSummary) *Stub {
+func New(templates ...*pb.TemplateSummary) *Stub {
 	if len(templates) == 0 {
-		templates = []api.TemplateSummary{
+		templates = []*pb.TemplateSummary{
 			{Name: "runid", Description: "the scripted template"},
 			{Name: "demo", Description: "a second template, so a list has two entries"},
 		}
@@ -112,11 +116,14 @@ func New(templates ...api.TemplateSummary) *Stub {
 	}
 }
 
-var _ api.API = (*Stub)(nil)
+var _ harnessapipbconnect.HarnessAPIServiceHandler = (*Stub)(nil)
 
 // session is one scripted session: its view, its log, and whoever is listening.
 type session struct {
-	view api.SessionView
+	// view is the stub's own copy, updated in place as the session moves. A verb
+	// hands out a clone: the original keeps changing under the lock while the
+	// transport is still encoding what was returned.
+	view *pb.SessionView
 	// clientID, createdAt and updatedAt are what the stub scopes, orders and
 	// filters by. The view does not carry them: no client reads them back.
 	clientID  string
@@ -141,16 +148,25 @@ type session struct {
 }
 
 // --- verbs -------------------------------------------------------------------
+//
+// Every verb takes its caller from the context, where the apiserver's identity
+// interceptor put it, and never from the message: no request has a field for
+// one. Errors are returned as api sentinels; the apiserver puts them on the wire
+// as the published error set, exactly as it does for the platform.
 
-func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (api.SessionView, error) {
-	if err := scriptedError(req.Template); err != nil {
-		return api.SessionView{}, err
+func (s *Stub) CreateSession(ctx context.Context, req *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(req.ApprovalPrompt) == "" {
-		return api.SessionView{}, api.Errorf(api.ErrInvalidArgument, "an approval prompt is required")
+	if err := scriptedError(req.GetTemplate()); err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(req.ConversationRef) == "" {
-		return api.SessionView{}, api.Errorf(api.ErrInvalidArgument, "a conversation ref is required")
+	if strings.TrimSpace(req.GetApprovalPrompt()) == "" {
+		return nil, api.Errorf(api.ErrInvalidArgument, "an approval prompt is required")
+	}
+	if strings.TrimSpace(req.GetConversationRef()) == "" {
+		return nil, api.Errorf(api.ErrInvalidArgument, "a conversation ref is required")
 	}
 
 	s.mu.Lock()
@@ -158,12 +174,12 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 
 	// A live conversation refuses a second session outright, as the service does.
 	for _, sess := range s.sessions {
-		if sess.clientID != req.ClientID {
+		if sess.clientID != clientID {
 			continue
 		}
-		if sess.view.ConversationRef == req.ConversationRef && api.Live(sess.view.State) {
-			return api.SessionView{}, api.Errorf(api.ErrConflict,
-				"conversation %q already has a live session", req.ConversationRef)
+		if sess.view.GetConversationRef() == req.GetConversationRef() && api.Live(sess.view.GetState()) {
+			return nil, api.Errorf(api.ErrConflict,
+				"conversation %q already has a live session", req.GetConversationRef())
 		}
 	}
 
@@ -171,13 +187,13 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	id := fmt.Sprintf("stub-%03d", s.nextID)
 	now := s.tick()
 	sess := &session{
-		view: api.SessionView{
-			ID:              id,
-			ConversationRef: req.ConversationRef,
+		view: &pb.SessionView{
+			Id:              id,
+			ConversationRef: req.GetConversationRef(),
 			State:           api.StatePending,
-			Template:        req.Template,
+			Template:        req.GetTemplate(),
 		},
-		clientID:  req.ClientID,
+		clientID:  clientID,
 		createdAt: now,
 		updatedAt: now,
 		subs:      map[*subscription]struct{}{},
@@ -188,7 +204,7 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	// and with no approval URL. The URL arrives on the log a moment later, and
 	// this is the single most commonly mis-assumed thing about the API — a client
 	// that reads it off the CreateSession response reads an empty string.
-	created := sess.view
+	created := proto.CloneOf(sess.view)
 
 	// The launch, played out. A real one takes a human; here the approval lands
 	// immediately so a suite can get to a turn without one.
@@ -201,61 +217,70 @@ func (s *Stub) CreateSession(_ context.Context, req api.CreateSessionRequest) (a
 	s.emit(sess, &pb.Event{Payload: &pb.Event_Approved{Approved: &pb.Approved{ApproverSubject: StubApproverSubject}}})
 	s.transition(sess, api.StateRunning, api.ReasonLaunch)
 
-	if req.InitialPrompt != "" {
-		s.runTurn(sess, req.InitialPrompt)
+	if req.GetInitialPrompt() != "" {
+		s.runTurn(sess, req.GetInitialPrompt())
 	}
-	return created, nil
+	return &pb.CreateSessionResponse{Session: created}, nil
 }
 
-func (s *Stub) Prompt(_ context.Context, req api.PromptRequest) (api.PromptResult, error) {
+func (s *Stub) Prompt(ctx context.Context, req *pb.PromptRequest) (*pb.PromptResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.findLive(req.Ref)
+	sess, err := s.findLive(clientID, req.GetRef())
 	if err != nil {
-		return api.PromptResult{}, err
+		return nil, err
 	}
-	if strings.TrimSpace(req.Content) == "" {
-		return api.PromptResult{}, api.Errorf(api.ErrInvalidArgument, "a prompt needs content")
+	if strings.TrimSpace(req.GetContent()) == "" {
+		return nil, api.Errorf(api.ErrInvalidArgument, "a prompt needs content")
 	}
 	// A repeated key is answered before the state is checked, as on the platform:
 	// the retry of an accepted prompt gets its turn back whatever that turn has
 	// since done to the session.
-	if turn, ok := sess.keyed[req.IdempotencyKey]; ok {
-		return api.PromptResult{TurnID: turn}, nil
+	if turn, ok := sess.keyed[req.GetIdempotencyKey()]; ok {
+		return &pb.PromptResponse{TurnId: turn}, nil
 	}
 
-	if sess.view.State != api.StateRunning {
-		return api.PromptResult{}, api.Errorf(api.ErrInvalidState,
-			"a prompt does not apply to a %s session", sess.view.State)
+	if sess.view.GetState() != api.StateRunning {
+		return nil, api.Errorf(api.ErrInvalidState,
+			"a prompt does not apply to a %s session", sess.view.GetState())
 	}
 
-	turn := s.runTurn(sess, req.Content)
-	if req.IdempotencyKey != "" {
+	turn := s.runTurn(sess, req.GetContent())
+	if key := req.GetIdempotencyKey(); key != "" {
 		if sess.keyed == nil {
 			sess.keyed = map[string]string{}
 		}
-		sess.keyed[req.IdempotencyKey] = turn
+		sess.keyed[key] = turn
 	}
-	return api.PromptResult{TurnID: turn}, nil
+	return &pb.PromptResponse{TurnId: turn}, nil
 }
 
-func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionRequest) error {
+func (s *Stub) RespondPermission(ctx context.Context, req *pb.RespondPermissionRequest) (*pb.RespondPermissionResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.findLive(req.Ref)
+	sess, err := s.findLive(clientID, req.GetRef())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if req.RequestID == "" {
-		return api.Errorf(api.ErrInvalidArgument, "a request id is required")
+	requestID := req.GetRequestId()
+	if requestID == "" {
+		return nil, api.Errorf(api.ErrInvalidArgument, "a request id is required")
 	}
-	if sess.pending != req.RequestID {
-		return api.Errorf(api.ErrUnknownRequest, "no outstanding request %q", req.RequestID)
+	if sess.pending != requestID {
+		return nil, api.Errorf(api.ErrUnknownRequest, "no outstanding request %q", requestID)
 	}
 	turn := sess.turn
 	sess.pending = ""
 	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
-		RequestId: req.RequestID, Resolution: &pb.PermissionResolved_OptionId{OptionId: req.OptionID},
+		RequestId: requestID, Resolution: &pb.PermissionResolved_OptionId{OptionId: req.GetOptionId()},
 	}}})
 	// The turn the request blocked now finishes, so a suite sees a permission
 	// answered and a turn completed rather than a session that stops mid-turn.
@@ -263,20 +288,24 @@ func (s *Stub) RespondPermission(_ context.Context, req api.RespondPermissionReq
 		Id: "call-1", Title: "deploy", Status: api.ToolCallCompleted, Update: true,
 	}}})
 	s.finishTurn(sess, turn)
-	return nil
+	return &pb.RespondPermissionResponse{}, nil
 }
 
-func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
+func (s *Stub) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.findLive(req.Ref)
+	sess, err := s.findLive(clientID, req.GetRef())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if api.Terminal(sess.view.State) {
-		return nil // idempotent, as on the platform: ending an ended session is done
+	if api.Terminal(sess.view.GetState()) {
+		return &pb.EndSessionResponse{}, nil // idempotent, as on the platform: ending an ended session is done
 	}
-	reason := req.Reason
+	reason := req.GetReason()
 	if reason == pb.EndReason_END_REASON_UNSPECIFIED {
 		reason = api.EndEnded
 	}
@@ -284,61 +313,78 @@ func (s *Stub) EndSession(_ context.Context, req api.EndSessionRequest) error {
 	s.transition(sess, api.StateEnded, pb.Reason_REASON_UNSPECIFIED)
 	s.emit(sess, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason}}})
 	s.finish(sess)
-	return nil
+	return &pb.EndSessionResponse{}, nil
 }
 
-func (s *Stub) GetSession(_ context.Context, ref api.SessionRef) (api.SessionView, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(ref)
-	if err != nil {
-		return api.SessionView{}, err
-	}
-	return sess.view, nil
-}
-
-func (s *Stub) ListSessions(_ context.Context, req api.ListSessionsRequest) ([]api.SessionView, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []api.SessionView
-	for _, sess := range s.sessions {
-		if sess.clientID != req.ClientID {
-			continue
-		}
-		if req.LiveOnly && !api.Live(sess.view.State) {
-			continue
-		}
-		if !req.UpdatedSince.IsZero() && sess.updatedAt.Before(req.UpdatedSince) {
-			continue
-		}
-		out = append(out, sess.view)
-	}
-	// Ordered by id, which is creation order: a map's range order would make an
-	// otherwise-correct SDK test flake.
-	slices.SortFunc(out, func(a, b api.SessionView) int { return strings.Compare(a.ID, b.ID) })
-	return out, nil
-}
-
-func (s *Stub) ListTemplates(_ context.Context, _ string) ([]api.TemplateSummary, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]api.TemplateSummary(nil), s.tmpls...), nil
-}
-
-func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]*pb.Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
+func (s *Stub) GetSession(ctx context.Context, req *pb.GetSessionRequest) (*pb.GetSessionResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
 	if err != nil {
 		return nil, err
 	}
-	limit := req.Limit
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.find(clientID, req.GetRef())
+	if err != nil {
+		return nil, err
+	}
+	return &pb.GetSessionResponse{Session: proto.CloneOf(sess.view)}, nil
+}
+
+func (s *Stub) ListSessions(ctx context.Context, req *pb.ListSessionsRequest) (*pb.ListSessionsResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	since := api.Time(req.GetUpdatedSince())
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := &pb.ListSessionsResponse{Sessions: []*pb.SessionView{}}
+	for _, sess := range s.sessions {
+		if sess.clientID != clientID {
+			continue
+		}
+		if req.GetLiveOnly() && !api.Live(sess.view.GetState()) {
+			continue
+		}
+		if !since.IsZero() && sess.updatedAt.Before(since) {
+			continue
+		}
+		out.Sessions = append(out.Sessions, proto.CloneOf(sess.view))
+	}
+	// Ordered by id, which is creation order: a map's range order would make an
+	// otherwise-correct SDK test flake.
+	slices.SortFunc(out.Sessions, func(a, b *pb.SessionView) int { return strings.Compare(a.GetId(), b.GetId()) })
+	return out, nil
+}
+
+func (s *Stub) ListTemplates(ctx context.Context, _ *pb.ListTemplatesRequest) (*pb.ListTemplatesResponse, error) {
+	if _, err := apiserver.ClientID(ctx); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &pb.ListTemplatesResponse{Templates: append([]*pb.TemplateSummary(nil), s.tmpls...)}, nil
+}
+
+func (s *Stub) ListEvents(ctx context.Context, req *pb.ListEventsRequest) (*pb.ListEventsResponse, error) {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, err := s.find(clientID, req.GetRef())
+	if err != nil {
+		return nil, err
+	}
+	limit := int(req.GetLimit())
 	if limit <= 0 || limit > maxEventPage {
 		limit = maxEventPage
 	}
 	out := make([]*pb.Event, 0, min(limit, len(sess.events)))
 	for _, ev := range sess.events {
-		if ev.Seq <= req.AfterSeq {
+		if ev.GetSeq() <= req.GetAfterSeq() {
 			continue
 		}
 		if len(out) == limit {
@@ -346,20 +392,39 @@ func (s *Stub) ListEvents(_ context.Context, req api.EventsRequest) ([]*pb.Event
 		}
 		out = append(out, ev)
 	}
-	return out, nil
+	return &pb.ListEventsResponse{Events: out}, nil
 }
 
-func (s *Stub) Subscribe(_ context.Context, req api.SubscribeRequest) (api.Subscription, error) {
+// Subscribe resolves the request before anything goes on the stream, so a
+// refusal is an error the client sees at open; only then does apiserver.Stream
+// send the opening keepalive and serve the feed.
+func (s *Stub) Subscribe(ctx context.Context, req *pb.SubscribeRequest, stream *connect.ServerStream[pb.SubscribeResponse]) error {
+	clientID, err := apiserver.ClientID(ctx)
+	if err != nil {
+		return err
+	}
+	sub, err := s.subscribe(clientID, req)
+	if err != nil {
+		return err
+	}
+	defer sub.Close()
+	return server.Stream(ctx, stream, sub.Events())
+}
+
+// subscribe opens the stub's own feed of a session: the backlog after
+// req.after_seq, then everything the session goes on to say. A finished log's
+// feed closes once the backlog is delivered.
+func (s *Stub) subscribe(clientID string, req *pb.SubscribeRequest) (*subscription, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, err := s.find(req.Ref)
+	sess, err := s.find(clientID, req.GetRef())
 	if err != nil {
 		return nil, err
 	}
 
 	var backlog []*pb.Event
 	for _, ev := range sess.events {
-		if ev.Seq > req.AfterSeq {
+		if ev.GetSeq() > req.GetAfterSeq() {
 			backlog = append(backlog, ev)
 		}
 	}
@@ -471,7 +536,7 @@ func (s *subscription) pump() {
 
 // runTurn plays a turn out on the log. Called with the lock held.
 func (s *Stub) runTurn(sess *session, content string) string {
-	turn := fmt.Sprintf("%s-t%d", sess.view.ID, sess.turns+1)
+	turn := fmt.Sprintf("%s-t%d", sess.view.GetId(), sess.turns+1)
 
 	switch content {
 	case PromptPermission:
@@ -553,8 +618,8 @@ func (s *Stub) finishTurn(sess *session, turn string) {
 // time, and hands it to every subscriber. Called with the lock held.
 func (s *Stub) emit(sess *session, ev *pb.Event) {
 	at := s.tick()
-	ev.SessionId = sess.view.ID
-	ev.Seq = sess.view.LastSeq + 1
+	ev.SessionId = sess.view.GetId()
+	ev.Seq = sess.view.GetLastSeq() + 1
 	ev.Timestamp = timestamppb.New(at)
 	sess.view.LastSeq = ev.Seq
 	sess.updatedAt = at
@@ -575,7 +640,7 @@ func (s *Stub) broadcast(sess *session, ev *pb.Event) {
 // the event's "old" is what the session actually left rather than whatever the
 // last caller happened to leave on the view.
 func (s *Stub) transition(sess *session, next api.SessionState, reason api.Reason) {
-	prev := sess.view.State
+	prev := sess.view.GetState()
 	sess.view.State = next
 	s.emit(sess, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: prev, New: next, Reason: reason}}})
 }
@@ -609,31 +674,44 @@ func (s *Stub) peek() time.Time { return s.clock }
 // service's behaviour and worth a conformance test of its own: a client that
 // could tell "exists but not yours" from "does not exist" could enumerate
 // somebody else's conversations.
-func (s *Stub) find(ref api.SessionRef) (*session, error) {
-	if err := scriptedError(ref.SessionID); err != nil {
+func (s *Stub) find(clientID string, ref *pb.SessionRef) (*session, error) {
+	return s.resolve(clientID, ref, ref.GetIncludeTerminal())
+}
+
+// findLive is find for a verb that acts on a session. Such a verb operates on the
+// live session or on nothing, as SessionRef says, so include_terminal — which is
+// for reading history — is ignored rather than letting it act on an ended one.
+func (s *Stub) findLive(clientID string, ref *pb.SessionRef) (*session, error) {
+	return s.resolve(clientID, ref, false)
+}
+
+// resolve is find with include_terminal decided by the caller.
+func (s *Stub) resolve(clientID string, ref *pb.SessionRef, includeTerminal bool) (*session, error) {
+	sessionID, conversationRef := ref.GetSessionId(), ref.GetConversationRef()
+	if err := scriptedError(sessionID); err != nil {
 		return nil, err
 	}
 	switch {
-	case ref.SessionID == "" && ref.ConversationRef == "":
+	case sessionID == "" && conversationRef == "":
 		return nil, api.Errorf(api.ErrInvalidArgument, "a session id or a conversation ref is required")
-	case ref.SessionID != "" && ref.ConversationRef != "":
+	case sessionID != "" && conversationRef != "":
 		return nil, api.Errorf(api.ErrInvalidArgument, "exactly one of session id / conversation ref")
 	}
 
-	if ref.SessionID != "" {
-		sess, ok := s.sessions[ref.SessionID]
-		if !ok || sess.clientID != ref.ClientID {
-			return nil, api.Errorf(api.ErrNotFound, "no session %q", ref.SessionID)
+	if sessionID != "" {
+		sess, ok := s.sessions[sessionID]
+		if !ok || sess.clientID != clientID {
+			return nil, api.Errorf(api.ErrNotFound, "no session %q", sessionID)
 		}
 		return sess, nil
 	}
 
 	var best *session
 	for _, sess := range s.sessions {
-		if sess.clientID != ref.ClientID || sess.view.ConversationRef != ref.ConversationRef {
+		if sess.clientID != clientID || sess.view.GetConversationRef() != conversationRef {
 			continue
 		}
-		if !ref.IncludeTerminal && api.Terminal(sess.view.State) {
+		if !includeTerminal && api.Terminal(sess.view.GetState()) {
 			continue
 		}
 		if best == nil || sess.createdAt.After(best.createdAt) {
@@ -641,17 +719,9 @@ func (s *Stub) find(ref api.SessionRef) (*session, error) {
 		}
 	}
 	if best == nil {
-		return nil, api.Errorf(api.ErrNotFound, "no session for conversation %q", ref.ConversationRef)
+		return nil, api.Errorf(api.ErrNotFound, "no session for conversation %q", conversationRef)
 	}
 	return best, nil
-}
-
-// findLive is find for a verb that acts on a session. Such a verb operates on the
-// live session or on nothing, as SessionRef says, so IncludeTerminal — which is
-// for reading history — is ignored rather than letting it act on an ended one.
-func (s *Stub) findLive(ref api.SessionRef) (*session, error) {
-	ref.IncludeTerminal = false
-	return s.find(ref)
 }
 
 // scriptedError reads a sentinel ref and returns the published error it names.
@@ -660,7 +730,7 @@ func scriptedError(value string) error {
 	if !ok {
 		return nil
 	}
-	entry, ok := wire.Sentinels()[pb.Sentinel(pb.Sentinel_value[name])]
+	entry, ok := api.Sentinels()[pb.Sentinel(pb.Sentinel_value[name])]
 	if !ok {
 		return api.Errorf(api.ErrInvalidArgument, "%q names no published sentinel", name)
 	}

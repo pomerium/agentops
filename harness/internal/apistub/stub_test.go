@@ -16,7 +16,7 @@ import (
 	"github.com/pomerium/agentops/harness/api"
 	apiclient "github.com/pomerium/agentops/harness/api/client"
 	pb "github.com/pomerium/agentops/harness/api/pb"
-	"github.com/pomerium/agentops/harness/api/wire"
+	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
 	"github.com/pomerium/agentops/harness/internal/apistub"
 )
 
@@ -29,10 +29,9 @@ import (
 // a caller picks an identity and asks for a scenario, and the Go client has no
 // option for arbitrary headers — so they go on through a wrapped HTTP client,
 // which is also proof the wire needs nothing but headers to be driven.
-func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient.Config)) api.API {
+func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient.Config)) harnessapipbconnect.HarnessAPIServiceClient {
 	t.Helper()
-	log := slog.New(slog.NewTextHandler(&testWriter{t: t}, &slog.HandlerOptions{Level: slog.LevelError}))
-	ln, srv, err := apistub.Serve("127.0.0.1:0", apistub.New(), log)
+	ln, srv, err := apistub.Serve("127.0.0.1:0", apistub.New(), testLogger(t))
 	if err != nil {
 		t.Fatalf("apistub.Serve: %v", err)
 	}
@@ -40,11 +39,10 @@ func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient
 	t.Cleanup(func() { _ = srv.Close() })
 
 	base := "http://" + ln.Addr().String()
-	return func(headers map[string]string, opts ...func(*apiclient.Config)) api.API {
+	return func(headers map[string]string, opts ...func(*apiclient.Config)) harnessapipbconnect.HarnessAPIServiceClient {
 		cfg := apiclient.Config{
 			BaseURL:    base,
 			HTTPClient: headerClient{headers: headers},
-			Logger:     log,
 		}
 		for _, o := range opts {
 			o(&cfg)
@@ -69,16 +67,90 @@ func (h headerClient) Do(r *http.Request) (*http.Response, error) {
 	return http.DefaultClient.Do(r)
 }
 
-type testWriter struct{ t *testing.T }
+// testWriter goes quiet once its test ends: a subscription's reconnect loop can
+// still be winding down then, and a Logf after the test returns panics.
+type testWriter struct {
+	t    *testing.T
+	mu   sync.Mutex
+	done bool
+}
+
+func newTestWriter(t *testing.T) *testWriter {
+	w := &testWriter{t: t}
+	t.Cleanup(func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.done = true
+	})
+	return w
+}
 
 func (w *testWriter) Write(p []byte) (int, error) {
-	w.t.Logf("%s", p)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.done {
+		w.t.Logf("%s", p)
+	}
 	return len(p), nil
 }
 
-func briefKeepalive(cfg *apiclient.Config) {
-	cfg.KeepaliveInterval = 100 * time.Millisecond
-	cfg.MissedKeepalives = 3
+// testLogger routes errors into the test log and drops the rest: a reconnect
+// warning is what several tests provoke on purpose, and it is noise there.
+func testLogger(t *testing.T) *slog.Logger {
+	return slog.New(slog.NewTextHandler(newTestWriter(t), &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+// briefKeepalive shrinks the liveness window to 300ms, so a test of dead-stream
+// detection does not wait out the contract's minute.
+var briefKeepalive = apiclient.SubscribeOptions{
+	KeepaliveInterval: 100 * time.Millisecond,
+	MissedKeepalives:  3,
+}
+
+// subscribe opens the resumable feed of one session through client.Subscribe.
+func subscribe(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, id string, opts apiclient.SubscribeOptions) (*apiclient.Subscription, error) {
+	if opts.Logger == nil {
+		opts.Logger = testLogger(t)
+	}
+	return apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{Ref: byID(id)}, opts)
+}
+
+// byID is a ref to one session by its id.
+func byID(id string) *pb.SessionRef { return &pb.SessionRef{SessionId: id} }
+
+// listEvents reads a session's whole log, or fails the test.
+func listEvents(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, ref *pb.SessionRef) []*pb.Event {
+	t.Helper()
+	res, err := c.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	return res.GetEvents()
+}
+
+// create opens a session on a conversation with the defaults every test shares,
+// or fails the test.
+func create(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, req *pb.CreateSessionRequest) *pb.SessionView {
+	t.Helper()
+	if req.Template == "" {
+		req.Template = "runid"
+	}
+	if req.ApprovalPrompt == "" {
+		req.ApprovalPrompt = "ship it"
+	}
+	res, err := c.CreateSession(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	return res.GetSession()
+}
+
+// end ends a session by id, or fails the test.
+func end(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, id string) {
+	t.Helper()
+	if _, err := c.EndSession(ctx, &pb.EndSessionRequest{Ref: byID(id)}); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
 }
 
 // TestLifecycle is the shape every SDK's conformance suite mirrors: create, read
@@ -87,7 +159,7 @@ func TestLifecycle(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
+	created, err := c.CreateSession(ctx, &pb.CreateSessionRequest{
 		Template:        "runid",
 		ConversationRef: "conv-1",
 		ApprovalPrompt:  "ship it",
@@ -95,14 +167,12 @@ func TestLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if view.State != api.StatePending {
-		t.Errorf("a fresh session is %s, want pending", view.State)
+	view := created.GetSession()
+	if view.GetState() != api.StatePending {
+		t.Errorf("a fresh session is %s, want pending", view.GetState())
 	}
 
-	events, err := c.ListEvents(ctx, api.EventsRequest{Ref: api.SessionRef{SessionID: view.ID}})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
+	events := listEvents(ctx, t, c, byID(view.GetId()))
 	var approvalURL string
 	for _, ev := range events {
 		if p := ev.GetApprovalRequired(); p != nil {
@@ -115,55 +185,53 @@ func TestLifecycle(t *testing.T) {
 
 	// Seq is dense and ordered, which is what dedup-by-seq relies on.
 	for i, ev := range events {
-		if ev.Seq != int64(i+1) {
-			t.Fatalf("event %d has seq %d", i, ev.Seq)
+		if ev.GetSeq() != int64(i+1) {
+			t.Fatalf("event %d has seq %d", i, ev.GetSeq())
 		}
 	}
 
-	res, err := c.Prompt(ctx, api.PromptRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, Content: "do the thing",
-	})
+	res, err := c.Prompt(ctx, &pb.PromptRequest{Ref: byID(view.GetId()), Content: "do the thing"})
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-	if res.TurnID == "" {
+	if res.GetTurnId() == "" {
 		t.Error("Prompt returned no turn id")
 	}
 
-	if err := c.EndSession(ctx, api.EndSessionRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, Reason: api.EndEnded,
+	if _, err := c.EndSession(ctx, &pb.EndSessionRequest{
+		Ref: byID(view.GetId()), Reason: api.EndEnded,
 	}); err != nil {
 		t.Fatalf("EndSession: %v", err)
 	}
-	after, err := c.GetSession(ctx, api.SessionRef{SessionID: view.ID})
+	after, err := c.GetSession(ctx, &pb.GetSessionRequest{Ref: byID(view.GetId())})
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	if after.State != api.StateEnded {
-		t.Errorf("state after EndSession is %s, want ended", after.State)
+	if got := after.GetSession().GetState(); got != api.StateEnded {
+		t.Errorf("state after EndSession is %s, want ended", got)
 	}
 }
 
 // TestSentinels drives every published error over the wire and checks it still
 // satisfies the same errors.Is check on the far side — including the two pairs
-// that share a Connect code, which is the whole reason ErrorInfo exists.
+// that share a Connect code, which is the whole reason ErrorInfo exists — and
+// still carries its Connect code for a client that only reads codes.
 func TestSentinels(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	for sentinel, entry := range wire.Sentinels() {
+	for sentinel, entry := range api.Sentinels() {
 		name := sentinel.String()
 		t.Run(name, func(t *testing.T) {
-			_, err := c.GetSession(ctx, api.SessionRef{SessionID: apistub.SentinelPrefix + name})
+			_, err := c.GetSession(ctx, &pb.GetSessionRequest{Ref: byID(apistub.SentinelPrefix + name)})
 			if err == nil {
 				t.Fatalf("%s: no error", name)
 			}
 			if !errors.Is(err, entry.Err) {
 				t.Errorf("%s: got %v, which does not match its sentinel", name, err)
 			}
-			var cerr *connect.Error
-			if errors.As(err, &cerr) && cerr.Code() != entry.Code {
-				t.Errorf("%s: code %v, want %v", name, cerr.Code(), entry.Code)
+			if got := connect.CodeOf(err); got != entry.Code {
+				t.Errorf("%s: code %v, want %v", name, got, entry.Code)
 			}
 		})
 	}
@@ -178,29 +246,22 @@ func TestCrossClientIsNotFound(t *testing.T) {
 	alice := newClient(map[string]string{apistub.HeaderClient: "alice"})
 	bob := newClient(map[string]string{apistub.HeaderClient: "bob"})
 
-	view, err := alice.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
+	view := create(ctx, t, alice, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
 
-	if _, err := bob.GetSession(ctx, api.SessionRef{SessionID: view.ID}); !errors.Is(err, api.ErrNotFound) {
+	if _, err := bob.GetSession(ctx, &pb.GetSessionRequest{Ref: byID(view.GetId())}); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("GetSession as another client: %v, want ErrNotFound", err)
-	}
-	if _, err := bob.Subscribe(ctx, api.SubscribeRequest{
-		Ref: api.SessionRef{SessionID: view.ID},
-	}); !errors.Is(err, api.ErrNotFound) {
-		t.Errorf("Subscribe as another client: %v, want ErrNotFound", err)
 	}
 	// A refused subscribe fails at open, before any frame — which is what the
 	// server's opening keepalive is for.
-	sessions, err := bob.ListSessions(ctx, api.ListSessionsRequest{})
+	if _, err := subscribe(ctx, t, bob, view.GetId(), apiclient.SubscribeOptions{}); !errors.Is(err, api.ErrNotFound) {
+		t.Errorf("Subscribe as another client: %v, want ErrNotFound", err)
+	}
+	sessions, err := bob.ListSessions(ctx, &pb.ListSessionsRequest{})
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
-	if len(sessions) != 0 {
-		t.Errorf("another client listed %d sessions", len(sessions))
+	if n := len(sessions.GetSessions()); n != 0 {
+		t.Errorf("another client listed %d sessions", n)
 	}
 }
 
@@ -212,21 +273,14 @@ func TestSubscribeStopsOnSessionEnded(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	sub, err := c.Subscribe(ctx, api.SubscribeRequest{Ref: api.SessionRef{SessionID: view.ID}})
+	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
+	sub, err := subscribe(ctx, t, c, view.GetId(), apiclient.SubscribeOptions{})
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	defer sub.Close()
 
-	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}}); err != nil {
-		t.Fatalf("EndSession: %v", err)
-	}
+	end(ctx, t, c, view.GetId())
 
 	last := drain(t, sub, 5*time.Second)
 	if len(last) == 0 {
@@ -243,20 +297,13 @@ func TestSubscribeToFinishedLog(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}}); err != nil {
-		t.Fatalf("EndSession: %v", err)
-	}
+	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
+	end(ctx, t, c, view.GetId())
 
 	// From the end of the log: nothing to replay, and nothing will follow.
-	sub, err := c.Subscribe(ctx, api.SubscribeRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, AfterSeq: 1 << 30,
-	})
+	sub, err := apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{
+		Ref: byID(view.GetId()), AfterSeq: 1 << 30,
+	}, apiclient.SubscribeOptions{Logger: testLogger(t)})
 	if err != nil {
 		t.Fatalf("Subscribe to a finished log: %v, want success", err)
 	}
@@ -273,17 +320,10 @@ func TestResumeAfterDrop(t *testing.T) {
 	newClient := serve(t)
 	driver := newClient(nil)
 
-	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-		InitialPrompt: "do the thing",
+	view := create(ctx, t, driver, &pb.CreateSessionRequest{
+		ConversationRef: "conv-1", InitialPrompt: "do the thing",
 	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	full, err := driver.ListEvents(ctx, api.EventsRequest{Ref: api.SessionRef{SessionID: view.ID}})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
+	full := listEvents(ctx, t, driver, byID(view.GetId()))
 
 	// One-shot: the first connection dies after three envelopes, the reconnect
 	// works. Without the key a correct client would reconnect forever.
@@ -291,7 +331,7 @@ func TestResumeAfterDrop(t *testing.T) {
 		apistub.HeaderScenario:    "drop-after=3",
 		apistub.HeaderScenarioKey: "resume-test",
 	})
-	sub, err := reader.Subscribe(ctx, api.SubscribeRequest{Ref: api.SessionRef{SessionID: view.ID}})
+	sub, err := subscribe(ctx, t, reader, view.GetId(), apiclient.SubscribeOptions{})
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -300,7 +340,7 @@ func TestResumeAfterDrop(t *testing.T) {
 	go func() {
 		// Ended so the feed terminates and drain returns.
 		time.Sleep(3 * time.Second)
-		_ = driver.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}})
+		_, _ = driver.EndSession(ctx, &pb.EndSessionRequest{Ref: byID(view.GetId())})
 	}()
 
 	got := drain(t, sub, 20*time.Second)
@@ -311,13 +351,13 @@ func TestResumeAfterDrop(t *testing.T) {
 		t.Fatalf("delivered %d events, want at least the %d from before the drop", len(got), len(full))
 	}
 	for i, ev := range full {
-		if got[i].Seq != ev.Seq {
-			t.Fatalf("event %d has seq %d, want %d — the resume skipped or repeated", i, got[i].Seq, ev.Seq)
+		if got[i].GetSeq() != ev.GetSeq() {
+			t.Fatalf("event %d has seq %d, want %d — the resume skipped or repeated", i, got[i].GetSeq(), ev.GetSeq())
 		}
 	}
 	for i := 1; i < len(got); i++ {
-		if got[i].Seq <= got[i-1].Seq {
-			t.Fatalf("seq went %d then %d: a duplicate crossed the resume", got[i-1].Seq, got[i].Seq)
+		if got[i].GetSeq() <= got[i-1].GetSeq() {
+			t.Fatalf("seq went %d then %d: a duplicate crossed the resume", got[i-1].GetSeq(), got[i].GetSeq())
 		}
 	}
 }
@@ -329,19 +369,15 @@ func TestSilentStreamReconnects(t *testing.T) {
 	newClient := serve(t)
 	driver := newClient(nil)
 
-	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-		InitialPrompt: "do the thing",
+	view := create(ctx, t, driver, &pb.CreateSessionRequest{
+		ConversationRef: "conv-1", InitialPrompt: "do the thing",
 	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
 
 	reader := newClient(map[string]string{
 		apistub.HeaderScenario:    apistub.ScenarioSilent,
 		apistub.HeaderScenarioKey: "silent-test",
-	}, briefKeepalive)
-	sub, err := reader.Subscribe(ctx, api.SubscribeRequest{Ref: api.SessionRef{SessionID: view.ID}})
+	})
+	sub, err := subscribe(ctx, t, reader, view.GetId(), briefKeepalive)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -349,15 +385,15 @@ func TestSilentStreamReconnects(t *testing.T) {
 
 	go func() {
 		time.Sleep(3 * time.Second)
-		_ = driver.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}})
+		_, _ = driver.EndSession(ctx, &pb.EndSessionRequest{Ref: byID(view.GetId())})
 	}()
 
 	got := drain(t, sub, 20*time.Second)
 	if len(got) == 0 {
 		t.Fatal("nothing arrived: the client never gave up on a silent stream")
 	}
-	if got[0].Seq != 1 {
-		t.Errorf("the resumed feed starts at seq %d, want 1", got[0].Seq)
+	if got[0].GetSeq() != 1 {
+		t.Errorf("the resumed feed starts at seq %d, want 1", got[0].GetSeq())
 	}
 }
 
@@ -370,23 +406,20 @@ func TestUnknownFieldAndEventTolerated(t *testing.T) {
 	newClient := serve(t)
 	c := newClient(map[string]string{apistub.HeaderScenario: apistub.ScenarioUnknownField})
 
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
+	res, err := c.CreateSession(ctx, &pb.CreateSessionRequest{
 		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
 		InitialPrompt: apistub.PromptUnknownEvent,
 	})
 	if err != nil {
 		t.Fatalf("CreateSession with an unknown field in the response: %v", err)
 	}
-	if view.ID == "" {
+	view := res.GetSession()
+	if view.GetId() == "" {
 		t.Fatal("the response decoded to an empty view")
 	}
 
-	events, err := c.ListEvents(ctx, api.EventsRequest{Ref: api.SessionRef{SessionID: view.ID}})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
 	var sawFuture bool
-	for _, ev := range events {
+	for _, ev := range listEvents(ctx, t, c, byID(view.GetId())) {
 		if ev.GetPayload() == nil && len(ev.ProtoReflect().GetUnknown()) > 0 {
 			sawFuture = true
 		}
@@ -403,26 +436,19 @@ func TestZeroValuedEvent(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	sub, err := c.Subscribe(ctx, api.SubscribeRequest{Ref: api.SessionRef{SessionID: view.ID}})
+	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
+	sub, err := subscribe(ctx, t, c, view.GetId(), apiclient.SubscribeOptions{})
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	defer sub.Close()
 
-	if _, err := c.Prompt(ctx, api.PromptRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, Content: apistub.PromptZeroEvent,
+	if _, err := c.Prompt(ctx, &pb.PromptRequest{
+		Ref: byID(view.GetId()), Content: apistub.PromptZeroEvent,
 	}); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}}); err != nil {
-		t.Fatalf("EndSession: %v", err)
-	}
+	end(ctx, t, c, view.GetId())
 
 	got := drain(t, sub, 5*time.Second)
 	// The zero event's seq of 0 is at or below everything already delivered, so a
@@ -435,7 +461,7 @@ func TestZeroValuedEvent(t *testing.T) {
 		t.Errorf("the feed ended on %s, want session_ended", api.Kind(last))
 	}
 	for _, ev := range got {
-		if ev.Seq == 0 {
+		if ev.GetSeq() == 0 {
 			t.Error("an event with seq 0 was delivered; dedup should have dropped it")
 		}
 	}
@@ -447,20 +473,13 @@ func TestPermissionRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-		InitialPrompt: apistub.PromptPermission,
+	view := create(ctx, t, c, &pb.CreateSessionRequest{
+		ConversationRef: "conv-1", InitialPrompt: apistub.PromptPermission,
 	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
+	ref := byID(view.GetId())
 
-	events, err := c.ListEvents(ctx, api.EventsRequest{Ref: api.SessionRef{SessionID: view.ID}})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
 	var req *pb.PermissionRequest
-	for _, ev := range events {
+	for _, ev := range listEvents(ctx, t, c, ref) {
 		if p := ev.GetPermissionRequest(); p != nil {
 			req = p
 		}
@@ -471,28 +490,21 @@ func TestPermissionRoundTrip(t *testing.T) {
 	if req.GetRequestId() == "" {
 		t.Fatal("no permission_request on the log")
 	}
-	if len(req.Options) == 0 {
+	if len(req.GetOptions()) == 0 {
 		t.Error("the permission request offered no options")
 	}
 
-	if err := c.RespondPermission(ctx, api.RespondPermissionRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, RequestID: req.GetRequestId(), OptionID: "allow",
-	}); err != nil {
+	answer := &pb.RespondPermissionRequest{Ref: ref, RequestId: req.GetRequestId(), OptionId: "allow"}
+	if _, err := c.RespondPermission(ctx, answer); err != nil {
 		t.Fatalf("RespondPermission: %v", err)
 	}
 	// Answering twice is an unknown request, not a second decision.
-	if err := c.RespondPermission(ctx, api.RespondPermissionRequest{
-		Ref: api.SessionRef{SessionID: view.ID}, RequestID: req.GetRequestId(), OptionID: "allow",
-	}); !errors.Is(err, api.ErrUnknownRequest) {
+	if _, err := c.RespondPermission(ctx, answer); !errors.Is(err, api.ErrUnknownRequest) {
 		t.Errorf("answering twice: %v, want ErrUnknownRequest", err)
 	}
 
-	events, err = c.ListEvents(ctx, api.EventsRequest{Ref: api.SessionRef{SessionID: view.ID}})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
 	var resolved, completed bool
-	for _, ev := range events {
+	for _, ev := range listEvents(ctx, t, c, ref) {
 		switch ev.GetPayload().(type) {
 		case *pb.Event_PermissionResolved:
 			resolved = true
@@ -510,7 +522,7 @@ func TestConflict(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
 
-	req := api.CreateSessionRequest{
+	req := &pb.CreateSessionRequest{
 		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
 	}
 	if _, err := c.CreateSession(ctx, req); err != nil {
@@ -522,7 +534,7 @@ func TestConflict(t *testing.T) {
 }
 
 // drain collects a feed until it closes or the budget runs out.
-func drain(t *testing.T, sub api.Subscription, budget time.Duration) []*pb.Event {
+func drain(t *testing.T, sub *apiclient.Subscription, budget time.Duration) []*pb.Event {
 	t.Helper()
 	var out []*pb.Event
 	deadline := time.After(budget)
@@ -572,23 +584,14 @@ func TestALostPromptResponseIsNotRetried(t *testing.T) {
 		cfg.HTTPClient = &lossyHTTPClient{}
 	})
 
-	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "lossy", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{SessionID: view.ID}
-	if _, err := lossy.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "deploy"}); err == nil {
+	view := create(ctx, t, driver, &pb.CreateSessionRequest{ConversationRef: "lossy"})
+	ref := byID(view.GetId())
+	if _, err := lossy.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "deploy"}); err == nil {
 		t.Error("Prompt reported success for a response that never arrived")
 	}
 
-	events, err := driver.ListEvents(ctx, api.EventsRequest{Ref: ref})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
 	turns := 0
-	for _, ev := range events {
+	for _, ev := range listEvents(ctx, t, driver, ref) {
 		if ev.GetTurnCompleted() != nil {
 			turns++
 		}
@@ -609,24 +612,15 @@ func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 		cfg.HTTPClient = &lossyHTTPClient{}
 	})
 
-	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "lossy", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{SessionID: view.ID}
-	res, err := lossy.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "deploy", IdempotencyKey: "msg-1"})
+	view := create(ctx, t, driver, &pb.CreateSessionRequest{ConversationRef: "lossy"})
+	ref := byID(view.GetId())
+	res, err := lossy.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "deploy", IdempotencyKey: "msg-1"})
 	if err != nil {
 		t.Fatalf("Prompt with a key was not retried past a lost response: %v", err)
 	}
 
-	events, err := driver.ListEvents(ctx, api.EventsRequest{Ref: ref})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
 	var turns []string
-	for _, ev := range events {
+	for _, ev := range listEvents(ctx, t, driver, ref) {
 		if ev.GetTurnCompleted() != nil {
 			turns = append(turns, ev.GetTurnId())
 		}
@@ -634,8 +628,8 @@ func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 	if len(turns) != 1 {
 		t.Fatalf("one keyed prompt ran %d turns", len(turns))
 	}
-	if turns[0] != res.TurnID {
-		t.Errorf("the retry returned turn %q; the turn that ran is %q", res.TurnID, turns[0])
+	if turns[0] != res.GetTurnId() {
+		t.Errorf("the retry returned turn %q; the turn that ran is %q", res.GetTurnId(), turns[0])
 	}
 }
 
@@ -645,107 +639,19 @@ func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 func TestActingVerbsIgnoreIncludeTerminal(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "ended", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: api.SessionRef{SessionID: view.ID}}); err != nil {
-		t.Fatalf("EndSession: %v", err)
-	}
+	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "ended"})
+	end(ctx, t, c, view.GetId())
 
-	ref := api.SessionRef{ConversationRef: "ended", IncludeTerminal: true}
-	if err := c.EndSession(ctx, api.EndSessionRequest{Ref: ref}); !errors.Is(err, api.ErrNotFound) {
+	ref := &pb.SessionRef{ConversationRef: "ended", IncludeTerminal: true}
+	if _, err := c.EndSession(ctx, &pb.EndSessionRequest{Ref: ref}); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("EndSession on an ended conversation: %v, want ErrNotFound", err)
 	}
-	if _, err := c.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "hi"}); !errors.Is(err, api.ErrNotFound) {
+	if _, err := c.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "hi"}); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("Prompt on an ended conversation: %v, want ErrNotFound", err)
 	}
 	// Reading history is what the flag is for, and that still works.
-	if got, err := c.GetSession(ctx, ref); err != nil || got.ID != view.ID {
-		t.Errorf("GetSession with include_terminal: %v, %v", got.ID, err)
-	}
-}
-
-// TestEndedEventLeavesALiveFeedOpen: the stub does not close a live feed after
-// session_ended, so a client that waits for end-of-stream instead of stopping on
-// the event hangs here rather than passing by accident.
-func TestEndedEventLeavesALiveFeedOpen(t *testing.T) {
-	s := apistub.New()
-	ctx := context.Background()
-	v, err := s.CreateSession(ctx, api.CreateSessionRequest{
-		ClientID: "a", Template: "runid", ConversationRef: "c", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{ClientID: "a", SessionID: v.ID}
-	sub, err := s.Subscribe(ctx, api.SubscribeRequest{Ref: ref})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer sub.Close()
-	if err := s.EndSession(ctx, api.EndSessionRequest{Ref: ref}); err != nil {
-		t.Fatalf("EndSession: %v", err)
-	}
-	for ev := range sub.Events() {
-		if ev.GetSessionEnded() == nil {
-			continue
-		}
-		select {
-		case _, open := <-sub.Events():
-			if !open {
-				t.Fatal("the feed closed right after session_ended")
-			}
-		case <-time.After(50 * time.Millisecond):
-		}
-		return
-	}
-	t.Fatal("the feed closed before session_ended arrived")
-}
-
-// TestAnUnreadSubscriberDoesNotBreakPrompts: a test that stops reading its feed
-// does not make the stub panic, however much the session goes on to say.
-func TestAnUnreadSubscriberDoesNotBreakPrompts(t *testing.T) {
-	s := apistub.New()
-	ctx := context.Background()
-	v, err := s.CreateSession(ctx, api.CreateSessionRequest{
-		ClientID: "a", Template: "runid", ConversationRef: "c", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{ClientID: "a", SessionID: v.ID}
-	sub, err := s.Subscribe(ctx, api.SubscribeRequest{Ref: ref})
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-	defer sub.Close()
-	defer func() {
-		if p := recover(); p != nil {
-			t.Fatalf("a prompt panicked: %v", p)
-		}
-	}()
-	for range 100 {
-		if _, err := s.Prompt(ctx, api.PromptRequest{Ref: ref, Content: "work"}); err != nil {
-			t.Fatalf("Prompt: %v", err)
-		}
-	}
-	// Nothing was dropped: the whole log arrives, in order.
-	logged, err := s.ListEvents(ctx, api.EventsRequest{Ref: ref, Limit: 10000})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
-	for i := range logged {
-		select {
-		case ev := <-sub.Events():
-			if ev.Seq != int64(i+1) {
-				t.Fatalf("event %d arrived as seq %d", i+1, ev.Seq)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("the feed stopped after %d of %d events", i, len(logged))
-		}
+	if got, err := c.GetSession(ctx, &pb.GetSessionRequest{Ref: ref}); err != nil || got.GetSession().GetId() != view.GetId() {
+		t.Errorf("GetSession with include_terminal: %v, %v", got.GetSession().GetId(), err)
 	}
 }
 
@@ -754,15 +660,9 @@ func TestAnUnreadSubscriberDoesNotBreakPrompts(t *testing.T) {
 func TestEndSessionIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
-	view, err := c.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "twice", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	ref := api.SessionRef{SessionID: view.ID}
+	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "twice"})
 	for i := range 2 {
-		if err := c.EndSession(ctx, api.EndSessionRequest{Ref: ref}); err != nil {
+		if _, err := c.EndSession(ctx, &pb.EndSessionRequest{Ref: byID(view.GetId())}); err != nil {
 			t.Fatalf("EndSession #%d: %v", i+1, err)
 		}
 	}

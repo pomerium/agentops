@@ -123,7 +123,7 @@ func parseScenario(raw string) (scenario, bool) {
 // scenarios is the middleware that produces the scripted wire conditions.
 //
 // It works on the response BYTES rather than through the service, because that
-// is the only place these conditions live: api.API cannot express "this stream
+// is the only place these conditions live: a handler cannot express "this stream
 // dies now", and the generated types cannot express "carrying a field that does
 // not exist yet". Framing is the Connect envelope — one flags byte, four bytes
 // of big-endian length, the message — in both directions.

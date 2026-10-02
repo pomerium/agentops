@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pomerium/agentops/harness/api"
+	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/internal/apistub"
 )
 
@@ -21,20 +21,15 @@ func TestSubscribeOpenDeadline(t *testing.T) {
 	newClient := serve(t)
 	driver := newClient(nil)
 
-	view, err := driver.CreateSession(ctx, api.CreateSessionRequest{
-		Template: "runid", ConversationRef: "conv-1", ApprovalPrompt: "ship it",
-	})
-	if err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
+	view := create(ctx, t, driver, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
 
 	reader := newClient(map[string]string{
 		apistub.HeaderScenario: apistub.ScenarioMute,
-	}, briefKeepalive)
+	})
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := reader.Subscribe(ctx, api.SubscribeRequest{Ref: api.SessionRef{SessionID: view.ID}})
+		_, err := subscribe(ctx, t, reader, view.GetId(), briefKeepalive)
 		done <- err
 	}()
 

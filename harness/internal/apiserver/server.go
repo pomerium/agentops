@@ -3,9 +3,9 @@
 // It is the platform's edge: everything a Slack bot, a web app or a CI bot can
 // do arrives here, behind a Pomerium route that stamps a verified identity onto
 // every request. The package owns three things and no session semantics at all —
-// identity (whose call is this), translation (proto in, api types out), and the
-// operational surface (health, metrics). The verbs themselves belong to the
-// service it wraps.
+// identity (whose call is this, read back with ClientID), the published error
+// set on the wire, and the operational surface (health, metrics). The verbs
+// themselves belong to the implementation it serves.
 package apiserver
 
 import (
@@ -18,14 +18,14 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/pomerium/agentops/harness/api"
 	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
+	"github.com/pomerium/agentops/harness/api/server"
 )
 
 // Config configures the API server.
 type Config struct {
-	// API is the implementation every verb is forwarded to.
-	API api.API
+	// Service implements the verbs: the platform, or the conformance stub.
+	Service harnessapipbconnect.HarnessAPIServiceHandler
 	// Identify resolves a request's client id. Required: a server that cannot
 	// identify its callers would have to invent an identity, and every session in
 	// the system is scoped to one.
@@ -48,8 +48,8 @@ type Server struct {
 
 // New builds the server.
 func New(cfg Config) (*Server, error) {
-	if cfg.API == nil {
-		return nil, errors.New("apiserver: an API implementation is required")
+	if cfg.Service == nil {
+		return nil, errors.New("apiserver: a Service implementation is required")
 	}
 	if cfg.Identify == nil {
 		return nil, errors.New("apiserver: an Identify function is required")
@@ -63,14 +63,16 @@ func New(cfg Config) (*Server, error) {
 	// per-verb series are what a deployment watches while it works out which
 	// subject Pomerium mints, and an unauthenticated call that never reached a
 	// counter is invisible exactly when it matters most.
+	// Errors next, so metrics count the code a client actually receives.
 	interceptors := []connect.Interceptor{
+		server.ErrorInterceptor(),
 		&identityInterceptor{identify: cfg.Identify, log: s.log, seen: &seenClients{}},
 	}
 	if cfg.Metrics != nil {
 		interceptors = append([]connect.Interceptor{cfg.Metrics.interceptor()}, interceptors...)
 	}
 	path, svc := harnessapipbconnect.NewHarnessAPIServiceHandler(
-		&handler{svc: cfg.API}, connect.WithInterceptors(interceptors...))
+		cfg.Service, connect.WithInterceptors(interceptors...))
 
 	mux := http.NewServeMux()
 	mux.Handle(path, svc)

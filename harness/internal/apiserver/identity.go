@@ -24,13 +24,26 @@ type Identify func(ctx context.Context, h http.Header) (string, error)
 // clientIDKey carries the verified client id down the request context.
 type clientIDKey struct{}
 
-// clientIDFrom reads the verified client id a request was admitted under. The
-// second return is false only for a request that never went through the
-// middleware, which the handler treats as a programming error rather than as an
-// anonymous caller.
-func clientIDFrom(ctx context.Context) (string, bool) {
+// ClientID returns the verified caller a request was admitted under. Every verb
+// of a Harness API implementation scopes itself to it; no request message has a
+// field for one, and this is the reason.
+//
+// A context the identity interceptor never saw is refused rather than defaulted:
+// a nameless caller must not become a client with an empty id, which would
+// collide with every other nameless caller. Reached only through a
+// misconfiguration, but stated.
+func ClientID(ctx context.Context) (string, error) {
 	id, ok := ctx.Value(clientIDKey{}).(string)
-	return id, ok && id != ""
+	if !ok || id == "" {
+		return "", connect.NewError(connect.CodeUnauthenticated, ErrNoIdentity)
+	}
+	return id, nil
+}
+
+// WithClientID admits a caller without the interceptor: for calling an
+// implementation in-process, as its own tests do.
+func WithClientID(ctx context.Context, clientID string) context.Context {
+	return context.WithValue(ctx, clientIDKey{}, clientID)
 }
 
 // identityInterceptor turns Pomerium's assertion into the one client identity
@@ -66,7 +79,7 @@ func (i *identityInterceptor) admit(ctx context.Context, h http.Header, procedur
 		i.log.InfoContext(ctx, "admitted a client on the harness API",
 			"client_id", clientID, "procedure", procedure)
 	}
-	return context.WithValue(ctx, clientIDKey{}, clientID), nil
+	return WithClientID(ctx, clientID), nil
 }
 
 func (i *identityInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {

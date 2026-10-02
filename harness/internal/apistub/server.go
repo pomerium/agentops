@@ -27,7 +27,7 @@ func Serve(addr string, stub *Stub, log *slog.Logger) (net.Listener, *http.Serve
 		return nil, nil, err
 	}
 	srv, err := apiserver.New(apiserver.Config{
-		API:      stub,
+		Service:  stub,
 		Identify: HeaderIdentity,
 		Logger:   log,
 	})
