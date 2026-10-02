@@ -173,7 +173,7 @@ type HarnessAPIServiceClient interface {
 	// template), SENTINEL_QUOTA_EXCEEDED (a ClientBinding cap: live sessions,
 	// outstanding approvals, or creates per minute), SENTINEL_CONFLICT (the
 	// conversation already has a live session), SENTINEL_UNAVAILABLE.
-	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
+	CreateSession(context.Context, *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error)
 	// Prompt sends one turn to the agent.
 	//
 	// On a running session it opens a turn and returns its id at once; the turn's
@@ -193,7 +193,7 @@ type HarnessAPIServiceClient interface {
 	// SENTINEL_NOT_REVIVABLE (suspended, but it cannot be continued — start a new
 	// session), SENTINEL_QUOTA_EXCEEDED (a revive over a cap),
 	// SENTINEL_UNAVAILABLE.
-	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
+	Prompt(context.Context, *pb.PromptRequest) (*pb.PromptResponse, error)
 	// RespondPermission answers an outstanding tool-call permission request: the
 	// agent asked (a permission_request event) and is blocked until the client
 	// relays a choice among the offered options — usually the user's. Who inside
@@ -209,36 +209,36 @@ type HarnessAPIServiceClient interface {
 	//
 	// Errors: SENTINEL_INVALID_ARGUMENT (no request_id), SENTINEL_NOT_FOUND,
 	// SENTINEL_UNKNOWN_REQUEST, SENTINEL_UNAVAILABLE.
-	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
+	RespondPermission(context.Context, *pb.RespondPermissionRequest) (*pb.RespondPermissionResponse, error)
 	// EndSession ends a session: its pod and its workspace are released, and the
 	// log closes with a session_ended event. Ending a session that has already
 	// ended succeeds and changes nothing.
 	//
 	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
-	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
+	EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error)
 	// GetSession returns one session, by id or by conversation ref.
 	//
 	// Errors: SENTINEL_INVALID_ARGUMENT (neither or both of session_id and
 	// conversation_ref), SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
-	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
+	GetSession(context.Context, *pb.GetSessionRequest) (*pb.GetSessionResponse, error)
 	// ListSessions enumerates the calling client's sessions, newest first, and
 	// nobody else's.
 	//
 	// Errors: SENTINEL_UNAVAILABLE.
-	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
+	ListSessions(context.Context, *pb.ListSessionsRequest) (*pb.ListSessionsResponse, error)
 	// ListTemplates reports the agent templates this client may run: exactly the
 	// names CreateSession accepts in its template field.
 	//
 	// Errors: SENTINEL_FORBIDDEN (this client has no ClientBinding),
 	// SENTINEL_UNAVAILABLE.
-	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
+	ListTemplates(context.Context, *pb.ListTemplatesRequest) (*pb.ListTemplatesResponse, error)
 	// ListEvents reads one page of a session's event history, in sequence order.
 	// Page by passing the last seq you received as after_seq; an empty page means
 	// you have everything so far. It is the polling alternative to Subscribe, for
 	// a client that cannot hold a stream open.
 	//
 	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
-	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
+	ListEvents(context.Context, *pb.ListEventsRequest) (*pb.ListEventsResponse, error)
 	// Subscribe streams a session's events: everything after after_seq first,
 	// then each new event as it is recorded.
 	//
@@ -257,7 +257,7 @@ type HarnessAPIServiceClient interface {
 	//
 	// Errors: SENTINEL_INVALID_ARGUMENT, SENTINEL_NOT_FOUND,
 	// SENTINEL_UNAVAILABLE.
-	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest]) (*connect.ServerStreamForClient[pb.SubscribeResponse], error)
+	Subscribe(context.Context, *pb.SubscribeRequest) (*connect.ServerStreamForClient[pb.SubscribeResponse], error)
 }
 
 // NewHarnessAPIServiceClient constructs a client for the harnessapi.v1.HarnessAPIService service.
@@ -342,48 +342,80 @@ type harnessAPIServiceClient struct {
 }
 
 // CreateSession calls harnessapi.v1.HarnessAPIService.CreateSession.
-func (c *harnessAPIServiceClient) CreateSession(ctx context.Context, req *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error) {
-	return c.createSession.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) CreateSession(ctx context.Context, req *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error) {
+	response, err := c.createSession.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // Prompt calls harnessapi.v1.HarnessAPIService.Prompt.
-func (c *harnessAPIServiceClient) Prompt(ctx context.Context, req *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error) {
-	return c.prompt.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) Prompt(ctx context.Context, req *pb.PromptRequest) (*pb.PromptResponse, error) {
+	response, err := c.prompt.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // RespondPermission calls harnessapi.v1.HarnessAPIService.RespondPermission.
-func (c *harnessAPIServiceClient) RespondPermission(ctx context.Context, req *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error) {
-	return c.respondPermission.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) RespondPermission(ctx context.Context, req *pb.RespondPermissionRequest) (*pb.RespondPermissionResponse, error) {
+	response, err := c.respondPermission.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // EndSession calls harnessapi.v1.HarnessAPIService.EndSession.
-func (c *harnessAPIServiceClient) EndSession(ctx context.Context, req *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error) {
-	return c.endSession.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
+	response, err := c.endSession.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // GetSession calls harnessapi.v1.HarnessAPIService.GetSession.
-func (c *harnessAPIServiceClient) GetSession(ctx context.Context, req *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error) {
-	return c.getSession.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) GetSession(ctx context.Context, req *pb.GetSessionRequest) (*pb.GetSessionResponse, error) {
+	response, err := c.getSession.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // ListSessions calls harnessapi.v1.HarnessAPIService.ListSessions.
-func (c *harnessAPIServiceClient) ListSessions(ctx context.Context, req *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error) {
-	return c.listSessions.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) ListSessions(ctx context.Context, req *pb.ListSessionsRequest) (*pb.ListSessionsResponse, error) {
+	response, err := c.listSessions.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // ListTemplates calls harnessapi.v1.HarnessAPIService.ListTemplates.
-func (c *harnessAPIServiceClient) ListTemplates(ctx context.Context, req *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error) {
-	return c.listTemplates.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) ListTemplates(ctx context.Context, req *pb.ListTemplatesRequest) (*pb.ListTemplatesResponse, error) {
+	response, err := c.listTemplates.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // ListEvents calls harnessapi.v1.HarnessAPIService.ListEvents.
-func (c *harnessAPIServiceClient) ListEvents(ctx context.Context, req *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error) {
-	return c.listEvents.CallUnary(ctx, req)
+func (c *harnessAPIServiceClient) ListEvents(ctx context.Context, req *pb.ListEventsRequest) (*pb.ListEventsResponse, error) {
+	response, err := c.listEvents.CallUnary(ctx, connect.NewRequest(req))
+	if response != nil {
+		return response.Msg, err
+	}
+	return nil, err
 }
 
 // Subscribe calls harnessapi.v1.HarnessAPIService.Subscribe.
-func (c *harnessAPIServiceClient) Subscribe(ctx context.Context, req *connect.Request[pb.SubscribeRequest]) (*connect.ServerStreamForClient[pb.SubscribeResponse], error) {
-	return c.subscribe.CallServerStream(ctx, req)
+func (c *harnessAPIServiceClient) Subscribe(ctx context.Context, req *pb.SubscribeRequest) (*connect.ServerStreamForClient[pb.SubscribeResponse], error) {
+	return c.subscribe.CallServerStream(ctx, connect.NewRequest(req))
 }
 
 // HarnessAPIServiceHandler is an implementation of the harnessapi.v1.HarnessAPIService service.
@@ -403,7 +435,7 @@ type HarnessAPIServiceHandler interface {
 	// template), SENTINEL_QUOTA_EXCEEDED (a ClientBinding cap: live sessions,
 	// outstanding approvals, or creates per minute), SENTINEL_CONFLICT (the
 	// conversation already has a live session), SENTINEL_UNAVAILABLE.
-	CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error)
+	CreateSession(context.Context, *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error)
 	// Prompt sends one turn to the agent.
 	//
 	// On a running session it opens a turn and returns its id at once; the turn's
@@ -423,7 +455,7 @@ type HarnessAPIServiceHandler interface {
 	// SENTINEL_NOT_REVIVABLE (suspended, but it cannot be continued — start a new
 	// session), SENTINEL_QUOTA_EXCEEDED (a revive over a cap),
 	// SENTINEL_UNAVAILABLE.
-	Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error)
+	Prompt(context.Context, *pb.PromptRequest) (*pb.PromptResponse, error)
 	// RespondPermission answers an outstanding tool-call permission request: the
 	// agent asked (a permission_request event) and is blocked until the client
 	// relays a choice among the offered options — usually the user's. Who inside
@@ -439,36 +471,36 @@ type HarnessAPIServiceHandler interface {
 	//
 	// Errors: SENTINEL_INVALID_ARGUMENT (no request_id), SENTINEL_NOT_FOUND,
 	// SENTINEL_UNKNOWN_REQUEST, SENTINEL_UNAVAILABLE.
-	RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error)
+	RespondPermission(context.Context, *pb.RespondPermissionRequest) (*pb.RespondPermissionResponse, error)
 	// EndSession ends a session: its pod and its workspace are released, and the
 	// log closes with a session_ended event. Ending a session that has already
 	// ended succeeds and changes nothing.
 	//
 	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
-	EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error)
+	EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error)
 	// GetSession returns one session, by id or by conversation ref.
 	//
 	// Errors: SENTINEL_INVALID_ARGUMENT (neither or both of session_id and
 	// conversation_ref), SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
-	GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error)
+	GetSession(context.Context, *pb.GetSessionRequest) (*pb.GetSessionResponse, error)
 	// ListSessions enumerates the calling client's sessions, newest first, and
 	// nobody else's.
 	//
 	// Errors: SENTINEL_UNAVAILABLE.
-	ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error)
+	ListSessions(context.Context, *pb.ListSessionsRequest) (*pb.ListSessionsResponse, error)
 	// ListTemplates reports the agent templates this client may run: exactly the
 	// names CreateSession accepts in its template field.
 	//
 	// Errors: SENTINEL_FORBIDDEN (this client has no ClientBinding),
 	// SENTINEL_UNAVAILABLE.
-	ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error)
+	ListTemplates(context.Context, *pb.ListTemplatesRequest) (*pb.ListTemplatesResponse, error)
 	// ListEvents reads one page of a session's event history, in sequence order.
 	// Page by passing the last seq you received as after_seq; an empty page means
 	// you have everything so far. It is the polling alternative to Subscribe, for
 	// a client that cannot hold a stream open.
 	//
 	// Errors: SENTINEL_NOT_FOUND, SENTINEL_UNAVAILABLE.
-	ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error)
+	ListEvents(context.Context, *pb.ListEventsRequest) (*pb.ListEventsResponse, error)
 	// Subscribe streams a session's events: everything after after_seq first,
 	// then each new event as it is recorded.
 	//
@@ -487,7 +519,7 @@ type HarnessAPIServiceHandler interface {
 	//
 	// Errors: SENTINEL_INVALID_ARGUMENT, SENTINEL_NOT_FOUND,
 	// SENTINEL_UNAVAILABLE.
-	Subscribe(context.Context, *connect.Request[pb.SubscribeRequest], *connect.ServerStream[pb.SubscribeResponse]) error
+	Subscribe(context.Context, *pb.SubscribeRequest, *connect.ServerStream[pb.SubscribeResponse]) error
 }
 
 // NewHarnessAPIServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -497,55 +529,55 @@ type HarnessAPIServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewHarnessAPIServiceHandler(svc HarnessAPIServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	harnessAPIServiceMethods := pb.File_harnessapi_v1_harnessapi_proto.Services().ByName("HarnessAPIService").Methods()
-	harnessAPIServiceCreateSessionHandler := connect.NewUnaryHandler(
+	harnessAPIServiceCreateSessionHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceCreateSessionProcedure,
 		svc.CreateSession,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("CreateSession")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServicePromptHandler := connect.NewUnaryHandler(
+	harnessAPIServicePromptHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServicePromptProcedure,
 		svc.Prompt,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("Prompt")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceRespondPermissionHandler := connect.NewUnaryHandler(
+	harnessAPIServiceRespondPermissionHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceRespondPermissionProcedure,
 		svc.RespondPermission,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("RespondPermission")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceEndSessionHandler := connect.NewUnaryHandler(
+	harnessAPIServiceEndSessionHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceEndSessionProcedure,
 		svc.EndSession,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("EndSession")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceGetSessionHandler := connect.NewUnaryHandler(
+	harnessAPIServiceGetSessionHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceGetSessionProcedure,
 		svc.GetSession,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("GetSession")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceListSessionsHandler := connect.NewUnaryHandler(
+	harnessAPIServiceListSessionsHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceListSessionsProcedure,
 		svc.ListSessions,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListSessions")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceListTemplatesHandler := connect.NewUnaryHandler(
+	harnessAPIServiceListTemplatesHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceListTemplatesProcedure,
 		svc.ListTemplates,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListTemplates")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceListEventsHandler := connect.NewUnaryHandler(
+	harnessAPIServiceListEventsHandler := connect.NewUnaryHandlerSimple(
 		HarnessAPIServiceListEventsProcedure,
 		svc.ListEvents,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("ListEvents")),
 		connect.WithHandlerOptions(opts...),
 	)
-	harnessAPIServiceSubscribeHandler := connect.NewServerStreamHandler(
+	harnessAPIServiceSubscribeHandler := connect.NewServerStreamHandlerSimple(
 		HarnessAPIServiceSubscribeProcedure,
 		svc.Subscribe,
 		connect.WithSchema(harnessAPIServiceMethods.ByName("Subscribe")),
@@ -580,38 +612,38 @@ func NewHarnessAPIServiceHandler(svc HarnessAPIServiceHandler, opts ...connect.H
 // UnimplementedHarnessAPIServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedHarnessAPIServiceHandler struct{}
 
-func (UnimplementedHarnessAPIServiceHandler) CreateSession(context.Context, *connect.Request[pb.CreateSessionRequest]) (*connect.Response[pb.CreateSessionResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) CreateSession(context.Context, *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.CreateSession is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) Prompt(context.Context, *connect.Request[pb.PromptRequest]) (*connect.Response[pb.PromptResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) Prompt(context.Context, *pb.PromptRequest) (*pb.PromptResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.Prompt is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) RespondPermission(context.Context, *connect.Request[pb.RespondPermissionRequest]) (*connect.Response[pb.RespondPermissionResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) RespondPermission(context.Context, *pb.RespondPermissionRequest) (*pb.RespondPermissionResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.RespondPermission is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) EndSession(context.Context, *connect.Request[pb.EndSessionRequest]) (*connect.Response[pb.EndSessionResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.EndSession is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) GetSession(context.Context, *connect.Request[pb.GetSessionRequest]) (*connect.Response[pb.GetSessionResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) GetSession(context.Context, *pb.GetSessionRequest) (*pb.GetSessionResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.GetSession is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) ListSessions(context.Context, *connect.Request[pb.ListSessionsRequest]) (*connect.Response[pb.ListSessionsResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) ListSessions(context.Context, *pb.ListSessionsRequest) (*pb.ListSessionsResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.ListSessions is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) ListTemplates(context.Context, *connect.Request[pb.ListTemplatesRequest]) (*connect.Response[pb.ListTemplatesResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) ListTemplates(context.Context, *pb.ListTemplatesRequest) (*pb.ListTemplatesResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.ListTemplates is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) ListEvents(context.Context, *connect.Request[pb.ListEventsRequest]) (*connect.Response[pb.ListEventsResponse], error) {
+func (UnimplementedHarnessAPIServiceHandler) ListEvents(context.Context, *pb.ListEventsRequest) (*pb.ListEventsResponse, error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.ListEvents is not implemented"))
 }
 
-func (UnimplementedHarnessAPIServiceHandler) Subscribe(context.Context, *connect.Request[pb.SubscribeRequest], *connect.ServerStream[pb.SubscribeResponse]) error {
+func (UnimplementedHarnessAPIServiceHandler) Subscribe(context.Context, *pb.SubscribeRequest, *connect.ServerStream[pb.SubscribeResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("harnessapi.v1.HarnessAPIService.Subscribe is not implemented"))
 }

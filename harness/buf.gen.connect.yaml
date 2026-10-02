@@ -8,7 +8,12 @@ plugins:
     opt: module=github.com/pomerium/agentops/harness
   - local: [go, tool, protoc-gen-connect-go]
     out: .
-    opt: module=github.com/pomerium/agentops/harness
+    # simple: verbs take and return the messages themselves rather than
+    # connect.Request/Response envelopes, so a client calls them like functions.
+    # Headers travel through interceptors (the bearer, the identity) instead.
+    opt:
+      - module=github.com/pomerium/agentops/harness
+      - simple
 inputs:
   - directory: ../proto
     paths:
