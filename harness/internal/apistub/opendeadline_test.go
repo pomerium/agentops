@@ -9,13 +9,6 @@ import (
 	"github.com/pomerium/agentops/harness/internal/apistub"
 )
 
-// TestSubscribeOpenDeadline: a hop that accepts the subscription and then says
-// nothing must not hang the caller.
-//
-// Opening is synchronous, so without a deadline on the opening frame this is not
-// a subscription that reconnects — it is a caller stuck inside Subscribe with no
-// error and no stream, on a transport that deliberately has no timeout of its
-// own. The failure mode is a process that looks healthy and is doing nothing.
 func TestSubscribeOpenDeadline(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -33,7 +26,6 @@ func TestSubscribeOpenDeadline(t *testing.T) {
 		done <- err
 	}()
 
-	// The budget is 3 × 100ms; anything near the old behaviour never returns.
 	select {
 	case err := <-done:
 		if err == nil {

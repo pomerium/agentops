@@ -9,15 +9,6 @@ import (
 	"github.com/pomerium/agentops/harness/internal/apiserver"
 )
 
-// These drive the stub in-process rather than over the wire, because what they
-// test is the stub's own feed — whether it stays open, whether it keeps up — and
-// a client in between would hide exactly that: client.Subscribe stops on
-// session_ended by design, and the transport's flow control would absorb a
-// reader that stops reading.
-
-// TestEndedEventLeavesALiveFeedOpen: the stub does not close a live feed after
-// session_ended, so a client that waits for end-of-stream instead of stopping on
-// the event hangs here rather than passing by accident.
 func TestEndedEventLeavesALiveFeedOpen(t *testing.T) {
 	s := New()
 	ctx := apiserver.WithClientID(context.Background(), "a")
@@ -52,8 +43,6 @@ func TestEndedEventLeavesALiveFeedOpen(t *testing.T) {
 	t.Fatal("the feed closed before session_ended arrived")
 }
 
-// TestAnUnreadSubscriberDoesNotBreakPrompts: a test that stops reading its feed
-// does not make the stub panic, however much the session goes on to say.
 func TestAnUnreadSubscriberDoesNotBreakPrompts(t *testing.T) {
 	s := New()
 	ctx := apiserver.WithClientID(context.Background(), "a")
@@ -79,7 +68,7 @@ func TestAnUnreadSubscriberDoesNotBreakPrompts(t *testing.T) {
 			t.Fatalf("Prompt: %v", err)
 		}
 	}
-	// Nothing was dropped: the whole log arrives, in order.
+
 	logged, err := s.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref, Limit: 10000})
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)

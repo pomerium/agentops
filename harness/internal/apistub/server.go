@@ -11,14 +11,6 @@ import (
 	"github.com/pomerium/agentops/harness/internal/apiserver"
 )
 
-// Serve puts a stub behind the real apiserver on the given address and returns
-// the listener it bound and the server running on it.
-//
-// The address must resolve to a loopback interface, and that is enforced rather
-// than documented. This server admits whoever asks and stamps them with the
-// identity they name: reachable off-host it is an open door onto every session
-// any client of it has, which is not a footgun to leave lying in a repo that
-// also ships production manifests.
 func Serve(addr string, stub *Stub, log *slog.Logger) (net.Listener, *http.Server, error) {
 	if log == nil {
 		log = slog.Default()
@@ -43,18 +35,6 @@ func Serve(addr string, stub *Stub, log *slog.Logger) (net.Listener, *http.Serve
 	return ln, httpSrv, nil
 }
 
-// HeaderIdentity is the stub's Identify: the client id is whatever the caller
-// says it is.
-//
-// That is the one deliberate difference from production, where the id comes from
-// an assertion Pomerium verified and a client cannot state its own. It is also
-// what makes cross-client isolation testable in a unit test — two identities,
-// one process, no IdP — which is a property worth a conformance scenario since
-// getting it wrong leaks somebody else's conversation.
-//
-// A bearer token is accepted as an identity too, so a client that can only send
-// an Authorization header (the harness's own Go client, and therefore the
-// companion) can pick an identity without a bespoke header.
 func HeaderIdentity(_ context.Context, h http.Header) (string, error) {
 	if id := strings.TrimSpace(h.Get(HeaderClient)); id != "" {
 		return id, nil
@@ -67,9 +47,6 @@ func HeaderIdentity(_ context.Context, h http.Header) (string, error) {
 	return DefaultClient, nil
 }
 
-// requireLoopback refuses an address that is not local. A hostname that resolves
-// to anything routable is refused too: "localhost" pointing somewhere else is
-// exactly the misconfiguration this check is for.
 func requireLoopback(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

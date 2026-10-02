@@ -1,23 +1,3 @@
-// Package apistub is a conformance server for the Harness API: the real
-// apiserver, on the real Connect transport, in front of a scripted in-memory
-// implementation of the generated Harness API handler.
-//
-// It exists so an SDK in any language can be tested against the wire the
-// harness actually speaks with no cluster, no Pomerium and no human approval
-// behind it. Identity arrives in a plain header instead of a verified
-// assertion, and that substitution is the only thing here that is not
-// production's: the codec, the envelope framing, the error details, the opening
-// keepalive and the streaming lifecycle are all the real implementation's, so
-// an SDK that passes against this one is talking to the same server.
-//
-// It also answers for conditions no real server can be asked to produce on
-// demand — a stream that dies mid-flight, a response carrying a field this
-// build has never heard of, a session log that ends before it says anything.
-// Those are what a client's hardest paths exist for, and they are otherwise
-// only reachable by breaking something. See scenario.go.
-//
-// Nothing here reaches production: Dockerfile.harness builds ./cmd/harness
-// alone, and this package lives under internal/.
 package apistub
 
 import (
@@ -41,56 +21,22 @@ import (
 	"github.com/pomerium/agentops/harness/internal/apiserver"
 )
 
-// SentinelPrefix addresses a scripted error rather than a session: a ref whose
-// session_id is "sentinel/SENTINEL_NOT_REVIVABLE", or a CreateSession whose
-// template is, fails with that published sentinel from whichever verb was called.
-//
-// It is a ref value rather than a control endpoint so that a conformance test
-// can provoke every error with nothing but the SDK under test — an SDK that
-// needed a side channel to be tested would be tested through code no user runs.
 const SentinelPrefix = "sentinel/"
 
-// The scripted turns, addressed by prompt content. A conformance suite needs a
-// turn to unfold a particular way — with a permission request in the middle, or
-// carrying a payload the SDK has never heard of — and asking for it by
-// content keeps the whole scenario expressible through the SDK's own verbs.
 const (
-	// PromptPermission runs a turn that stops on a permission request and waits
-	// for RespondPermission before finishing.
 	PromptPermission = "stub:permission"
-	// PromptUnknownEvent runs a turn that emits an event whose payload is from a
-	// future version of the platform — a payload field this build does not
-	// define — then finishes normally. A client must deliver the event, with no
-	// payload it recognizes, and carry on.
+
 	PromptUnknownEvent = "stub:unknown-event"
-	// PromptZeroEvent runs a turn that emits an entirely zero-valued event —
-	// which on the JSON path arrives as the object {}, since proto3 omits zero
-	// fields — then finishes normally. Absent must read as the proto3 default,
-	// and a seq of 0 must not break dedup.
-	//
-	// The two differ in what a client can get wrong: the zero event has a seq of
-	// 0 and is dropped as already seen, while the unknown one is new and must be
-	// delivered.
+
 	PromptZeroEvent = "stub:zero-event"
 )
 
-// StubApproverSubject is the approver every scripted session records. There is
-// no IdP here; the ceremony is played out on the log so a client can be tested
-// against the events it really has to render.
 const StubApproverSubject = "stub|approver"
 
-// maxEventPage is the page ListEvents clamps to, mirroring the service.
 const maxEventPage = 500
 
-// clockEpoch is where a stub's clock starts. Fixed, and advanced one second per
-// event, so a conformance suite can assert on timestamps: a test that has to
-// treat every time as "some time" cannot catch a timestamp that stopped being
-// sent at all.
 var clockEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// Stub is a scripted in-memory Harness API handler. It is safe for concurrent use, which it
-// has to be: a conformance suite drives verbs on one connection while reading
-// the event stream on another, and that interleaving is half of what it tests.
 type Stub struct {
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -99,9 +45,6 @@ type Stub struct {
 	tmpls    []*pb.TemplateSummary
 }
 
-// New builds a stub with the given templates. An empty list gets a default
-// pair, because ListTemplates returning nothing is a poor thing to write a
-// conformance test against.
 func New(templates ...*pb.TemplateSummary) *Stub {
 	if len(templates) == 0 {
 		templates = []*pb.TemplateSummary{
@@ -118,41 +61,25 @@ func New(templates ...*pb.TemplateSummary) *Stub {
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*Stub)(nil)
 
-// session is one scripted session: its view, its log, and whoever is listening.
 type session struct {
-	// view is the stub's own copy, updated in place as the session moves. A verb
-	// hands out a clone: the original keeps changing under the lock while the
-	// transport is still encoding what was returned.
 	view *pb.SessionView
-	// clientID, createdAt and updatedAt are what the stub scopes, orders and
-	// filters by. The view does not carry them: no client reads them back.
+
 	clientID  string
 	createdAt time.Time
 	updatedAt time.Time
 	events    []*pb.Event
 	subs      map[*subscription]struct{}
-	// finished marks a log that will never grow again. A later Subscribe gets the
-	// backlog and then a clean end rather than a feed that hangs; a feed already
-	// open is deliberately left open (see finish).
+
 	finished bool
-	// pending is the permission request a scripted turn is blocked on, if any.
+
 	pending string
-	// turn is the turn a blocked permission request belongs to.
+
 	turn string
-	// turns counts completed turns, for naming the next one.
+
 	turns int
-	// keyed maps each idempotency key a prompt was accepted with to the turn it
-	// started. The platform forgets a key after ten minutes; the stub keeps it for
-	// its lifetime, which a suite never outlasts.
+
 	keyed map[string]string
 }
-
-// --- verbs -------------------------------------------------------------------
-//
-// Every verb takes its caller from the context, where the apiserver's identity
-// interceptor put it, and never from the message: no request has a field for
-// one. Errors are returned as api sentinels; the apiserver puts them on the wire
-// as the published error set, exactly as it does for the platform.
 
 func (s *Stub) CreateSession(ctx context.Context, req *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error) {
 	clientID, err := apiserver.ClientID(ctx)
@@ -172,7 +99,6 @@ func (s *Stub) CreateSession(ctx context.Context, req *pb.CreateSessionRequest) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// A live conversation refuses a second session outright, as the service does.
 	for _, sess := range s.sessions {
 		if sess.clientID != clientID {
 			continue
@@ -200,14 +126,8 @@ func (s *Stub) CreateSession(ctx context.Context, req *pb.CreateSessionRequest) 
 	}
 	s.sessions[id] = sess
 
-	// What the caller gets back is the session as it stands right now: pending,
-	// and with no approval URL. The URL arrives on the log a moment later, and
-	// this is the single most commonly mis-assumed thing about the API — a client
-	// that reads it off the CreateSession response reads an empty string.
 	created := proto.CloneOf(sess.view)
 
-	// The launch, played out. A real one takes a human; here the approval lands
-	// immediately so a suite can get to a turn without one.
 	s.transition(sess, api.StateLaunching, api.ReasonLaunch)
 	s.transition(sess, api.StateAwaitingApproval, api.ReasonLaunch)
 	s.emit(sess, &pb.Event{Payload: &pb.Event_ApprovalRequired{ApprovalRequired: &pb.ApprovalRequired{
@@ -237,9 +157,7 @@ func (s *Stub) Prompt(ctx context.Context, req *pb.PromptRequest) (*pb.PromptRes
 	if strings.TrimSpace(req.GetContent()) == "" {
 		return nil, api.Errorf(api.ErrInvalidArgument, "a prompt needs content")
 	}
-	// A repeated key is answered before the state is checked, as on the platform:
-	// the retry of an accepted prompt gets its turn back whatever that turn has
-	// since done to the session.
+
 	if turn, ok := sess.keyed[req.GetIdempotencyKey()]; ok {
 		return &pb.PromptResponse{TurnId: turn}, nil
 	}
@@ -282,8 +200,7 @@ func (s *Stub) RespondPermission(ctx context.Context, req *pb.RespondPermissionR
 	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
 		RequestId: requestID, Resolution: &pb.PermissionResolved_OptionId{OptionId: req.GetOptionId()},
 	}}})
-	// The turn the request blocked now finishes, so a suite sees a permission
-	// answered and a turn completed rather than a session that stops mid-turn.
+
 	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
 		Id: "call-1", Title: "deploy", Status: api.ToolCallCompleted, Update: true,
 	}}})
@@ -303,13 +220,13 @@ func (s *Stub) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.E
 		return nil, err
 	}
 	if api.Terminal(sess.view.GetState()) {
-		return &pb.EndSessionResponse{}, nil // idempotent, as on the platform: ending an ended session is done
+		return &pb.EndSessionResponse{}, nil
 	}
 	reason := req.GetReason()
 	if reason == pb.EndReason_END_REASON_UNSPECIFIED {
 		reason = api.EndEnded
 	}
-	// No reason on the transition itself: session_ended, right behind it, carries it.
+
 	s.transition(sess, api.StateEnded, pb.Reason_REASON_UNSPECIFIED)
 	s.emit(sess, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason}}})
 	s.finish(sess)
@@ -352,8 +269,7 @@ func (s *Stub) ListSessions(ctx context.Context, req *pb.ListSessionsRequest) (*
 		}
 		out.Sessions = append(out.Sessions, proto.CloneOf(sess.view))
 	}
-	// Ordered by id, which is creation order: a map's range order would make an
-	// otherwise-correct SDK test flake.
+
 	slices.SortFunc(out.Sessions, func(a, b *pb.SessionView) int { return strings.Compare(a.GetId(), b.GetId()) })
 	return out, nil
 }
@@ -395,9 +311,6 @@ func (s *Stub) ListEvents(ctx context.Context, req *pb.ListEventsRequest) (*pb.L
 	return &pb.ListEventsResponse{Events: out}, nil
 }
 
-// Subscribe resolves the request before anything goes on the stream, so a
-// refusal is an error the client sees at open; only then does apiserver.Stream
-// send the opening keepalive and serve the feed.
 func (s *Stub) Subscribe(ctx context.Context, req *pb.SubscribeRequest, stream *connect.ServerStream[pb.SubscribeResponse]) error {
 	clientID, err := apiserver.ClientID(ctx)
 	if err != nil {
@@ -411,9 +324,6 @@ func (s *Stub) Subscribe(ctx context.Context, req *pb.SubscribeRequest, stream *
 	return server.Stream(ctx, stream, sub.Events())
 }
 
-// subscribe opens the stub's own feed of a session: the backlog after
-// req.after_seq, then everything the session goes on to say. A finished log's
-// feed closes once the backlog is delivered.
 func (s *Stub) subscribe(clientID string, req *pb.SubscribeRequest) (*subscription, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -440,13 +350,6 @@ func (s *Stub) subscribe(clientID string, req *pb.SubscribeRequest) (*subscripti
 	return sub, nil
 }
 
-// subscription is one live feed. Events are queued without a bound and handed
-// on by one goroutine per feed, so a broadcast never blocks, never drops and
-// never fails however far behind a test's reader falls: a stub serves a test, and
-// a test that pauses its reader must not change what the log says.
-//
-// Only the pump closes out, and only once the feed has been ended and drained,
-// because the handler ranges over it. Close stops the pump without closing out.
 type subscription struct {
 	stub *Stub
 	sess *session
@@ -481,7 +384,6 @@ func (s *subscription) Close() {
 	s.stop.Do(func() { close(s.done) })
 }
 
-// push queues an event for the feed.
 func (s *subscription) push(ev *pb.Event) {
 	s.mu.Lock()
 	s.queue = append(s.queue, ev)
@@ -489,7 +391,6 @@ func (s *subscription) push(ev *pb.Event) {
 	s.poke()
 }
 
-// end closes the feed once everything queued has been delivered.
 func (s *subscription) end() {
 	s.mu.Lock()
 	s.ended = true
@@ -532,16 +433,12 @@ func (s *subscription) pump() {
 	}
 }
 
-// --- the scripted turn -------------------------------------------------------
-
-// runTurn plays a turn out on the log. Called with the lock held.
 func (s *Stub) runTurn(sess *session, content string) string {
 	turn := fmt.Sprintf("%s-t%d", sess.view.GetId(), sess.turns+1)
 
 	switch content {
 	case PromptPermission:
-		// The turn stops here. RespondPermission resumes it, which is what lets a
-		// suite test the round trip rather than just the rendering.
+
 		s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
 			Id: "call-1", Title: "deploy", Kind: "execute", Status: api.ToolCallPending,
 			InvocationMessage: "deploy to production",
@@ -564,19 +461,13 @@ func (s *Stub) runTurn(sess *session, content string) string {
 		return turn
 
 	case PromptUnknownEvent:
-		// An event from a later version of the platform: its payload is a field of
-		// the oneof this build does not define. Payloads are additive, and a client
-		// must pass the event through rather than fail on it.
+
 		ev := &pb.Event{TurnId: turn}
 		ev.ProtoReflect().SetUnknown(futurePayload)
 		s.emit(sess, ev)
 
 	case PromptZeroEvent:
-		// Every field zero. On the JSON path proto3 omits them all, so this arrives
-		// as {"event":{}} — no seq, no payload, no timestamp — and absent has to
-		// read as the default rather than as missing data. Its seq of 0 also means
-		// a correct client drops it as already-seen, which is the right behaviour
-		// and not a crash.
+
 		s.broadcast(sess, &pb.Event{})
 	}
 
@@ -596,14 +487,11 @@ func (s *Stub) runTurn(sess *session, content string) string {
 	return turn
 }
 
-// futurePayload is a payload field no build defines — a message at a field
-// number past every payload the oneof has — encoded as the unknown field it is.
 var futurePayload = protowire.AppendBytes(
 	protowire.AppendTag(nil, unknownFieldNumber, protowire.BytesType),
 	protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), "nobody here has ever seen"),
 )
 
-// finishTurn closes a turn out with its counters and its stop reason.
 func (s *Stub) finishTurn(sess *session, turn string) {
 	sess.turns++
 	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_Usage{Usage: &pb.Usage{
@@ -612,10 +500,6 @@ func (s *Stub) finishTurn(sess *session, turn string) {
 	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_TurnCompleted{TurnCompleted: &pb.TurnCompleted{StopReason: "end_turn"}}})
 }
 
-// --- log mechanics -----------------------------------------------------------
-
-// emit appends an event to the log, allocating its sequence and stamping its
-// time, and hands it to every subscriber. Called with the lock held.
 func (s *Stub) emit(sess *session, ev *pb.Event) {
 	at := s.tick()
 	ev.SessionId = sess.view.GetId()
@@ -627,65 +511,38 @@ func (s *Stub) emit(sess *session, ev *pb.Event) {
 	s.broadcast(sess, ev)
 }
 
-// broadcast delivers an event to the live subscribers without recording it. The
-// zero-event scenario is the only caller that wants that split: an event with
-// seq 0 must not disturb the log's sequence or its history.
 func (s *Stub) broadcast(sess *session, ev *pb.Event) {
 	for sub := range sess.subs {
 		sub.push(ev)
 	}
 }
 
-// transition moves a session's state and records the move, in that order, so
-// the event's "old" is what the session actually left rather than whatever the
-// last caller happened to leave on the view.
 func (s *Stub) transition(sess *session, next api.SessionState, reason api.Reason) {
 	prev := sess.view.GetState()
 	sess.view.State = next
 	s.emit(sess, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: prev, New: next, Reason: reason}}})
 }
 
-// finish marks a log as never growing again. A feed opened after this gets the
-// backlog and then a clean end of stream; a feed already open is left open.
-//
-// That is the one place the stub is stricter than the platform, on purpose: a
-// client must stop on the session_ended event, and one that instead waits for the
-// stream to end would pass against a server that closes it straight away. Here it
-// hangs, which is what makes the mistake visible.
 func (s *Stub) finish(sess *session) {
 	sess.finished = true
 }
 
-// tick returns the current instant and advances the clock. Called with the lock
-// held.
 func (s *Stub) tick() time.Time {
 	now := s.clock
 	s.clock = s.clock.Add(time.Second)
 	return now
 }
 
-// peek returns the current instant without advancing it, for the expiry times
-// that describe a moment rather than mark one.
 func (s *Stub) peek() time.Time { return s.clock }
 
-// find resolves a ref within its client. Called with the lock held.
-//
-// Another client's session is not found rather than forbidden, which is the
-// service's behaviour and worth a conformance test of its own: a client that
-// could tell "exists but not yours" from "does not exist" could enumerate
-// somebody else's conversations.
 func (s *Stub) find(clientID string, ref *pb.SessionRef) (*session, error) {
 	return s.resolve(clientID, ref, ref.GetIncludeTerminal())
 }
 
-// findLive is find for a verb that acts on a session. Such a verb operates on the
-// live session or on nothing, as SessionRef says, so include_terminal — which is
-// for reading history — is ignored rather than letting it act on an ended one.
 func (s *Stub) findLive(clientID string, ref *pb.SessionRef) (*session, error) {
 	return s.resolve(clientID, ref, false)
 }
 
-// resolve is find with include_terminal decided by the caller.
 func (s *Stub) resolve(clientID string, ref *pb.SessionRef, includeTerminal bool) (*session, error) {
 	sessionID, conversationRef := ref.GetSessionId(), ref.GetConversationRef()
 	if err := scriptedError(sessionID); err != nil {
@@ -724,7 +581,6 @@ func (s *Stub) resolve(clientID string, ref *pb.SessionRef, includeTerminal bool
 	return best, nil
 }
 
-// scriptedError reads a sentinel ref and returns the published error it names.
 func scriptedError(value string) error {
 	name, ok := strings.CutPrefix(value, SentinelPrefix)
 	if !ok {

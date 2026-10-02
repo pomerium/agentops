@@ -20,15 +20,6 @@ import (
 	"github.com/pomerium/agentops/harness/internal/apistub"
 )
 
-// The stub is what two SDKs in other languages are tested against, so it gets
-// tested here first, with the client this repo already trusts. A scenario that
-// does not do what it claims would otherwise surface as a mysterious failure in
-// TypeScript.
-
-// serve starts a stub and returns a factory for clients of it. Headers are how
-// a caller picks an identity and asks for a scenario, and the Go client has no
-// option for arbitrary headers — so they go on through a wrapped HTTP client,
-// which is also proof the wire needs nothing but headers to be driven.
 func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient.Config)) harnessapipbconnect.HarnessAPIServiceClient {
 	t.Helper()
 	ln, srv, err := apistub.Serve("127.0.0.1:0", apistub.New(), testLogger(t))
@@ -55,7 +46,6 @@ func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient
 	}
 }
 
-// headerClient stamps fixed headers onto every request.
 type headerClient struct {
 	headers map[string]string
 }
@@ -67,8 +57,6 @@ func (h headerClient) Do(r *http.Request) (*http.Response, error) {
 	return http.DefaultClient.Do(r)
 }
 
-// testWriter goes quiet once its test ends: a subscription's reconnect loop can
-// still be winding down then, and a Logf after the test returns panics.
 type testWriter struct {
 	t    *testing.T
 	mu   sync.Mutex
@@ -94,20 +82,15 @@ func (w *testWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// testLogger routes errors into the test log and drops the rest: a reconnect
-// warning is what several tests provoke on purpose, and it is noise there.
 func testLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(newTestWriter(t), &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// briefKeepalive shrinks the liveness window to 300ms, so a test of dead-stream
-// detection does not wait out the contract's minute.
 var briefKeepalive = apiclient.SubscribeOptions{
 	KeepaliveInterval: 100 * time.Millisecond,
 	MissedKeepalives:  3,
 }
 
-// subscribe opens the resumable feed of one session through client.Subscribe.
 func subscribe(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, id string, opts apiclient.SubscribeOptions) (*apiclient.Subscription, error) {
 	if opts.Logger == nil {
 		opts.Logger = testLogger(t)
@@ -115,10 +98,8 @@ func subscribe(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessA
 	return apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{Ref: byID(id)}, opts)
 }
 
-// byID is a ref to one session by its id.
 func byID(id string) *pb.SessionRef { return &pb.SessionRef{SessionId: id} }
 
-// listEvents reads a session's whole log, or fails the test.
 func listEvents(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, ref *pb.SessionRef) []*pb.Event {
 	t.Helper()
 	res, err := c.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref})
@@ -128,8 +109,6 @@ func listEvents(ctx context.Context, t *testing.T, c harnessapipbconnect.Harness
 	return res.GetEvents()
 }
 
-// create opens a session on a conversation with the defaults every test shares,
-// or fails the test.
 func create(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, req *pb.CreateSessionRequest) *pb.SessionView {
 	t.Helper()
 	if req.Template == "" {
@@ -145,7 +124,6 @@ func create(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIS
 	return res.GetSession()
 }
 
-// end ends a session by id, or fails the test.
 func end(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, id string) {
 	t.Helper()
 	if _, err := c.EndSession(ctx, &pb.EndSessionRequest{Ref: byID(id)}); err != nil {
@@ -153,8 +131,6 @@ func end(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServ
 	}
 }
 
-// TestLifecycle is the shape every SDK's conformance suite mirrors: create, read
-// the approval URL off the log rather than off the response, take a turn, end.
 func TestLifecycle(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -183,7 +159,6 @@ func TestLifecycle(t *testing.T) {
 		t.Fatal("no approval_required event carried a URL")
 	}
 
-	// Seq is dense and ordered, which is what dedup-by-seq relies on.
 	for i, ev := range events {
 		if ev.GetSeq() != int64(i+1) {
 			t.Fatalf("event %d has seq %d", i, ev.GetSeq())
@@ -212,10 +187,6 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
-// TestSentinels drives every published error over the wire and checks it still
-// satisfies the same errors.Is check on the far side — including the two pairs
-// that share a Connect code, which is the whole reason ErrorInfo exists — and
-// still carries its Connect code for a client that only reads codes.
 func TestSentinels(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -237,9 +208,6 @@ func TestSentinels(t *testing.T) {
 	}
 }
 
-// TestCrossClientIsNotFound: another client's session does not exist, rather
-// than existing and being refused. A client able to tell those apart could
-// enumerate somebody else's conversations.
 func TestCrossClientIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -251,8 +219,7 @@ func TestCrossClientIsNotFound(t *testing.T) {
 	if _, err := bob.GetSession(ctx, &pb.GetSessionRequest{Ref: byID(view.GetId())}); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("GetSession as another client: %v, want ErrNotFound", err)
 	}
-	// A refused subscribe fails at open, before any frame — which is what the
-	// server's opening keepalive is for.
+
 	if _, err := subscribe(ctx, t, bob, view.GetId(), apiclient.SubscribeOptions{}); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("Subscribe as another client: %v, want ErrNotFound", err)
 	}
@@ -265,10 +232,6 @@ func TestCrossClientIsNotFound(t *testing.T) {
 	}
 }
 
-// TestSubscribeStopsOnSessionEnded: the stream is stopped by the EVENT, not only
-// by the end of the connection. The stub deliberately leaves the feed open after
-// session_ended when the subscriber arrived before it, so a client that waits
-// for EOF instead would hang here.
 func TestSubscribeStopsOnSessionEnded(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -291,8 +254,6 @@ func TestSubscribeStopsOnSessionEnded(t *testing.T) {
 	}
 }
 
-// TestSubscribeToFinishedLog: a log that is already over is a SUCCESS with an
-// empty feed. Reported as an error, a client would retry a closed log forever.
 func TestSubscribeToFinishedLog(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -300,7 +261,6 @@ func TestSubscribeToFinishedLog(t *testing.T) {
 	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
 	end(ctx, t, c, view.GetId())
 
-	// From the end of the log: nothing to replay, and nothing will follow.
 	sub, err := apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{
 		Ref: byID(view.GetId()), AfterSeq: 1 << 30,
 	}, apiclient.SubscribeOptions{Logger: testLogger(t)})
@@ -313,8 +273,6 @@ func TestSubscribeToFinishedLog(t *testing.T) {
 	}
 }
 
-// TestResumeAfterDrop kills the stream mid-flight and checks the client comes
-// back with after_seq and delivers the rest exactly once.
 func TestResumeAfterDrop(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -325,8 +283,6 @@ func TestResumeAfterDrop(t *testing.T) {
 	})
 	full := listEvents(ctx, t, driver, byID(view.GetId()))
 
-	// One-shot: the first connection dies after three envelopes, the reconnect
-	// works. Without the key a correct client would reconnect forever.
 	reader := newClient(map[string]string{
 		apistub.HeaderScenario:    "drop-after=3",
 		apistub.HeaderScenarioKey: "resume-test",
@@ -338,15 +294,13 @@ func TestResumeAfterDrop(t *testing.T) {
 	defer sub.Close()
 
 	go func() {
-		// Ended so the feed terminates and drain returns.
+
 		time.Sleep(3 * time.Second)
 		_, _ = driver.EndSession(ctx, &pb.EndSessionRequest{Ref: byID(view.GetId())})
 	}()
 
 	got := drain(t, sub, 20*time.Second)
-	// Every event of the original log, in order, once each. A resume that skipped
-	// would drop one; one that did not dedup would repeat the frames it already
-	// delivered before the drop.
+
 	if len(got) < len(full) {
 		t.Fatalf("delivered %d events, want at least the %d from before the drop", len(got), len(full))
 	}
@@ -362,8 +316,6 @@ func TestResumeAfterDrop(t *testing.T) {
 	}
 }
 
-// TestSilentStreamReconnects: a stream that says nothing at all, keepalives
-// included, is dead however healthy the socket looks.
 func TestSilentStreamReconnects(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -397,10 +349,6 @@ func TestSilentStreamReconnects(t *testing.T) {
 	}
 }
 
-// TestUnknownFieldAndEventTolerated: a response carrying a field this build has
-// never heard of, and an event whose payload it has never heard of, both pass
-// through.
-// The additive-only contract is worth nothing if a client refuses to parse.
 func TestUnknownFieldAndEventTolerated(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -429,9 +377,6 @@ func TestUnknownFieldAndEventTolerated(t *testing.T) {
 	}
 }
 
-// TestZeroValuedEvent: an event with every field at its default. On the JSON
-// codec proto3 omits them all, so it arrives as {} — absent has to read as the
-// default, and a seq of 0 must not break dedup or the stream.
 func TestZeroValuedEvent(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -451,9 +396,7 @@ func TestZeroValuedEvent(t *testing.T) {
 	end(ctx, t, c, view.GetId())
 
 	got := drain(t, sub, 5*time.Second)
-	// The zero event's seq of 0 is at or below everything already delivered, so a
-	// correct client drops it as a duplicate. What matters is that the stream
-	// survived it and kept delivering.
+
 	if len(got) == 0 {
 		t.Fatal("the zero-valued event killed the feed")
 	}
@@ -467,8 +410,6 @@ func TestZeroValuedEvent(t *testing.T) {
 	}
 }
 
-// TestPermissionRoundTrip: the turn stops on a permission request and finishes
-// once it is answered.
 func TestPermissionRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -498,7 +439,7 @@ func TestPermissionRoundTrip(t *testing.T) {
 	if _, err := c.RespondPermission(ctx, answer); err != nil {
 		t.Fatalf("RespondPermission: %v", err)
 	}
-	// Answering twice is an unknown request, not a second decision.
+
 	if _, err := c.RespondPermission(ctx, answer); !errors.Is(err, api.ErrUnknownRequest) {
 		t.Errorf("answering twice: %v, want ErrUnknownRequest", err)
 	}
@@ -517,7 +458,6 @@ func TestPermissionRoundTrip(t *testing.T) {
 	}
 }
 
-// TestConflict: a live conversation refuses a second session.
 func TestConflict(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -533,7 +473,6 @@ func TestConflict(t *testing.T) {
 	}
 }
 
-// drain collects a feed until it closes or the budget runs out.
 func drain(t *testing.T, sub *apiclient.Subscription, budget time.Duration) []*pb.Event {
 	t.Helper()
 	var out []*pb.Event
@@ -552,8 +491,6 @@ func drain(t *testing.T, sub *apiclient.Subscription, budget time.Duration) []*p
 	}
 }
 
-// lossyHTTPClient delivers the first Prompt to the server and then loses its
-// response, the way a connection reset after the server accepted it would.
 type lossyHTTPClient struct {
 	next http.Client
 	once sync.Once
@@ -573,9 +510,6 @@ func (l *lossyHTTPClient) Do(r *http.Request) (*http.Response, error) {
 	return nil, io.ErrUnexpectedEOF
 }
 
-// TestALostPromptResponseIsNotRetried: a prompt the server accepted runs once,
-// even when the client never hears back. Resending it would start a second turn,
-// and nothing on the wire could tell the two apart.
 func TestALostPromptResponseIsNotRetried(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -601,9 +535,6 @@ func TestALostPromptResponseIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestALostKeyedPromptIsRetriedOnce: with an idempotency key the client does
-// resend a prompt whose response was lost, and the resend gets the first turn
-// back instead of starting a second one.
 func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
@@ -633,9 +564,6 @@ func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 	}
 }
 
-// TestActingVerbsIgnoreIncludeTerminal: a verb that acts on a session operates
-// on the live one or on nothing, as SessionRef says, so an ended conversation is
-// not found rather than acted on.
 func TestActingVerbsIgnoreIncludeTerminal(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
@@ -649,14 +577,12 @@ func TestActingVerbsIgnoreIncludeTerminal(t *testing.T) {
 	if _, err := c.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "hi"}); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("Prompt on an ended conversation: %v, want ErrNotFound", err)
 	}
-	// Reading history is what the flag is for, and that still works.
+
 	if got, err := c.GetSession(ctx, &pb.GetSessionRequest{Ref: ref}); err != nil || got.GetSession().GetId() != view.GetId() {
 		t.Errorf("GetSession with include_terminal: %v, %v", got.GetSession().GetId(), err)
 	}
 }
 
-// TestEndSessionIsIdempotent: ending an ended session succeeds, as it does on the
-// platform, so a client whose EndSession response was lost can safely ask again.
 func TestEndSessionIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)

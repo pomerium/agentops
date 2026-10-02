@@ -64,9 +64,6 @@ generate: generate-harness-api
 generate-harness-api:
 	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
 
-## apistub: build the Harness API conformance server (see docs/sdk-conformance.md):
-## the real apiserver and Connect transport over a scripted in-memory
-## implementation, for testing a client with no cluster and no credentials.
 APISTUB_BIN ?= $(CURDIR)/bin/apistub
 apistub:
 	$(HARNESS_GO) build -o $(APISTUB_BIN) ./cmd/apistub

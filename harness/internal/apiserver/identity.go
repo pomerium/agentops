@@ -9,29 +9,12 @@ import (
 	"connectrpc.com/connect"
 )
 
-// ErrNoIdentity reports a request that reached the API with no usable assertion.
-// It is always a deployment fault — the route is the only network path here and
-// it stamps the header — so it gets its own error to be diagnosable in one line.
 var ErrNoIdentity = errors.New("apiserver: request carries no verified client identity")
 
-// Identify resolves a request's client id from its headers. It returns the
-// verified subject and nothing else; a request that cannot be identified is
-// refused rather than defaulted. The production one verifies Pomerium's
-// assertion and lives with the platform wiring (cmd/harness), so this package
-// stays free of it and the conformance stub can serve the API alone.
 type Identify func(ctx context.Context, h http.Header) (string, error)
 
-// clientIDKey carries the verified client id down the request context.
 type clientIDKey struct{}
 
-// ClientID returns the verified caller a request was admitted under. Every verb
-// of a Harness API implementation scopes itself to it; no request message has a
-// field for one, and this is the reason.
-//
-// A context the identity interceptor never saw is refused rather than defaulted:
-// a nameless caller must not become a client with an empty id, which would
-// collide with every other nameless caller. Reached only through a
-// misconfiguration, but stated.
 func ClientID(ctx context.Context) (string, error) {
 	id, ok := ctx.Value(clientIDKey{}).(string)
 	if !ok || id == "" {
@@ -40,34 +23,16 @@ func ClientID(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-// WithClientID admits a caller without the interceptor: for calling an
-// implementation in-process, as its own tests do.
 func WithClientID(ctx context.Context, clientID string) context.Context {
 	return context.WithValue(ctx, clientIDKey{}, clientID)
 }
 
-// identityInterceptor turns Pomerium's assertion into the one client identity
-// every verb is scoped to.
-//
-// It is a Connect interceptor rather than HTTP middleware so a refusal is a
-// Connect error like every other: it carries a code the client wrapper
-// understands, it lands in the same per-verb metrics as everything else, and it
-// goes through the transport's own error path instead of a plain-text 401 that
-// no client of this API knows how to read. Streaming is wrapped too — a
-// subscription admitted without an identity is the one call that reads another
-// client's log.
-//
-// It also logs each client the first time it is seen. That line is how a
-// deployment learns what Pomerium actually mints for its workloads, which is
-// what a ClientBinding's subject has to match and is not something to guess at.
 type identityInterceptor struct {
 	identify Identify
 	log      *slog.Logger
 	seen     *seenClients
 }
 
-// admit resolves and records the caller, returning the context every handler
-// reads its client id from.
 func (i *identityInterceptor) admit(ctx context.Context, h http.Header, procedure string) (context.Context, error) {
 	clientID, err := i.identify(ctx, h)
 	if err != nil {
