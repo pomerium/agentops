@@ -22,7 +22,7 @@ func TestSubscribeOpenDeadline(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := subscribe(ctx, t, reader, view.GetId(), briefKeepalive)
+		_, err := subscribe(ctx, t, reader, view.GetId(), briefKeepalive...)
 		done <- err
 	}()
 

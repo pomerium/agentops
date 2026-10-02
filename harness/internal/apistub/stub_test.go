@@ -20,7 +20,7 @@ import (
 	"github.com/pomerium/agentops/harness/internal/apistub"
 )
 
-func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient.Config)) harnessapipbconnect.HarnessAPIServiceClient {
+func serve(t *testing.T) func(headers map[string]string, opts ...apiclient.Option) harnessapipbconnect.HarnessAPIServiceClient {
 	t.Helper()
 	ln, srv, err := apistub.Serve("127.0.0.1:0", apistub.New(), testLogger(t))
 	if err != nil {
@@ -30,15 +30,8 @@ func serve(t *testing.T) func(headers map[string]string, opts ...func(*apiclient
 	t.Cleanup(func() { _ = srv.Close() })
 
 	base := "http://" + ln.Addr().String()
-	return func(headers map[string]string, opts ...func(*apiclient.Config)) harnessapipbconnect.HarnessAPIServiceClient {
-		cfg := apiclient.Config{
-			BaseURL:    base,
-			HTTPClient: headerClient{headers: headers},
-		}
-		for _, o := range opts {
-			o(&cfg)
-		}
-		c, err := apiclient.New(cfg)
+	return func(headers map[string]string, opts ...apiclient.Option) harnessapipbconnect.HarnessAPIServiceClient {
+		c, err := apiclient.New(base, append([]apiclient.Option{apiclient.WithHTTPClient(headerClient{headers: headers})}, opts...)...)
 		if err != nil {
 			t.Fatalf("client.New: %v", err)
 		}
@@ -86,16 +79,14 @@ func testLogger(t *testing.T) *slog.Logger {
 	return slog.New(slog.NewTextHandler(newTestWriter(t), &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-var briefKeepalive = apiclient.SubscribeOptions{
-	KeepaliveInterval: 100 * time.Millisecond,
-	MissedKeepalives:  3,
+var briefKeepalive = []apiclient.SubscribeOption{
+	apiclient.WithKeepaliveInterval(100 * time.Millisecond),
+	apiclient.WithMissedKeepalives(3),
 }
 
-func subscribe(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, id string, opts apiclient.SubscribeOptions) (*apiclient.Subscription, error) {
-	if opts.Logger == nil {
-		opts.Logger = testLogger(t)
-	}
-	return apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{Ref: byID(id)}, opts)
+func subscribe(ctx context.Context, t *testing.T, c harnessapipbconnect.HarnessAPIServiceClient, id string, opts ...apiclient.SubscribeOption) (*apiclient.Subscription, error) {
+	opts = append([]apiclient.SubscribeOption{apiclient.WithLogger(testLogger(t))}, opts...)
+	return apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{Ref: byID(id)}, opts...)
 }
 
 func byID(id string) *pb.SessionRef { return &pb.SessionRef{SessionId: id} }
@@ -220,7 +211,7 @@ func TestCrossClientIsNotFound(t *testing.T) {
 		t.Errorf("GetSession as another client: %v, want ErrNotFound", err)
 	}
 
-	if _, err := subscribe(ctx, t, bob, view.GetId(), apiclient.SubscribeOptions{}); !errors.Is(err, api.ErrNotFound) {
+	if _, err := subscribe(ctx, t, bob, view.GetId()); !errors.Is(err, api.ErrNotFound) {
 		t.Errorf("Subscribe as another client: %v, want ErrNotFound", err)
 	}
 	sessions, err := bob.ListSessions(ctx, &pb.ListSessionsRequest{})
@@ -237,7 +228,7 @@ func TestSubscribeStopsOnSessionEnded(t *testing.T) {
 	c := serve(t)(nil)
 
 	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
-	sub, err := subscribe(ctx, t, c, view.GetId(), apiclient.SubscribeOptions{})
+	sub, err := subscribe(ctx, t, c, view.GetId())
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -263,7 +254,7 @@ func TestSubscribeToFinishedLog(t *testing.T) {
 
 	sub, err := apiclient.Subscribe(ctx, c, &pb.SubscribeRequest{
 		Ref: byID(view.GetId()), AfterSeq: 1 << 30,
-	}, apiclient.SubscribeOptions{Logger: testLogger(t)})
+	}, apiclient.WithLogger(testLogger(t)))
 	if err != nil {
 		t.Fatalf("Subscribe to a finished log: %v, want success", err)
 	}
@@ -287,7 +278,7 @@ func TestResumeAfterDrop(t *testing.T) {
 		apistub.HeaderScenario:    "drop-after=3",
 		apistub.HeaderScenarioKey: "resume-test",
 	})
-	sub, err := subscribe(ctx, t, reader, view.GetId(), apiclient.SubscribeOptions{})
+	sub, err := subscribe(ctx, t, reader, view.GetId())
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -329,7 +320,7 @@ func TestSilentStreamReconnects(t *testing.T) {
 		apistub.HeaderScenario:    apistub.ScenarioSilent,
 		apistub.HeaderScenarioKey: "silent-test",
 	})
-	sub, err := subscribe(ctx, t, reader, view.GetId(), briefKeepalive)
+	sub, err := subscribe(ctx, t, reader, view.GetId(), briefKeepalive...)
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -382,7 +373,7 @@ func TestZeroValuedEvent(t *testing.T) {
 	c := serve(t)(nil)
 
 	view := create(ctx, t, c, &pb.CreateSessionRequest{ConversationRef: "conv-1"})
-	sub, err := subscribe(ctx, t, c, view.GetId(), apiclient.SubscribeOptions{})
+	sub, err := subscribe(ctx, t, c, view.GetId())
 	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
@@ -514,9 +505,7 @@ func TestALostPromptResponseIsNotRetried(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
 	driver := newClient(nil)
-	lossy := newClient(nil, func(cfg *apiclient.Config) {
-		cfg.HTTPClient = &lossyHTTPClient{}
-	})
+	lossy := newClient(nil, apiclient.WithHTTPClient(&lossyHTTPClient{}))
 
 	view := create(ctx, t, driver, &pb.CreateSessionRequest{ConversationRef: "lossy"})
 	ref := byID(view.GetId())
@@ -539,9 +528,7 @@ func TestALostKeyedPromptIsRetriedOnce(t *testing.T) {
 	ctx := context.Background()
 	newClient := serve(t)
 	driver := newClient(nil)
-	lossy := newClient(nil, func(cfg *apiclient.Config) {
-		cfg.HTTPClient = &lossyHTTPClient{}
-	})
+	lossy := newClient(nil, apiclient.WithHTTPClient(&lossyHTTPClient{}))
 
 	view := create(ctx, t, driver, &pb.CreateSessionRequest{ConversationRef: "lossy"})
 	ref := byID(view.GetId())

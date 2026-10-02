@@ -18,11 +18,7 @@ func Serve(addr string, stub *Stub, log *slog.Logger) (net.Listener, *http.Serve
 	if err := requireLoopback(addr); err != nil {
 		return nil, nil, err
 	}
-	srv, err := apiserver.New(apiserver.Config{
-		Service:  stub,
-		Identify: HeaderIdentity,
-		Logger:   log,
-	})
+	srv, err := apiserver.New(stub, HeaderIdentity, apiserver.WithLogger(log))
 	if err != nil {
 		return nil, nil, err
 	}

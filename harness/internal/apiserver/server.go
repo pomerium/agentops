@@ -14,44 +14,47 @@ import (
 	"github.com/pomerium/agentops/harness/api/server"
 )
 
-type Config struct {
-	Service harnessapipbconnect.HarnessAPIServiceHandler
+type Option func(*options)
 
-	Identify Identify
-
-	Ready func(ctx context.Context) error
-
-	Metrics *Metrics
-	Logger  *slog.Logger
+type options struct {
+	ready   func(ctx context.Context) error
+	metrics *Metrics
+	logger  *slog.Logger
 }
 
+func WithReady(f func(ctx context.Context) error) Option { return func(o *options) { o.ready = f } }
+
+func WithMetrics(m *Metrics) Option { return func(o *options) { o.metrics = m } }
+
+func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
+
 type Server struct {
-	cfg     Config
+	ready   func(ctx context.Context) error
 	log     *slog.Logger
 	handler http.Handler
 }
 
-func New(cfg Config) (*Server, error) {
-	if cfg.Service == nil {
+func New(service harnessapipbconnect.HarnessAPIServiceHandler, identify Identify, opts ...Option) (*Server, error) {
+	if service == nil {
 		return nil, errors.New("apiserver: a Service implementation is required")
 	}
-	if cfg.Identify == nil {
+	if identify == nil {
 		return nil, errors.New("apiserver: an Identify function is required")
 	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+	o := options{logger: slog.Default()}
+	for _, opt := range opts {
+		opt(&o)
 	}
-	s := &Server{cfg: cfg, log: cfg.Logger}
+	s := &Server{ready: o.ready, log: o.logger}
 
 	interceptors := []connect.Interceptor{
 		server.ErrorInterceptor(),
-		&identityInterceptor{identify: cfg.Identify, log: s.log, seen: &seenClients{}},
+		&identityInterceptor{identify: identify, log: s.log, seen: &seenClients{}},
 	}
-	if cfg.Metrics != nil {
-		interceptors = append([]connect.Interceptor{cfg.Metrics.interceptor()}, interceptors...)
+	if o.metrics != nil {
+		interceptors = append([]connect.Interceptor{o.metrics.interceptor()}, interceptors...)
 	}
-	path, svc := harnessapipbconnect.NewHarnessAPIServiceHandler(
-		cfg.Service, connect.WithInterceptors(interceptors...))
+	path, svc := harnessapipbconnect.NewHarnessAPIServiceHandler(service, connect.WithInterceptors(interceptors...))
 
 	mux := http.NewServeMux()
 	mux.Handle(path, svc)
@@ -88,8 +91,8 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.Ready != nil {
-		if err := s.cfg.Ready(r.Context()); err != nil {
+	if s.ready != nil {
+		if err := s.ready(r.Context()); err != nil {
 			s.log.WarnContext(r.Context(), "readiness check failed", "err", err)
 			http.Error(w, "not ready: "+err.Error(), http.StatusServiceUnavailable)
 			return
