@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	connectrpc.com/connect v1.20.0
+	github.com/cenkalti/backoff/v7 v7.0.1
 	google.golang.org/protobuf v1.36.12
 )
 
