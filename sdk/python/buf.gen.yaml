@@ -1,0 +1,22 @@
+# Code generation for the Python SDK.
+#
+# Two plugins, both installed as console scripts by the uv venv rather than
+# bundled with the runtime: protoc-gen-py comes from the `protoc-gen-py`
+# package (protobuf-py's compiler), protoc-gen-connectrpc from
+# `protoc-gen-connectrpc` (connect-py's). Neither ships with `connectrpc`
+# itself, which is worth knowing before hunting for them there.
+#
+# `make sdk-generate-py` is the wrapper: it puts the venv's bin on PATH so
+# these resolve as `local`, and runs the buf the rest of the repo is pinned to
+# rather than a second copy. `make generate` calls it, so the committed output
+# cannot drift from the proto.
+version: v2
+plugins:
+  - local: protoc-gen-py
+    out: src/agentops_harness/gen
+  - local: protoc-gen-connectrpc
+    out: src/agentops_harness/gen
+inputs:
+  - directory: ../../proto
+    paths:
+      - ../../proto/harnessapi

@@ -1,0 +1,34 @@
+[project]
+name = "agentops-harness"
+version = "0.1.0"
+description = "Python client for the AgentOps Harness API"
+readme = "README.md"
+authors = [{ name = "Pomerium" }]
+requires-python = ">=3.10"
+# connect-py, the official Connect runtime. It brings pyqwest (its Rust HTTP
+# transport) and protobuf-py (Buf's protobuf runtime) with it, which is what
+# lets the fourteen verbs and every wire type here be generated rather than
+# hand-written.
+#
+# The two protoc plugins are dev-only and are NOT part of the runtime package:
+# protoc-gen-py and protoc-gen-connectrpc ship separately. See buf.gen.yaml.
+dependencies = [
+    "connectrpc>=0.11.1",
+]
+classifiers = ["Private :: Do Not Upload"]
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "protoc-gen-connectrpc>=0.11.1",
+    "protoc-gen-py>=0.1.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

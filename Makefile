@@ -69,23 +69,36 @@ APISTUB_BIN ?= $(CURDIR)/bin/apistub
 apistub:
 	$(HARNESS_GO) build -o $(APISTUB_BIN) ./cmd/apistub
 
-sdk-generate: sdk-generate-ts
+sdk-generate: sdk-generate-ts sdk-generate-py
 
 sdk-generate-ts:
 	npm --prefix sdk/ts install --no-audit --no-fund
 	npm --prefix sdk/ts run generate $(if $(PB_OUT),-- -o $(PB_OUT)/ts)
 
+BUF_BIN ?= $(CURDIR)/bin/buf
+$(BUF_BIN):
+	$(HARNESS_GO) build -o $(BUF_BIN) github.com/bufbuild/buf/cmd/buf
+
+sdk-generate-py: $(BUF_BIN)
+	cd sdk/python && uv sync --quiet --frozen
+	cd sdk/python && PATH="$(CURDIR)/sdk/python/.venv/bin:$$PATH" $(BUF_BIN) generate $(if $(PB_OUT),-o $(PB_OUT)/py)
+
 sdk-generate-check:
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; set -e; \
 	  $(MAKE) --no-print-directory sdk-generate PB_OUT="$$tmp" >/dev/null; \
 	  diff -r "$$tmp/ts/src/gen" sdk/ts/src/gen || { echo "sdk/ts/src/gen is stale; run make sdk-generate"; exit 1; }; \
+	  diff -r -x __pycache__ -x __init__.py "$$tmp/py/src/agentops_harness/gen" sdk/python/src/agentops_harness/gen \
+	    || { echo "sdk/python/src/agentops_harness/gen is stale; run make sdk-generate"; exit 1; }; \
 	  echo "the SDK protobuf code matches the protos"
 
-sdk-test: sdk-test-ts
+sdk-test: sdk-test-ts sdk-test-py
 
 sdk-test-ts: apistub
 	npm --prefix sdk/ts install --no-audit --no-fund
 	APISTUB_BIN=$(APISTUB_BIN) npm --prefix sdk/ts test
+
+sdk-test-py: apistub
+	cd sdk/python && APISTUB_BIN=$(APISTUB_BIN) uv run --frozen pytest -q
 
 ## helm-sync-crds: copy the generated CRDs into the Helm chart, wrapped in an
 ## `installCRDs` toggle. Kept in sync via `generate`; the kustomize base reads
