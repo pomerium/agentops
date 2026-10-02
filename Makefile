@@ -27,7 +27,7 @@ OVERLAY ?= dev
 HELM      ?= helm
 CHART_DIR ?= deploy/helm
 
-.PHONY: build test test-e2e vet generate generate-harness-api proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
+.PHONY: build test test-e2e vet generate generate-harness-api apistub proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
         helm-sync-crds helm-lint helm-template helm-package
 
 ## build: compile all packages.
@@ -63,6 +63,10 @@ generate: generate-harness-api
 
 generate-harness-api:
 	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
+
+APISTUB_BIN ?= $(CURDIR)/bin/apistub
+apistub:
+	$(HARNESS_GO) build -o $(APISTUB_BIN) ./cmd/apistub
 
 ## helm-sync-crds: copy the generated CRDs into the Helm chart, wrapped in an
 ## `installCRDs` toggle. Kept in sync via `generate`; the kustomize base reads
