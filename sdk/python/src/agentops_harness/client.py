@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +9,15 @@ from connectrpc.code import Code
 from connectrpc.errors import ConnectError
 from connectrpc.method import IdempotencyLevel
 from connectrpc.request import RequestContext
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    Retrying,
+    retry_if_exception,
+    stop_after_attempt,
+    stop_any,
+    wait_exponential_jitter,
+)
 
 from .gen.harnessapi.v1.harnessapi_connect import HarnessAPIServiceClient, HarnessAPIServiceClientSync
 
@@ -52,24 +59,25 @@ class _Retry:
         self._retries = max(0, config.retries)
 
     async def intercept_unary(self, call_next: Callable[..., Awaitable[Any]], request: Any, ctx: RequestContext) -> Any:
-        for attempt in range(self._attempts(request, ctx)):
-            try:
-                return await call_next(request, self._attempt(ctx))
-            except ConnectError as exc:
-                if exc.code not in _RETRYABLE or not _time_for(ctx, attempt):
-                    raise
-            await asyncio.sleep(_backoff(attempt))
-        return await call_next(request, self._attempt(ctx))
+        async def once() -> Any:
+            return await call_next(request, self._attempt(ctx))
+
+        return await AsyncRetrying(**self._policy(request, ctx))(once)
 
     def intercept_unary_sync(self, call_next: Callable[..., Any], request: Any, ctx: RequestContext) -> Any:
-        for attempt in range(self._attempts(request, ctx)):
-            try:
-                return call_next(request, self._attempt(ctx))
-            except ConnectError as exc:
-                if exc.code not in _RETRYABLE or not _time_for(ctx, attempt):
-                    raise
-            time.sleep(_backoff(attempt))
-        return call_next(request, self._attempt(ctx))
+        return Retrying(**self._policy(request, ctx))(lambda: call_next(request, self._attempt(ctx)))
+
+    def _policy(self, request: Any, ctx: RequestContext) -> dict[str, Any]:
+        def past_deadline(state: RetryCallState) -> bool:
+            remaining = ctx.timeout_ms
+            return remaining is not None and remaining <= (state.upcoming_sleep or 0) * 1000
+
+        return {
+            "stop": stop_any(stop_after_attempt(self._attempts(request, ctx) + 1), past_deadline),
+            "wait": wait_exponential_jitter(initial=0.2, max=2.0, jitter=0.2),
+            "retry": retry_if_exception(lambda exc: isinstance(exc, ConnectError) and exc.code in _RETRYABLE),
+            "reraise": True,
+        }
 
     def _attempts(self, request: Any, ctx: RequestContext) -> int:
         if ctx.method.idempotency_level != IdempotencyLevel.UNKNOWN or getattr(request, "idempotency_key", ""):
@@ -84,15 +92,6 @@ class _Retry:
             request_headers=ctx.request_headers,
             timeout_ms=self._timeout_ms if remaining is None else min(int(remaining), self._timeout_ms),
         )
-
-
-def _backoff(attempt: int) -> float:
-    return (attempt + 1) * 0.2
-
-
-def _time_for(ctx: RequestContext, attempt: int) -> bool:
-    remaining = ctx.timeout_ms
-    return remaining is None or remaining > _backoff(attempt) * 1000
 
 
 class _Bearer:

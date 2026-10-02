@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
+from tenacity import AsyncRetrying, retry_if_exception, wait_exponential_jitter
 
 from .errors import sentinel_of
 from .gen.harnessapi.v1.harnessapi_connect import HarnessAPIServiceClient
@@ -73,6 +74,7 @@ class EventFeed:
         try:
             while opened is not None:
                 stream, frame = opened
+                dropped = ConnectError(Code.UNAVAILABLE, "the subscription stream dropped")
                 try:
                     while frame is not None:
                         event = frame.event
@@ -83,11 +85,11 @@ class EventFeed:
                                 return
                         frame = await self._read(stream)
                     return
-                except ConnectError:
-                    pass
+                except ConnectError as exc:
+                    dropped = exc
                 finally:
                     await _close(stream)
-                opened = await self._reopen()
+                opened = await self._reopen(dropped)
         finally:
             self._closed.set()
             self._closed_wait.cancel()
@@ -106,16 +108,28 @@ class EventFeed:
             return None
         return stream, first
 
-    async def _reopen(self) -> _Opened | None:
-        while True:
-            await asyncio.wait({self._closed_wait}, timeout=self._backoff)
-            if self._closed.is_set():
-                return None
-            try:
-                return await self._open()
-            except ConnectError as exc:
-                if sentinel_of(exc) in _FINAL:
-                    return None
+    async def _reopen(self, dropped: ConnectError) -> _Opened | None:
+        retrying = AsyncRetrying(
+            wait=wait_exponential_jitter(initial=self._backoff, max=30.0, jitter=self._backoff),
+            retry=retry_if_exception(lambda exc: sentinel_of(exc) not in _FINAL),
+            stop=lambda _: self._closed.is_set(),
+            sleep=self._sleep,
+            reraise=True,
+        )
+        try:
+            async for attempt in retrying:
+                with attempt:
+                    if attempt.retry_state.attempt_number == 1:
+                        raise dropped
+                    if self._closed.is_set():
+                        return None
+                    return await self._open()
+        except ConnectError:
+            return None
+        return None
+
+    async def _sleep(self, seconds: float) -> None:
+        await asyncio.wait({self._closed_wait}, timeout=seconds)
 
     async def _read(self, stream: AsyncIterator[SubscribeResponse]) -> SubscribeResponse | None:
         frame = asyncio.ensure_future(stream.__anext__())
