@@ -13,9 +13,10 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/pomerium/agentops/harness/api"
-	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
 )
 
@@ -101,8 +102,7 @@ func errorInterceptor() connect.UnaryInterceptorFunc {
 func retryInterceptor(retries int, timeout time.Duration) connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-			retries := retries
-			if p, ok := req.Any().(*pb.PromptRequest); ok && p.GetIdempotencyKey() == "" {
+			if req.Spec().IdempotencyLevel == connect.IdempotencyUnknown && !hasIdempotencyKey(req.Any()) {
 				retries = 0
 			}
 			for attempt := 0; ; attempt++ {
@@ -122,10 +122,19 @@ func retryInterceptor(retries int, timeout time.Duration) connect.UnaryIntercept
 	}
 }
 
+func hasIdempotencyKey(msg any) bool {
+	m, ok := msg.(proto.Message)
+	if !ok {
+		return false
+	}
+	r := m.ProtoReflect()
+	fd := r.Descriptor().Fields().ByName("idempotency_key")
+	return fd != nil && fd.Kind() == protoreflect.StringKind && r.Get(fd).String() != ""
+}
+
 func retryable(err error) bool {
 	var cerr *connect.Error
 	if !errors.As(err, &cerr) {
-
 		return true
 	}
 	switch cerr.Code() {
