@@ -1,5 +1,6 @@
 import { Code, ConnectError } from "@connectrpc/connect";
 import type { MessageInitShape } from "@bufbuild/protobuf";
+import pRetry from "p-retry";
 import {
   Sentinel,
   type Event,
@@ -59,22 +60,27 @@ export async function subscribe(
     }
   };
 
-  const reopen = async (): Promise<Stream | undefined> => {
-    for (;;) {
-      await sleep(backoffMs, closed.signal);
-      if (closed.signal.aborted) {
-        return undefined;
-      }
-      try {
-        return await open();
-      } catch (err) {
-        const sentinel = sentinelOf(err);
-        if (sentinel !== undefined && finalSentinels.has(sentinel)) {
-          return undefined;
+  const reopen = (dropped: Error): Promise<Stream | undefined> =>
+    pRetry(
+      async (attempt) => {
+        if (attempt === 1) {
+          throw dropped;
         }
-      }
-    }
-  };
+        return open();
+      },
+      {
+        retries: Number.POSITIVE_INFINITY,
+        minTimeout: backoffMs,
+        maxTimeout: 30_000,
+        factor: 2,
+        randomize: true,
+        signal: closed.signal,
+        shouldRetry: ({ error }) => {
+          const sentinel = sentinelOf(error);
+          return sentinel === undefined || !finalSentinels.has(sentinel);
+        },
+      },
+    ).catch(() => undefined);
 
   async function* events(stream: Stream): AsyncGenerator<Event, boolean> {
     let msg = stream.first;
@@ -107,7 +113,7 @@ export async function subscribe(
         if (yield* events(stream)) {
           return;
         }
-        stream = await reopen();
+        stream = await reopen(new ConnectError("the subscription stream dropped", Code.Unavailable));
       }
     } finally {
       closed.abort();
@@ -138,20 +144,4 @@ async function withDeadline<T>(read: Promise<T>, ms: number): Promise<T> {
     clearTimeout(timer);
     void read.catch(() => undefined);
   }
-}
-
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const done = () => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    if (signal.aborted) {
-      done();
-    } else {
-      signal.addEventListener("abort", done, { once: true });
-    }
-  });
 }

@@ -1,6 +1,7 @@
 import { Code, ConnectError, createClient, type Client, type Interceptor } from "@connectrpc/connect";
 import { createConnectTransport as createWebTransport } from "@connectrpc/connect-web";
 import { MethodOptions_IdempotencyLevel } from "@bufbuild/protobuf/wkt";
+import pRetry from "p-retry";
 import { HarnessAPIService } from "./gen/harnessapi/v1/harnessapi_pb.js";
 
 export type HarnessClient = Client<typeof HarnessAPIService>;
@@ -59,34 +60,14 @@ function retry(opts: ClientOptions): Interceptor {
     const repeatable =
       req.method.idempotency !== MethodOptions_IdempotencyLevel.IDEMPOTENCY_UNKNOWN ||
       (typeof keyed === "string" && keyed !== "");
-    for (let n = 0; n < (repeatable ? retries : 0); n++) {
-      try {
-        return await attempt();
-      } catch (err) {
-        if (!retryable.has(ConnectError.from(err).code)) {
-          throw err;
-        }
-      }
-      await backoff((n + 1) * 200, req.signal);
-    }
-    return attempt();
+    return pRetry(attempt, {
+      retries: repeatable ? retries : 0,
+      minTimeout: 200,
+      maxTimeout: 2_000,
+      factor: 2,
+      randomize: true,
+      signal: req.signal,
+      shouldRetry: ({ error }) => retryable.has(ConnectError.from(error).code),
+    });
   };
-}
-
-function backoff(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const stop = () => {
-      clearTimeout(timer);
-      reject(ConnectError.from(signal.reason));
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", stop);
-      resolve();
-    }, ms);
-    if (signal.aborted) {
-      stop();
-    } else {
-      signal.addEventListener("abort", stop, { once: true });
-    }
-  });
 }
