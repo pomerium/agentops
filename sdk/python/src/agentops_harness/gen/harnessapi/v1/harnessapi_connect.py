@@ -113,7 +113,7 @@ class HarnessAPIServiceASGIApplication(ConnectASGIApplication[HarnessAPIService]
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=GetSessionRequest,
                         output=GetSessionResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.get_session,
                 ),
@@ -123,7 +123,7 @@ class HarnessAPIServiceASGIApplication(ConnectASGIApplication[HarnessAPIService]
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=ListSessionsRequest,
                         output=ListSessionsResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_sessions,
                 ),
@@ -133,7 +133,7 @@ class HarnessAPIServiceASGIApplication(ConnectASGIApplication[HarnessAPIService]
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=ListTemplatesRequest,
                         output=ListTemplatesResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_templates,
                 ),
@@ -143,7 +143,7 @@ class HarnessAPIServiceASGIApplication(ConnectASGIApplication[HarnessAPIService]
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=ListEventsRequest,
                         output=ListEventsResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=svc.list_events,
                 ),
@@ -257,6 +257,7 @@ class HarnessAPIServiceClient(ConnectClient):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> GetSessionResponse:
         return await self.execute_unary(
             request=request,
@@ -265,10 +266,11 @@ class HarnessAPIServiceClient(ConnectClient):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=GetSessionRequest,
                 output=GetSessionResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
 
     async def list_sessions(
@@ -277,6 +279,7 @@ class HarnessAPIServiceClient(ConnectClient):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ListSessionsResponse:
         return await self.execute_unary(
             request=request,
@@ -285,10 +288,11 @@ class HarnessAPIServiceClient(ConnectClient):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=ListSessionsRequest,
                 output=ListSessionsResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
 
     async def list_templates(
@@ -297,6 +301,7 @@ class HarnessAPIServiceClient(ConnectClient):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ListTemplatesResponse:
         return await self.execute_unary(
             request=request,
@@ -305,10 +310,11 @@ class HarnessAPIServiceClient(ConnectClient):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=ListTemplatesRequest,
                 output=ListTemplatesResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
 
     async def list_events(
@@ -317,6 +323,7 @@ class HarnessAPIServiceClient(ConnectClient):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ListEventsResponse:
         return await self.execute_unary(
             request=request,
@@ -325,10 +332,11 @@ class HarnessAPIServiceClient(ConnectClient):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=ListEventsRequest,
                 output=ListEventsResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
 
     def subscribe(
@@ -437,7 +445,7 @@ class HarnessAPIServiceWSGIApplication(ConnectWSGIApplication):
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=GetSessionRequest,
                         output=GetSessionResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.get_session,
                 ),
@@ -447,7 +455,7 @@ class HarnessAPIServiceWSGIApplication(ConnectWSGIApplication):
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=ListSessionsRequest,
                         output=ListSessionsResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_sessions,
                 ),
@@ -457,7 +465,7 @@ class HarnessAPIServiceWSGIApplication(ConnectWSGIApplication):
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=ListTemplatesRequest,
                         output=ListTemplatesResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_templates,
                 ),
@@ -467,7 +475,7 @@ class HarnessAPIServiceWSGIApplication(ConnectWSGIApplication):
                         service_name="harnessapi.v1.HarnessAPIService",
                         input=ListEventsRequest,
                         output=ListEventsResponse,
-                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                        idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
                     ),
                     function=service.list_events,
                 ),
@@ -577,6 +585,7 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> GetSessionResponse:
         return self.execute_unary(
             request=request,
@@ -585,10 +594,11 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=GetSessionRequest,
                 output=GetSessionResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def list_sessions(
         self,
@@ -596,6 +606,7 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ListSessionsResponse:
         return self.execute_unary(
             request=request,
@@ -604,10 +615,11 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=ListSessionsRequest,
                 output=ListSessionsResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def list_templates(
         self,
@@ -615,6 +627,7 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ListTemplatesResponse:
         return self.execute_unary(
             request=request,
@@ -623,10 +636,11 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=ListTemplatesRequest,
                 output=ListTemplatesResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def list_events(
         self,
@@ -634,6 +648,7 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
         *,
         headers: Headers | Mapping[str, str] | None = None, 
         timeout_ms: int | None = None,
+        use_get: bool = False,
     ) -> ListEventsResponse:
         return self.execute_unary(
             request=request,
@@ -642,10 +657,11 @@ class HarnessAPIServiceClientSync(ConnectClientSync):
                 service_name="harnessapi.v1.HarnessAPIService",
                 input=ListEventsRequest,
                 output=ListEventsResponse,
-                idempotency_level=IdempotencyLevel.UNKNOWN,
+                idempotency_level=IdempotencyLevel.NO_SIDE_EFFECTS,
             ),
             headers=headers,
             timeout_ms=timeout_ms,
+            use_get=use_get,
         )
     def subscribe(
         self,

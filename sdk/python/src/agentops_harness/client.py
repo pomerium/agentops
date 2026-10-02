@@ -9,10 +9,10 @@ from typing import Any
 
 from connectrpc.code import Code
 from connectrpc.errors import ConnectError
+from connectrpc.method import IdempotencyLevel
 from connectrpc.request import RequestContext
 
 from .gen.harnessapi.v1.harnessapi_connect import HarnessAPIServiceClient, HarnessAPIServiceClientSync
-from .gen.harnessapi.v1.harnessapi_pb import PromptRequest
 
 __all__ = ["Config", "async_client", "sync_client"]
 
@@ -52,7 +52,7 @@ class _Retry:
         self._retries = max(0, config.retries)
 
     async def intercept_unary(self, call_next: Callable[..., Awaitable[Any]], request: Any, ctx: RequestContext) -> Any:
-        for attempt in range(self._attempts(request)):
+        for attempt in range(self._attempts(request, ctx)):
             try:
                 return await call_next(request, self._attempt(ctx))
             except ConnectError as exc:
@@ -62,7 +62,7 @@ class _Retry:
         return await call_next(request, self._attempt(ctx))
 
     def intercept_unary_sync(self, call_next: Callable[..., Any], request: Any, ctx: RequestContext) -> Any:
-        for attempt in range(self._attempts(request)):
+        for attempt in range(self._attempts(request, ctx)):
             try:
                 return call_next(request, self._attempt(ctx))
             except ConnectError as exc:
@@ -71,10 +71,10 @@ class _Retry:
             time.sleep(_backoff(attempt))
         return call_next(request, self._attempt(ctx))
 
-    def _attempts(self, request: Any) -> int:
-        if isinstance(request, PromptRequest) and not request.idempotency_key:
-            return 0
-        return self._retries
+    def _attempts(self, request: Any, ctx: RequestContext) -> int:
+        if ctx.method.idempotency_level != IdempotencyLevel.UNKNOWN or getattr(request, "idempotency_key", ""):
+            return self._retries
+        return 0
 
     def _attempt(self, ctx: RequestContext) -> RequestContext:
         remaining = ctx.timeout_ms

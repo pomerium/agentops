@@ -406,6 +406,15 @@ RETRY_CASES = [
     pytest.param(
         "get_session", GetSessionRequest(ref=sentinel_ref(Sentinel.FORBIDDEN)), False, id="a-considered-refusal"
     ),
+    pytest.param(
+        "create_session",
+        CreateSessionRequest(
+            template=sentinel_ref(Sentinel.UNAVAILABLE).session_id, conversation_ref="no-resend", approval_prompt="ok"
+        ),
+        False,
+        id="a-create-session",
+    ),
+    pytest.param("end_session", EndSessionRequest(ref=UNAVAILABLE), False, id="an-end-session"),
 ]
 
 
