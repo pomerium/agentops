@@ -17,9 +17,6 @@ CONTROLLER_GEN ?= go tool controller-gen
 SQLC           ?= go tool sqlc
 BUF            ?= go tool buf
 
-# The harness module (harness/): the client-facing Harness API. A separate Go
-# module, so every target that walks packages visits it too; GOWORK=off keeps a
-# local go.work from resolving one module against the other.
 HARNESS_DIR ?= harness
 HARNESS_GO  ?= cd $(HARNESS_DIR) && GOWORK=off go
 
@@ -57,8 +54,6 @@ vet:
 
 ## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
 ## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
-## the sidecar control protocol stubs (buf, from proto/sidecar), and the Harness
-## API's Connect stubs (generate-harness-api).
 generate: generate-harness-api
 	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
@@ -66,9 +61,6 @@ generate: generate-harness-api
 	$(BUF) generate
 	$(MAKE) helm-sync-crds
 
-## generate-harness-api: regenerate the Harness API's Go and Connect stubs
-## (harness/api/pb) from proto/harnessapi, with the harness module's own
-## pinned buf and plugins.
 generate-harness-api:
 	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
 
