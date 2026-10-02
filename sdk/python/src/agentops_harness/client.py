@@ -56,9 +56,9 @@ class _Retry:
             try:
                 return await call_next(request, self._attempt(ctx))
             except ConnectError as exc:
-                if exc.code not in _RETRYABLE:
+                if exc.code not in _RETRYABLE or not _time_for(ctx, attempt):
                     raise
-            await asyncio.sleep((attempt + 1) * 0.2)
+            await asyncio.sleep(_backoff(attempt))
         return await call_next(request, self._attempt(ctx))
 
     def intercept_unary_sync(self, call_next: Callable[..., Any], request: Any, ctx: RequestContext) -> Any:
@@ -66,9 +66,9 @@ class _Retry:
             try:
                 return call_next(request, self._attempt(ctx))
             except ConnectError as exc:
-                if exc.code not in _RETRYABLE:
+                if exc.code not in _RETRYABLE or not _time_for(ctx, attempt):
                     raise
-            time.sleep((attempt + 1) * 0.2)
+            time.sleep(_backoff(attempt))
         return call_next(request, self._attempt(ctx))
 
     def _attempts(self, request: Any) -> int:
@@ -84,6 +84,15 @@ class _Retry:
             request_headers=ctx.request_headers,
             timeout_ms=self._timeout_ms if remaining is None else min(int(remaining), self._timeout_ms),
         )
+
+
+def _backoff(attempt: int) -> float:
+    return (attempt + 1) * 0.2
+
+
+def _time_for(ctx: RequestContext, attempt: int) -> bool:
+    remaining = ctx.timeout_ms
+    return remaining is None or remaining > _backoff(attempt) * 1000
 
 
 class _Bearer:

@@ -497,3 +497,16 @@ async def test_closing_an_unread_feed_releases_its_stream(client: HarnessAPIServ
     assert feed._unread is None
     assert feed._closed_wait.done()
     assert [e async for e in feed] == []
+
+
+async def test_retries_stop_at_the_callers_deadline() -> None:
+    with socket.socket() as silent:
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        url = f"http://127.0.0.1:{silent.getsockname()[1]}"
+        async with async_client(Config(base_url=url, request_timeout=30, retries=1)) as client:
+            started = time.monotonic()
+            with pytest.raises(ConnectError) as caught:
+                await client.list_templates(ListTemplatesRequest(), timeout_ms=50)
+    assert caught.value.code == Code.DEADLINE_EXCEEDED
+    assert time.monotonic() - started < 0.2
