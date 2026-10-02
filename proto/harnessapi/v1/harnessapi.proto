@@ -1,3 +1,29 @@
+// The Harness API lets a client program start agent sessions and talk to them.
+//
+// Terms:
+//
+//   - Client: the program that calls this API, for example a chat bot.
+//     Pomerium identifies the client. The API has no concept of an end user.
+//   - Session: one agent in one sandbox, with one conversation.
+//     A session belongs to the client that created it.
+//   - Approver: the person who approves a session before its agent can run.
+//     The approver uses the approval_url in the ApprovalRequired event.
+//   - Turn: one prompt and the agent's work on it. A turn ends with
+//     TurnCompleted or TurnFailed.
+//   - Event log: the ordered record of a session. ListEvents and Subscribe
+//     read it.
+//
+// Identity: each request goes through Pomerium. If Pomerium cannot identify
+// the client, the server returns the Connect code Unauthenticated.
+// A client can see and change only its own sessions. For the session of a
+// different client, the server returns SENTINEL_NOT_FOUND.
+//
+// Errors: a failed request has a Connect code and one error detail of type
+// ErrorInfo. The Sentinel tells you the cause. Errors without an ErrorInfo
+// are Unauthenticated, Canceled, DeadlineExceeded and Internal.
+//
+// Optional timestamps and durations: if the field is not set, the value is
+// not known.
 syntax = "proto3";
 
 package harnessapi.v1;
@@ -8,51 +34,176 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/pomerium/agentops/harness/api/pb;harnessapipb";
 
+// HarnessAPIService starts agent sessions, sends prompts to them, and
+// reads their events.
 service HarnessAPIService {
+  // CreateSession starts a new session from a template.
+  //
+  // The server returns the session in SESSION_STATE_PENDING and starts it in
+  // the background. Then an approver must approve the session at the URL in
+  // the ApprovalRequired event. After approval, the session goes to
+  // SESSION_STATE_RUNNING. Use Subscribe to follow these steps.
+  //
+  // Errors:
+  //   - SENTINEL_INVALID_ARGUMENT: template, conversation_ref or
+  //     approval_prompt is empty.
+  //   - SENTINEL_FORBIDDEN: the client cannot use the API or the template.
+  //   - SENTINEL_NOT_FOUND: the template does not exist.
+  //   - SENTINEL_QUOTA_EXCEEDED: the client has too many sessions, or it
+  //     creates sessions too fast.
+  //   - SENTINEL_CONFLICT: a live session of this client already has the
+  //     same conversation_ref.
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
 
+  // Prompt sends a message to the agent and starts a turn.
+  //
+  // The server returns the turn_id immediately. The agent's work arrives as
+  // events with this turn_id.
+  //
+  // In SESSION_STATE_RUNNING, the turn starts at once.
+  // In SESSION_STATE_SUSPENDED, the server revives the session first. A
+  // revive needs a new approval, so an ApprovalRequired event comes before
+  // the turn starts. If the revive fails, the turn gets TurnFailed and the
+  // session stays suspended.
+  //
+  // To retry a Prompt safely, set idempotency_key.
+  //
+  // Errors:
+  //   - SENTINEL_NOT_FOUND: no live session matches the ref.
+  //   - SENTINEL_INVALID_ARGUMENT: content is empty.
+  //   - SENTINEL_INVALID_STATE: the session is not running or suspended.
+  //     The server does not keep a queue of prompts.
+  //   - SENTINEL_NOT_REVIVABLE: the session is suspended, but the server
+  //     cannot revive it. Start a new session.
+  //   - SENTINEL_QUOTA_EXCEEDED: a revive is above the client's quota.
   rpc Prompt(PromptRequest) returns (PromptResponse);
 
+  // RespondPermission answers a PermissionRequest from the agent.
+  //
+  // If you send the same answer again after the server accepted it, the
+  // server returns OK.
+  //
+  // Errors:
+  //   - SENTINEL_NOT_FOUND: no live session matches the ref.
+  //   - SENTINEL_INVALID_ARGUMENT: request_id is empty.
+  //   - SENTINEL_UNKNOWN_REQUEST: the request is not open. It does not
+  //     exist, or it has a PermissionResolved event already.
   rpc RespondPermission(RespondPermissionRequest) returns (RespondPermissionResponse);
 
+  // EndSession stops a live session and removes its sandbox.
+  //
+  // The server cancels each open permission request with
+  // RESOLUTION_SUPERSEDED. Then it records StateChanged and SessionEnded.
+  // If session_id names a session that ended already, EndSession does
+  // nothing and returns OK.
+  //
+  // Errors:
+  //   - SENTINEL_NOT_FOUND: no live session matches the ref.
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
 
+  // GetSession returns the current view of one session.
+  //
+  // Errors:
+  //   - SENTINEL_NOT_FOUND: no session matches the ref.
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
 
+  // ListSessions returns the sessions of the client, newest first.
+  //
+  // The response has all matching sessions. It has no pages.
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
 
+  // ListTemplates returns the templates that the client can use in
+  // CreateSession, in name order.
   rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
 
+  // ListEvents reads one page of a session's event log.
+  //
+  // The response has the events after after_seq, in seq order. To read the
+  // full log, set after_seq to the last seq that you received. Stop when a
+  // page has fewer events than the limit.
+  //
+  // Errors:
+  //   - SENTINEL_NOT_FOUND: no session matches the ref.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
 
+  // Subscribe sends a session's events as they occur.
+  //
+  // The stream first sends the events after after_seq from the log. Then it
+  // sends new events. Each event comes one time, in seq order. The stream
+  // ends with status OK after it sends SessionEnded.
+  //
+  // The first message is a keepalive. Then the server sends a keepalive
+  // every 20 seconds, also between events. If you get no message for
+  // 60 seconds, close the stream and subscribe again.
+  //
+  // To continue after a disconnect, subscribe again with after_seq set to
+  // the last seq that you received.
+  //
+  // The server checks the request before it sends a message. Errors come
+  // as the status of the call, not inside the stream.
+  //
+  // Errors:
+  //   - SENTINEL_NOT_FOUND: no session matches the ref.
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
+// ErrorInfo is the error detail of each failed request.
 message ErrorInfo {
+  // The cause of the error.
   Sentinel sentinel = 1;
+  // A text for persons. Do not parse it. The text can change.
   string detail = 2;
 }
 
+// SessionRef identifies one session of the client.
+//
+// Set session_id or conversation_ref, not both.
 message SessionRef {
+  // The id that CreateSession returned.
+  // The server finds the session in any state.
   string session_id = 1;
+  // The conversation_ref from CreateSession.
+  // The server finds the newest live session with this ref.
   string conversation_ref = 2;
+  // Applies to conversation_ref. If true, the server finds the newest
+  // session with this ref, also if it has ended.
+  //
+  // Only GetSession, ListEvents and Subscribe use this field.
+  // Prompt, RespondPermission and EndSession always find a live session.
   bool include_terminal = 3;
 }
 
+// SessionView is the current state of a session.
 message SessionView {
+  // The session id.
   string id = 1;
+  // The conversation_ref from CreateSession.
   string conversation_ref = 2;
+  // The current state.
   SessionState state = 3;
+  // The name of the template that the session uses.
   string template = 4;
+  // The seq of the last event in the log. Zero means that the log is empty.
   int64 last_seq = 5;
 }
 
+// Event is one entry in a session's event log.
+//
+// A new server version can add payload types. Ignore an event with a
+// payload type that you do not know.
 message Event {
+  // The session that the event is about.
   string session_id = 1;
+  // The position of the event in the session's log.
+  // The first event has seq 1. Each next event has a seq one higher.
   int64 seq = 2;
+  // The turn that the event is part of.
+  // Empty for events about the session, for example StateChanged.
   string turn_id = 3;
+  // The time when the server recorded the event.
   google.protobuf.Timestamp timestamp = 4;
 
+  // What occurred.
   oneof payload {
     StateChanged state_changed = 10;
     ApprovalRequired approval_required = 11;
@@ -74,251 +225,484 @@ message Event {
   }
 }
 
+// StateChanged tells that the session went to a different state.
 message StateChanged {
+  // The state before the change.
+  // SESSION_STATE_UNSPECIFIED in the first event of a new session.
   SessionState old = 1;
+  // The state after the change.
   SessionState new = 2;
+  // Why the state changed.
+  // REASON_UNSPECIFIED when the session is created or ends.
   Reason reason = 3;
 }
 
+// ApprovalRequired tells that the session waits for an approver.
+//
+// The server sends it at each launch and at each revive.
 message ApprovalRequired {
+  // The page where the approver approves the session. Show it to the
+  // approver.
   string approval_url = 1;
+  // The time when the approval offer ends.
   google.protobuf.Timestamp expires_at = 2;
 }
 
+// Approved tells who approved the session.
+//
+// The server sends it when the agent is ready, before the session goes to
+// SESSION_STATE_RUNNING.
 message Approved {
+  // The identity of the approver, as the authorization server gives it.
   string approver_subject = 1;
 }
 
+// LaunchStalled tells that the session has approval, but the sandbox did
+// not connect in the expected time.
+//
+// The server can send it one time for each launch. The launch continues.
 message LaunchStalled {
+  // How long the server waited for the sandbox.
   google.protobuf.Duration waited = 1;
 }
 
+// AgentMessage is a part of the agent's reply.
+//
+// Each event has a complete part of the text. It is not a change to an
+// earlier part. Show the parts of a turn in seq order.
 message AgentMessage {
+  // The id of this part. It is different for each part in the session.
   string part_id = 1;
+  // The text of this part.
   string text = 2;
+  // True for the last part of the turn.
+  //
+  // A turn can end without a final part. Use TurnCompleted or TurnFailed
+  // to find the end of a turn.
   bool final = 3;
 }
 
+// AgentThought is text from the agent's reasoning.
+//
+// It is not a part of the reply. A client can hide it.
 message AgentThought {
+  // The text of the thought.
   string text = 1;
 }
 
+// ToolCall tells about a tool that the agent uses.
+//
+// The first event for a call has update set to false. Each next event for
+// the same id has update set to true and tells about a change.
 message ToolCall {
+  // The id of the call. It is the same in all events for the call.
   string id = 1;
+  // A short name for the call, for persons.
   string title = 2;
+  // The type of tool, as the agent gives it. For example "execute".
+  // An update can leave it empty.
   string kind = 3;
+  // The status of the call.
   ToolCallStatus status = 4;
+  // A text that tells what the call does, for persons.
+  // Optional. The server can leave it empty.
   string invocation_message = 5;
+  // The input that the agent gave to the tool.
+  // Not set if the agent did not give an input.
   google.protobuf.Value tool_input = 6;
+  // False for the first event of the call. True for each next event.
   bool update = 7;
 }
 
+// PermissionOption is one answer that the agent accepts.
 message PermissionOption {
+  // The id to send in RespondPermission.
   string id = 1;
+  // The text to show to persons, for example "Allow once".
   string name = 2;
+  // The type of answer, as the agent gives it. For example "allow_once"
+  // or "reject_always".
   string kind = 3;
 }
 
+// PermissionRequest tells that the agent must get permission before it
+// continues.
+//
+// The turn stops until the request has an answer. Send the answer with
+// RespondPermission. Each request ends with one PermissionResolved event.
 message PermissionRequest {
+  // The id of the request. Use it in RespondPermission.
   string request_id = 1;
+  // What the agent asks for, for persons.
   string summary = 2;
+  // The answers that the agent accepts.
   repeated PermissionOption options = 3;
+  // After this time, the server ends the request with RESOLUTION_EXPIRED.
+  // The agent then gets a refusal.
   google.protobuf.Timestamp deadline = 4;
+  // The ToolCall that needs the permission.
   string tool_call_id = 5;
 }
 
+// PermissionResolved tells that a permission request is closed.
 message PermissionResolved {
+  // The id from the PermissionRequest.
   string request_id = 1;
+  // How the request closed.
   oneof resolution {
+    // The id of the option that the client sent.
     string option_id = 2;
+    // Why the request closed without an answer.
     Resolution unanswered = 3;
   }
 }
 
+// TurnCompleted tells that the agent finished the turn.
 message TurnCompleted {
+  // Why the agent stopped, as the agent gives it.
+  // For example "end_turn", "max_tokens", "refusal" or "cancelled".
   string stop_reason = 1;
 }
 
+// TurnFailed tells that the turn stopped because of an error.
 message TurnFailed {
+  // The error, for persons.
   string reason = 1;
 }
 
+// Usage tells how many tokens and how much money the agent used.
+//
+// The agent sends Usage at different times, and each event has only some
+// of the fields. Zero means that this event does not give the value.
+// Token counts are numbers of tokens.
 message Usage {
+  // Input tokens of the turn.
   int64 input_tokens = 1;
+  // Output tokens of the turn.
   int64 output_tokens = 2;
+  // Input tokens of the turn that came from the cache.
   int64 cached_input_tokens = 3;
+  // Input tokens of the turn that the model wrote to the cache.
   int64 cache_creation_tokens = 4;
+  // Reasoning tokens of the turn.
   int64 thought_tokens = 5;
+  // All tokens of the turn.
   int64 total_tokens = 6;
+  // The cost in US dollars, as the agent gives it.
   double cost_usd = 7;
+  // The size of the model's context window, in tokens.
   int64 context_window = 8;
+  // The part of the context window that the conversation uses, in tokens.
   int64 context_used = 9;
 }
 
+// IdleWarning tells that the server will suspend the session soon, because
+// the session is idle.
+//
+// A Prompt before that time keeps the session running. The server sends
+// one warning for each idle period.
 message IdleWarning {
+  // The approximate time until the server suspends the session.
   google.protobuf.Duration lead = 1;
 }
 
+// Suspended tells that the server stopped the agent but kept its
+// workspace and conversation.
+//
+// To continue the session, send a Prompt.
 message Suspended {
+  // Why the server suspended the session.
   Reason reason = 1;
+  // How long the server keeps the workspace. After this time, the server
+  // sends Released and ends the session.
   google.protobuf.Duration retained_for = 2;
 }
 
+// Revived tells that a suspended session runs again, with its workspace and
+// conversation.
 message Revived {}
 
+// Released tells that the server deleted the workspace of a suspended
+// session, because the retention time ended.
+//
+// SessionEnded with END_REASON_EXPIRED comes next.
 message Released {
+  // How long the server kept the workspace.
   google.protobuf.Duration retained_for = 1;
 }
 
+// SessionEnded tells that the session ended. It is the last event in the
+// log.
 message SessionEnded {
+  // Why the session ended.
   EndReason reason = 1;
+  // More information, for persons. Can be empty.
   string detail = 2;
 }
 
+// SessionState is the lifecycle state of a session.
+//
+// The live states are PENDING, LAUNCHING, AWAITING_APPROVAL, RUNNING and
+// SUSPENDED. ENDED and INTERRUPTED are terminal. A session in a terminal
+// state does not change again.
 enum SessionState {
+  // Not set.
   SESSION_STATE_UNSPECIFIED = 0;
+  // The server created the session but did not start it.
   SESSION_STATE_PENDING = 1;
+  // The server prepares the sandbox and the workspace.
   SESSION_STATE_LAUNCHING = 2;
+  // The session waits for an approver and for the sandbox to connect.
   SESSION_STATE_AWAITING_APPROVAL = 3;
+  // The agent runs and accepts prompts.
   SESSION_STATE_RUNNING = 4;
+  // The agent is stopped. The server keeps the workspace. A Prompt
+  // revives the session.
   SESSION_STATE_SUSPENDED = 5;
+  // The session ended.
   SESSION_STATE_ENDED = 6;
+  // The session ended without a normal stop, for example because the server
+  // restarted.
   SESSION_STATE_INTERRUPTED = 7;
 }
 
+// Reason tells why a session changed state.
 enum Reason {
+  // No reason applies, for example when the session is created or ends.
   REASON_UNSPECIFIED = 0;
+  // The first start of the session.
   REASON_LAUNCH = 1;
+  // A Prompt revives a suspended session.
   REASON_REVIVE = 2;
+  // The session was idle for too long.
   REASON_IDLE = 3;
+  // A revive did not succeed. The session goes back to
+  // SESSION_STATE_SUSPENDED.
   REASON_REVIVE_FAILED = 4;
 }
 
+// EndReason tells why a session ended.
 enum EndReason {
+  // Not set. In EndSession, the server uses END_REASON_ENDED.
   END_REASON_UNSPECIFIED = 0;
+  // Someone revoked the approval.
   END_REASON_REVOKED = 1;
+  // A time limit ended: the approval, the session lifetime, or the
+  // retention of a suspended session.
   END_REASON_EXPIRED = 2;
+  // The approval offer ended before the session started.
   END_REASON_NEVER_APPROVED = 3;
+  // The agent process stopped.
   END_REASON_AGENT_EXIT = 4;
+  // The server lost its connection to the sandbox.
   END_REASON_TUNNEL_LOST = 5;
+  // A client ended the session with EndSession.
   END_REASON_ENDED = 6;
+  // The session stopped without a normal end, for example because the
+  // server restarted.
   END_REASON_INTERRUPTED = 7;
+  // The server could not prepare the workspace.
   END_REASON_PREPARE_FAILED = 8;
+  // The server could not ask the authorization server for an approval.
   END_REASON_RUN_CREATE_FAILED = 9;
+  // The sandbox did not connect in the permitted time.
   END_REASON_ATTACH_TIMEOUT = 10;
+  // The launch failed for a different reason.
   END_REASON_LAUNCH_FAILED = 11;
+  // The session was idle, and the server could not suspend it.
   END_REASON_IDLE = 12;
 }
 
+// ToolCallStatus is the status of a tool call.
 enum ToolCallStatus {
+  // Not set.
   TOOL_CALL_STATUS_UNSPECIFIED = 0;
+  // The call did not start. It can wait for a permission.
   TOOL_CALL_STATUS_PENDING = 1;
+  // The call runs.
   TOOL_CALL_STATUS_IN_PROGRESS = 2;
+  // The call finished without an error.
   TOOL_CALL_STATUS_COMPLETED = 3;
+  // The call finished with an error.
   TOOL_CALL_STATUS_FAILED = 4;
 }
 
+// Resolution tells why a permission request closed without an answer.
 enum Resolution {
+  // Not set.
   RESOLUTION_UNSPECIFIED = 0;
+  // The deadline of the request passed.
   RESOLUTION_EXPIRED = 1;
+  // The turn or the session stopped before an answer came.
   RESOLUTION_SUPERSEDED = 2;
 }
 
+// Sentinel is the cause of an error. Each sentinel has one Connect code.
+// Use the sentinel, not the code, to decide what to do.
 enum Sentinel {
+  // Not set.
   SENTINEL_UNSPECIFIED = 0;
+  // The session or the template does not exist, or it belongs to a
+  // different client. Code: NotFound.
   SENTINEL_NOT_FOUND = 1;
+  // The permission request is not open. Code: NotFound.
   SENTINEL_UNKNOWN_REQUEST = 2;
+  // The client cannot use the API or the template. Code: PermissionDenied.
   SENTINEL_FORBIDDEN = 3;
+  // A live session with the same conversation_ref exists.
+  // Code: AlreadyExists.
   SENTINEL_CONFLICT = 4;
+  // The session is not in a state that permits the request.
+  // Code: FailedPrecondition.
   SENTINEL_INVALID_STATE = 5;
+  // The server cannot revive the suspended session. Start a new session.
+  // Code: FailedPrecondition.
   SENTINEL_NOT_REVIVABLE = 6;
+  // A field in the request is not correct. Code: InvalidArgument.
   SENTINEL_INVALID_ARGUMENT = 7;
+  // The server cannot do the request now. Try again later.
+  // Code: Unavailable.
   SENTINEL_UNAVAILABLE = 8;
+  // The request is above a quota of the client. Code: ResourceExhausted.
   SENTINEL_QUOTA_EXCEEDED = 9;
 }
 
+// TemplateSummary describes one template.
 message TemplateSummary {
+  // The name to use in CreateSessionRequest.template.
   string name = 1;
+  // What the template is for, for persons. Can be empty.
   string description = 2;
 }
 
 message CreateSessionRequest {
+  // Required. The name of the template. ListTemplates returns the names.
   string template = 1;
+  // Required. Your id for the conversation, for example a chat thread id.
+  // Each live session of the client must have a different
+  // conversation_ref. After a session ends, you can use its ref again.
   string conversation_ref = 2;
+  // Optional. The id of a session that started this session.
+  // The server records it.
   string parent_session_id = 3;
+  // Required. The text that the approver sees on the approval page.
   string approval_prompt = 4;
+  // Optional. A prompt for the first turn. The turn starts when the session
+  // goes to SESSION_STATE_RUNNING. Its turn_id comes in the events.
   string initial_prompt = 5;
+  // Optional. Text that the server adds after the template's system prompt.
+  // It applies to the full session, also after a revive.
   string system_prompt_appendix = 6;
 }
 
 message CreateSessionResponse {
+  // The new session, in SESSION_STATE_PENDING.
   SessionView session = 1;
 }
 
 message PromptRequest {
+  // Required. The session.
   SessionRef ref = 1;
+  // Required. The message to the agent.
   string content = 2;
+  // Optional. A value that you make unique for each prompt, for example a
+  // UUID or a chat message id.
+  //
+  // If you send a Prompt again with the same key, the server does not start
+  // a second turn. It returns the turn_id of the first Prompt. If the first
+  // Prompt is still in progress, the server waits for it. If the first
+  // Prompt failed, the server does it again.
+  //
+  // The server keeps each key for 10 minutes. A server restart can delete
+  // the keys. Without a key, each Prompt starts a new turn, so do not retry.
   string idempotency_key = 3;
 }
 
 message PromptResponse {
+  // The id of the new turn.
   string turn_id = 1;
 }
 
 message RespondPermissionRequest {
+  // Required. The session.
   SessionRef ref = 1;
+  // Required. The request_id from the PermissionRequest.
   string request_id = 2;
+  // Required. The id of one of the options in the PermissionRequest.
   string option_id = 3;
 }
 
 message RespondPermissionResponse {}
 
 message EndSessionRequest {
+  // Required. The session.
   SessionRef ref = 1;
+  // Optional. Use END_REASON_ENDED or END_REASON_INTERRUPTED.
+  // If not set, the server uses END_REASON_ENDED. END_REASON_INTERRUPTED
+  // puts the session in SESSION_STATE_INTERRUPTED.
   EndReason reason = 2;
 }
 
 message EndSessionResponse {}
 
 message GetSessionRequest {
+  // Required. The session.
   SessionRef ref = 1;
 }
 
 message GetSessionResponse {
+  // The session.
   SessionView session = 1;
 }
 
 message ListSessionsRequest {
+  // If true, return only live sessions.
   bool live_only = 1;
+  // Optional. Return only sessions that the server changed at this time or
+  // later. A change is a change to the session, for example to its state.
+  // A new event alone is not a change. The server compares whole seconds.
   google.protobuf.Timestamp updated_since = 2;
 }
 
 message ListSessionsResponse {
+  // The sessions, newest first.
   repeated SessionView sessions = 1;
 }
 
 message ListTemplatesRequest {}
 
 message ListTemplatesResponse {
+  // The templates, in name order.
   repeated TemplateSummary templates = 1;
 }
 
 message ListEventsRequest {
+  // Required. The session.
   SessionRef ref = 1;
+  // Return the events with a seq higher than this value.
+  // Zero starts at the first event.
   int64 after_seq = 2;
+  // The maximum number of events. Zero or a value above 500 gives 500.
   int32 limit = 3;
 }
 
 message ListEventsResponse {
+  // The events, in seq order.
   repeated Event events = 1;
 }
 
 message SubscribeRequest {
+  // Required. The session.
   SessionRef ref = 1;
+  // Send the events with a seq higher than this value.
+  // Zero starts at the first event.
   int64 after_seq = 2;
 }
 
+// SubscribeResponse has an event or a keepalive. It never has both.
 message SubscribeResponse {
+  // The next event.
   Event event = 1;
+  // True if the message is a keepalive. A keepalive has no event.
   bool keepalive = 2;
 }
