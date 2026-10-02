@@ -53,7 +53,7 @@ Two more levers ride on ordinary request fields:
 - **`sentinel/<name>` as a session id** — or as a template on `CreateSession` —
   fails with that published sentinel from whichever verb you called. The name is
   the `Sentinel` value's proto name, `sentinel/SENTINEL_NOT_REVIVABLE`; every
-  one is in [`clients.md`](clients.md#errors).
+  one is in the `Sentinel` enum in [`harnessapi.proto`](../proto/harnessapi/v1/harnessapi.proto).
 - **Scripted prompts** make a turn unfold a particular way:
   `stub:permission` stops on a permission request and waits for an answer;
   `stub:unknown-event` emits an event whose payload is a oneof field from a later
@@ -161,8 +161,8 @@ The two reference suites also cover, with no scenario header:
 ## If you are writing an SDK in another language
 
 Work through this list in order; each item is a real production failure. The
-subscription semantics are where clients go wrong — implement all six from
-[`clients.md`](clients.md#subscribing), not the four that are easy.
+subscription semantics are where clients go wrong — implement all the `Subscribe` rules in
+[`harnessapi.proto`](../proto/harnessapi/v1/harnessapi.proto), not only the easy ones.
 
 If you find a scenario the stub cannot produce that your transport needs, add it:
 `harness/internal/apistub/scenario.go` works on the response bytes, because that
