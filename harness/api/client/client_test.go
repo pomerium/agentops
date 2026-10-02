@@ -18,12 +18,11 @@ func (blockingHTTPClient) Do(r *http.Request) (*http.Response, error) {
 }
 
 func TestRequestTimeoutAppliesToACustomHTTPClient(t *testing.T) {
-	c, err := client.New(client.Config{
-		BaseURL:        "http://example.invalid",
-		RequestTimeout: 50 * time.Millisecond,
-		Retries:        -1,
-		HTTPClient:     blockingHTTPClient{},
-	})
+	c, err := client.New("http://example.invalid",
+		client.WithRequestTimeout(50*time.Millisecond),
+		client.WithRetries(0),
+		client.WithHTTPClient(blockingHTTPClient{}),
+	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

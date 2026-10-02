@@ -19,54 +19,51 @@ import (
 	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
 )
 
-type Config struct {
-	BaseURL string
+type Option func(*options)
 
-	TokenFile string
-
-	DialAddress string
-
-	CAFile string
-
-	RequestTimeout time.Duration
-
-	Retries int
-
-	HTTPClient connect.HTTPClient
+type options struct {
+	tokenFile      string
+	dialAddress    string
+	caFile         string
+	requestTimeout time.Duration
+	retries        int
+	httpClient     connect.HTTPClient
 }
 
-const (
-	defaultRequestTimeout = 30 * time.Second
-	defaultRetries        = 2
-)
+func WithTokenFile(path string) Option { return func(o *options) { o.tokenFile = path } }
 
-func New(cfg Config) (harnessapipbconnect.HarnessAPIServiceClient, error) {
-	if cfg.BaseURL == "" {
+func WithDialAddress(addr string) Option { return func(o *options) { o.dialAddress = addr } }
+
+func WithCAFile(path string) Option { return func(o *options) { o.caFile = path } }
+
+func WithRequestTimeout(d time.Duration) Option { return func(o *options) { o.requestTimeout = d } }
+
+func WithRetries(n int) Option { return func(o *options) { o.retries = max(0, n) } }
+
+func WithHTTPClient(c connect.HTTPClient) Option { return func(o *options) { o.httpClient = c } }
+
+func New(baseURL string, opts ...Option) (harnessapipbconnect.HarnessAPIServiceClient, error) {
+	if baseURL == "" {
 		return nil, errors.New("harnessapi client: a base URL is required")
 	}
-	if cfg.RequestTimeout == 0 {
-		cfg.RequestTimeout = defaultRequestTimeout
+	o := options{requestTimeout: 30 * time.Second, retries: 2}
+	for _, opt := range opts {
+		opt(&o)
 	}
-	if cfg.Retries == 0 {
-		cfg.Retries = defaultRetries
-	}
-	if cfg.Retries < 0 {
-		cfg.Retries = 0
-	}
-	hc := cfg.HTTPClient
+	hc := o.httpClient
 	if hc == nil {
-		transport, err := newTransport(cfg.DialAddress, cfg.CAFile)
+		transport, err := newTransport(o.dialAddress, o.caFile)
 		if err != nil {
 			return nil, err
 		}
 		hc = &http.Client{Transport: transport}
 	}
 
-	return harnessapipbconnect.NewHarnessAPIServiceClient(hc, strings.TrimRight(cfg.BaseURL, "/"),
+	return harnessapipbconnect.NewHarnessAPIServiceClient(hc, strings.TrimRight(baseURL, "/"),
 		connect.WithInterceptors(
 			errorInterceptor(),
-			retryInterceptor(cfg.Retries, cfg.RequestTimeout),
-			bearerInterceptor{tokenFile: cfg.TokenFile},
+			retryInterceptor(o.retries, o.requestTimeout),
+			bearerInterceptor{tokenFile: o.tokenFile},
 		)), nil
 }
 

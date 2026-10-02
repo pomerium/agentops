@@ -1,7 +1,6 @@
 package client
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -17,34 +16,39 @@ import (
 	"github.com/pomerium/agentops/harness/api/pb/harnessapipbconnect"
 )
 
-type SubscribeOptions struct {
-	KeepaliveInterval time.Duration
+type SubscribeOption func(*subscribeOptions)
 
-	MissedKeepalives int
-
-	Logger *slog.Logger
+type subscribeOptions struct {
+	keepaliveInterval time.Duration
+	missedKeepalives  int
+	logger            *slog.Logger
 }
 
-const (
-	defaultMissedKeepalives = 3
-
-	reconnectBackoff = 2 * time.Second
-)
-
-func (o SubscribeOptions) silenceWindow() time.Duration {
-	return time.Duration(o.MissedKeepalives) * o.KeepaliveInterval
+func WithKeepaliveInterval(d time.Duration) SubscribeOption {
+	return func(o *subscribeOptions) { o.keepaliveInterval = d }
 }
 
-func Subscribe(ctx context.Context, c harnessapipbconnect.HarnessAPIServiceClient, req *pb.SubscribeRequest, opts SubscribeOptions) (*Subscription, error) {
-	if opts.KeepaliveInterval == 0 {
-		opts.KeepaliveInterval = api.KeepaliveInterval
-	}
-	if opts.MissedKeepalives == 0 {
-		opts.MissedKeepalives = defaultMissedKeepalives
-	}
-	opts.Logger = cmp.Or(opts.Logger, slog.Default())
+func WithMissedKeepalives(n int) SubscribeOption {
+	return func(o *subscribeOptions) { o.missedKeepalives = n }
+}
 
-	s := &Subscription{c: c, req: req, opts: opts, out: make(chan *pb.Event)}
+func WithLogger(l *slog.Logger) SubscribeOption {
+	return func(o *subscribeOptions) { o.logger = l }
+}
+
+const reconnectBackoff = 2 * time.Second
+
+func (o subscribeOptions) silenceWindow() time.Duration {
+	return time.Duration(o.missedKeepalives) * o.keepaliveInterval
+}
+
+func Subscribe(ctx context.Context, c harnessapipbconnect.HarnessAPIServiceClient, req *pb.SubscribeRequest, opts ...SubscribeOption) (*Subscription, error) {
+	o := subscribeOptions{keepaliveInterval: api.KeepaliveInterval, missedKeepalives: 3, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	s := &Subscription{c: c, req: req, opts: o, out: make(chan *pb.Event)}
 	stream, first, err := s.open(ctx, req.GetAfterSeq())
 	if err != nil && !errors.Is(err, errLogFinished) {
 		return nil, err
@@ -52,7 +56,6 @@ func Subscribe(ctx context.Context, c harnessapipbconnect.HarnessAPIServiceClien
 
 	ctx, s.cancel = context.WithCancel(ctx)
 	if errors.Is(err, errLogFinished) {
-
 		s.cancel()
 		close(s.out)
 		return s, nil
@@ -64,7 +67,7 @@ func Subscribe(ctx context.Context, c harnessapipbconnect.HarnessAPIServiceClien
 type Subscription struct {
 	c      harnessapipbconnect.HarnessAPIServiceClient
 	req    *pb.SubscribeRequest
-	opts   SubscribeOptions
+	opts   subscribeOptions
 	out    chan *pb.Event
 	cancel context.CancelFunc
 }
@@ -92,7 +95,7 @@ func (s *Subscription) run(ctx context.Context, stream *connect.ServerStreamForC
 			return
 		}
 		if err != nil {
-			s.opts.Logger.WarnContext(ctx, "event subscription dropped; reconnecting",
+			s.opts.logger.WarnContext(ctx, "event subscription dropped; reconnecting",
 				"session", s.req.GetRef().GetSessionId(), "after_seq", afterSeq, "err", err)
 		}
 		select {
@@ -104,7 +107,7 @@ func (s *Subscription) run(ctx context.Context, stream *connect.ServerStreamForC
 		if err != nil {
 
 			if final(err) {
-				s.opts.Logger.WarnContext(ctx, "event subscription cannot be resumed",
+				s.opts.logger.WarnContext(ctx, "event subscription cannot be resumed",
 					"session", s.req.GetRef().GetSessionId(), "err", err)
 				return
 			}
