@@ -20,9 +20,16 @@ env:
   OCI_REPO: oci://registry-1.docker.io/pomerium
 
 jobs:
+  stack:
+    uses: ./.github/workflows/stack-top.yaml
+    permissions:
+      contents: read
+      pull-requests: read
+
   # On PRs: lint the chart and render it both ways to catch template errors.
   test:
-    if: github.event_name == 'pull_request'
+    needs: stack
+    if: github.event_name == 'pull_request' && needs.stack.outputs.top == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
