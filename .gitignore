@@ -37,3 +37,6 @@ docs/
 
 node_modules/
 sdk/ts/dist/
+.venv/
+__pycache__/
+sdk/python/dist/
