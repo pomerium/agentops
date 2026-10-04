@@ -1,0 +1,14 @@
+version: v2
+plugins:
+  - local: [go, tool, protoc-gen-go]
+    out: .
+    opt: module=github.com/pomerium/agentops/harness
+  - local: [go, tool, protoc-gen-connect-go]
+    out: .
+    opt:
+      - module=github.com/pomerium/agentops/harness
+      - simple
+inputs:
+  - directory: ../proto
+    paths:
+      - ../proto/harnessapi

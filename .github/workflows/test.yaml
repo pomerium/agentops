@@ -30,6 +30,15 @@ jobs:
       - name: Stack gate tests
         run: .github/scripts/stack-top_test.sh
 
+      - name: Generated code is current
+        run: |
+          make generate-harness-api
+          if [ -n "$(git status --porcelain -- harness)" ]; then
+            git status --porcelain -- harness
+            echo "::error::harness/ generated code is stale; run 'make generate-harness-api' and commit the result"
+            exit 1
+          fi
+
       - name: Vet
         run: make vet
 
