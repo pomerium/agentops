@@ -1933,7 +1933,9 @@ export const HarnessAPIService: GenService<{
    * EndSession stops a live session and removes its sandbox.
    *
    * The server cancels each open permission request with
-   * RESOLUTION_SUPERSEDED. Then it records StateChanged and SessionEnded.
+   * RESOLUTION_SUPERSEDED. Each turn that the server accepted gets
+   * TurnCompleted or TurnFailed. Then the server records StateChanged and
+   * SessionEnded. No event comes after SessionEnded.
    * If session_id names a session that ended already, EndSession does
    * nothing and returns OK.
    *
