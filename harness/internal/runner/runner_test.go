@@ -2,10 +2,14 @@ package runner_test
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -219,7 +223,46 @@ func TestStreamDropKillsAnAgentThatStoppedReadingStdin(t *testing.T) {
 	}
 }
 
+func TestAgentExitStopsTheChildrenItLeft(t *testing.T) {
+	client := serve(t, []string{"/bin/sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!; exit 0"})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	stream, _ := spawn(t, ctx, client)
+	var stdout []byte
+	for {
+		frame, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		stdout = append(stdout, frame.GetStdout()...)
+		if frame.GetExited() != nil {
+			break
+		}
+	}
+	child, err := strconv.ParseInt(strings.TrimSpace(string(stdout)), 10, 64)
+	if err != nil {
+		t.Fatalf("child pid from %q: %v", stdout, err)
+	}
+	defer func() { _ = syscall.Kill(int(child), syscall.SIGKILL) }()
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Fatalf("recv after Exited: %v, want EOF", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for processAlive(child) {
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d survived the agent's exit", child)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func processAlive(pid int64) bool {
+	if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		_, state, _ := strings.Cut(string(stat), ") ")
+		return !strings.HasPrefix(state, "Z")
+	}
 	proc, err := os.FindProcess(int(pid))
 	if err != nil {
 		return false

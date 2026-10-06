@@ -324,25 +324,23 @@ func (p *agentProc) signal(log *slog.Logger, sig syscall.Signal) {
 
 func (p *agentProc) terminate(log *slog.Logger, delay time.Duration) {
 	p.once.Do(func() {
+		defer p.closeFDs()
 		select {
 		case <-p.done:
-			p.closeFDs()
-			return
 		default:
-		}
-		p.signal(log, syscall.SIGTERM)
-		select {
-		case <-p.done:
-		case <-time.After(delay):
-			log.Warn("agent-runner: agent ignored TERM; killing", "pid", p.pid(), "after", delay.String())
-			p.signal(log, syscall.SIGKILL)
+			p.signal(log, syscall.SIGTERM)
 			select {
 			case <-p.done:
-			case <-time.After(5 * time.Second):
-				log.Error("agent-runner: agent did not exit after KILL", "pid", p.pid())
+			case <-time.After(delay):
+				log.Warn("agent-runner: agent ignored TERM; killing", "pid", p.pid(), "after", delay.String())
 			}
 		}
-		p.closeFDs()
+		p.signal(log, syscall.SIGKILL)
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second):
+			log.Error("agent-runner: agent did not exit after KILL", "pid", p.pid())
+		}
 	})
 }
 
