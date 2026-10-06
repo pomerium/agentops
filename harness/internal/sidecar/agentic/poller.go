@@ -109,6 +109,9 @@ func (p *HTTPPoller) parseOK(body []byte) PollResult {
 	if out.AccessToken == "" {
 		return PollResult{Kind: PollTerminal, Reason: ReasonConfigError, Err: fmt.Errorf("token response has no access_token")}
 	}
+	if out.ExpiresIn <= 0 {
+		return PollResult{Kind: PollTerminal, Reason: ReasonConfigError, Err: fmt.Errorf("token response has no positive expires_in (%d)", out.ExpiresIn)}
+	}
 	scheme := out.TokenType
 	if scheme == "" {
 		scheme = "Bearer"

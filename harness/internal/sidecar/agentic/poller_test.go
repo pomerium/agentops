@@ -143,3 +143,24 @@ func TestHTTPPoller_NeverLogsToken(t *testing.T) {
 	require.Equal(t, PollOk, res.Kind)
 	assert.NotContains(t, buf.String(), "pom_art_SECRET")
 }
+
+func TestHTTPPoller_RejectsNonPositiveLifetime(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"missing":  `{"access_token":"pom_art_x","token_type":"Bearer","run_id":"r"}`,
+		"zero":     `{"access_token":"pom_art_x","token_type":"Bearer","expires_in":0,"run_id":"r"}`,
+		"negative": `{"access_token":"pom_art_x","token_type":"Bearer","expires_in":-1,"run_id":"r"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			res := newTestPoller(t, srv, writeTokenFile(t, "sa")).Poll(context.Background())
+			assert.Equal(t, PollTerminal, res.Kind)
+			assert.Equal(t, ReasonConfigError, res.Reason)
+			assert.Nil(t, res.Token)
+		})
+	}
+}
