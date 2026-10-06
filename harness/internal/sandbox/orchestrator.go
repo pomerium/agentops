@@ -355,9 +355,14 @@ func (o *Orchestrator) Activate(ctx context.Context, sink EventSink, prepared *P
 	defer op.Complete()
 
 	claimName, sandboxName := prepared.ClaimName, prepared.SandboxName
+	release := func() {
+		if !prepared.Resumed {
+			o.teardownQuietly(ctx, claimName)
+		}
+	}
 	fail := func(err error) (*Session, error) {
 		att.Forget()
-		o.teardownQuietly(ctx, claimName)
+		release()
 		return nil, op.Failure(err)
 	}
 
@@ -401,10 +406,9 @@ func (o *Orchestrator) Activate(ctx context.Context, sink EventSink, prepared *P
 	})
 	if err != nil {
 		_ = closeAll()
-		if errors.Is(err, ErrResumeUnavailable) {
-			return nil, op.Failure(err)
+		if !errors.Is(err, ErrResumeUnavailable) {
+			release()
 		}
-		o.teardownQuietly(ctx, claimName)
 		return nil, op.Failure(err)
 	}
 

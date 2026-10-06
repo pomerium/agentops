@@ -410,6 +410,52 @@ func TestActivateFailureForgetsAndTearsDown(t *testing.T) {
 	}
 }
 
+func TestFailedReviveActivationKeepsTheClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		attach  bool
+		openErr error
+	}{
+		{name: "attach timeout"},
+		{name: "acp setup error", attach: true, openErr: errors.New("initialize failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			link := newFakeAgentLink()
+			claims := newFakeClaims()
+			o := New(claims, testPods(), nil, link,
+				WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
+				WithAttachTimeout(50*time.Millisecond),
+			)
+			o.openSession = func(_ context.Context, _ *telemetry.Component, _ EventSink, _ io.Writer, _ io.Reader, _ func() error, _ SessionParams) (*Session, error) {
+				return nil, tc.openErr
+			}
+
+			prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			prepared.Resumed = true
+			att, err := o.Expect("run-1", prepared)
+			if err != nil {
+				t.Fatalf("Expect: %v", err)
+			}
+			if tc.attach {
+				link.handle("run-1").attach(1, false)
+			}
+
+			if _, err := o.Activate(context.Background(), nil, prepared, att); err == nil {
+				t.Fatal("Activate succeeded")
+			}
+			if names := claims.deletedNames(); len(names) != 0 {
+				t.Errorf("a failed revive deleted the retained claim: %v", names)
+			}
+			if link.live() != 0 {
+				t.Errorf("the expectation leaked: %d still registered", link.live())
+			}
+		})
+	}
+}
+
 func TestGraceWindowCancelledByReattach(t *testing.T) {
 	link := newFakeAgentLink()
 	o := New(newFakeClaims(), testPods(), nil, link,
