@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -164,11 +165,30 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 
 	proxy := s.proxy(caFile)
 	started := make(chan server.Process, 1)
+	var proxyMu sync.Mutex
+	var running server.Process
+	proxyStopped := false
+	defer func() {
+		proxyMu.Lock()
+		defer proxyMu.Unlock()
+		proxyStopped = true
+		if running != nil {
+			running.Stop()
+		}
+	}()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	startProxy := func(endpoints []envoyconfig.Endpoint) error {
+		proxyMu.Lock()
+		defer proxyMu.Unlock()
+		if proxyStopped {
+			return errors.New("start proxy: the sidecar is shutting down")
+		}
 		proc, err := proxy.Start(ctx, endpoints)
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
 		}
+		running = proc
 		started <- proc
 		log.Info("sidecar: proxy ready", "endpoints", len(endpoints))
 		return nil
@@ -228,7 +248,6 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 	for {
 		select {
 		case proc := <-started:
-			defer proc.Stop()
 			proxyExited = proc.Exited()
 		case exitErr := <-proxyExited:
 			log.Error("sidecar: envoy exited", "err", exitErr)

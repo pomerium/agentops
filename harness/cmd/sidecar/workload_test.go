@@ -5,13 +5,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -32,6 +35,11 @@ func workloadJWT(t *testing.T, ttl time.Duration) string {
 
 func newWorkloadSidecar(t *testing.T, envoyScript string) *sidecar {
 	t.Helper()
+	return newGatedWorkloadSidecar(t, envoyScript, func() bool { return true })
+}
+
+func newGatedWorkloadSidecar(t *testing.T, envoyScript string, ready func() bool) *sidecar {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "scw")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
@@ -39,7 +47,7 @@ func newWorkloadSidecar(t *testing.T, envoyScript string) *sidecar {
 	lis, err := net.Listen("unix", filepath.Join(dir, "admin.sock"))
 	require.NoError(t, err)
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/ready" {
+		if r.URL.Path == "/ready" && ready() {
 			fmt.Fprintln(w, "LIVE")
 			return
 		}
@@ -145,4 +153,46 @@ func TestServeWorkload_NeedsEndpoints(t *testing.T) {
 	s.bakedIn = nil
 	err := await(t, runWorkload(context.Background(), s, workloadConfig{TokenFile: "/x", Audience: "pomerium-egress"}))
 	assert.ErrorContains(t, err, "workload-identity needs at least one SIDECAR_HTTP_* endpoint")
+}
+
+type cancelOnReady struct {
+	slog.Handler
+	cancel context.CancelFunc
+}
+
+func (h cancelOnReady) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "sidecar: proxy ready" {
+		h.cancel()
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func TestServeWorkload_ShutdownAlwaysStopsAReadyEnvoy(t *testing.T) {
+	t.Parallel()
+	for i := range 20 {
+		pidFile := filepath.Join(t.TempDir(), "pid")
+		s := newGatedWorkloadSidecar(t, fmt.Sprintf("echo $$ > %q.tmp; mv %q.tmp %q; exec sleep 30\n", pidFile, pidFile, pidFile),
+			func() bool { _, err := os.Stat(pidFile); return err == nil })
+		tokenFile := filepath.Join(t.TempDir(), "token")
+		require.NoError(t, os.WriteFile(tokenFile, []byte(workloadJWT(t, time.Hour)), 0o600))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		s.log = slog.New(cancelOnReady{Handler: slog.NewTextHandler(io.Discard, nil), cancel: cancel})
+		require.NoError(t, await(t, runWorkload(ctx, s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"})))
+
+		var pid int
+		require.Eventually(t, func() bool {
+			b, err := os.ReadFile(pidFile)
+			if err != nil {
+				return false
+			}
+			pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+			return err == nil
+		}, 5*time.Second, 5*time.Millisecond)
+		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+		require.Eventually(t, func() bool { return syscall.Kill(pid, 0) == syscall.ESRCH },
+			5*time.Second, 5*time.Millisecond, "run %d: serve returned but envoy is still running", i)
+	}
 }
