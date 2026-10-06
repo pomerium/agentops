@@ -85,13 +85,18 @@ type Verifier struct {
 	jwksURL string
 	hc      *http.Client
 	log     *slog.Logger
+	now     func() time.Time
 
 	mu        sync.Mutex
 	keys      map[string]jose.JSONWebKey
+	fetchedAt time.Time
 	lastFetch time.Time
 }
 
-const jwksRefetchInterval = 30 * time.Second
+const (
+	jwksRefetchInterval = 30 * time.Second
+	jwksMaxAge          = 5 * time.Minute
+)
 
 func NewVerifier(issuer string, opts ...VerifierOption) (*Verifier, error) {
 	if issuer == "" {
@@ -120,8 +125,7 @@ func NewVerifier(issuer string, opts ...VerifierOption) (*Verifier, error) {
 		log = slog.Default()
 	}
 	return &Verifier{
-		issuer: issuer, cfg: o, jwksURL: jwksURL, hc: hc, log: log,
-		keys: map[string]jose.JSONWebKey{},
+		issuer: issuer, cfg: o, jwksURL: jwksURL, hc: hc, log: log, now: time.Now,
 	}, nil
 }
 
@@ -194,7 +198,7 @@ func (v *Verifier) VerifyClaims(ctx context.Context, raw string) (*VerifiedClaim
 	if err := json.Unmarshal(payload, &std); err != nil {
 		return nil, fmt.Errorf("decode assertion claims: %w", err)
 	}
-	expected := jwt.Expected{Issuer: v.issuer, Time: time.Now()}
+	expected := jwt.Expected{Issuer: v.issuer, Time: v.now()}
 	if err := std.ValidateWithLeeway(expected, clockSkew); err != nil {
 		return nil, fmt.Errorf("assertion claims rejected: %w", err)
 	}
@@ -218,15 +222,16 @@ func (v *Verifier) checkAudience(aud jwt.Audience) error {
 
 func (v *Verifier) key(ctx context.Context, kid string) (*jose.JSONWebKey, error) {
 	v.mu.Lock()
-	if k, ok := v.keys[kid]; ok {
+	now := v.now()
+	if k, ok := v.keys[kid]; ok && now.Sub(v.fetchedAt) < jwksMaxAge {
 		v.mu.Unlock()
 		return &k, nil
 	}
-	if !v.lastFetch.IsZero() && time.Now().Sub(v.lastFetch) < jwksRefetchInterval {
+	if !v.lastFetch.IsZero() && now.Sub(v.lastFetch) < jwksRefetchInterval {
 		v.mu.Unlock()
 		return nil, fmt.Errorf("no assertion signing key with kid %q (refetch throttled)", kid)
 	}
-	v.lastFetch = time.Now()
+	v.lastFetch = now
 	v.mu.Unlock()
 
 	keys, err := v.fetchJWKS(ctx)
@@ -234,9 +239,8 @@ func (v *Verifier) key(ctx context.Context, kid string) (*jose.JSONWebKey, error
 		return nil, err
 	}
 	v.mu.Lock()
-	for _, k := range keys {
-		v.keys[k.KeyID] = k
-	}
+	v.keys = keys
+	v.fetchedAt = now
 	k, ok := v.keys[kid]
 	v.mu.Unlock()
 	if !ok {
@@ -245,7 +249,7 @@ func (v *Verifier) key(ctx context.Context, kid string) (*jose.JSONWebKey, error
 	return &k, nil
 }
 
-func (v *Verifier) fetchJWKS(ctx context.Context) ([]jose.JSONWebKey, error) {
+func (v *Verifier) fetchJWKS(ctx context.Context) (map[string]jose.JSONWebKey, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURL, nil)
 	if err != nil {
 		return nil, err
@@ -262,10 +266,10 @@ func (v *Verifier) fetchJWKS(ctx context.Context) ([]jose.JSONWebKey, error) {
 	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 1<<20)).Decode(&set); err != nil {
 		return nil, fmt.Errorf("decode assertion JWKS %s: %w", v.jwksURL, err)
 	}
-	keys := make([]jose.JSONWebKey, 0, len(set.Keys))
+	keys := make(map[string]jose.JSONWebKey, len(set.Keys))
 	for _, k := range set.Keys {
 		if k.Valid() && k.IsPublic() {
-			keys = append(keys, k)
+			keys[k.KeyID] = k
 		}
 	}
 	if len(keys) == 0 {
