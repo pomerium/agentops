@@ -255,7 +255,9 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 		"session_id", row.ID, "client_id", clientID, "template", tmpl.Name,
 		"live_sessions", live, "launching_sessions", launching)
 
-	go s.launch(context.WithoutCancel(ctx), row.ID, launchOpts{
+	launchCtx, slot := s.newLaunch(ctx)
+	s.reserve(row.ID, slot)
+	go s.launch(launchCtx, slot, row.ID, launchOpts{
 		approvalPrompt: req.GetApprovalPrompt(),
 		agentPrompt:    req.GetInitialPrompt(),
 	})
@@ -315,11 +317,18 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		if err := s.checkQuotas(ctx, binding, sess.ClientID, spend{}); err != nil {
 			return "", err
 		}
-		turnID, err := s.nextTurnID(ctx, sess.ID)
-		if err != nil {
+		launchCtx, slot := s.newLaunch(ctx)
+		if err := s.reserveRevive(ctx, sess.ID, slot); err != nil {
+			slot.cancel()
 			return "", err
 		}
-		go s.launch(context.WithoutCancel(ctx), sess.ID, launchOpts{
+		turnID, err := s.nextTurnID(ctx, sess.ID)
+		if err != nil {
+			s.release(sess.ID, slot)
+			slot.cancel()
+			return "", err
+		}
+		go s.launch(launchCtx, slot, sess.ID, launchOpts{
 			revive: true,
 
 			approvalPrompt: content + continuationClause,
@@ -332,6 +341,22 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		return "", api.Errorf(api.ErrInvalidState,
 			"session %s is %s; a prompt is only accepted while running or suspended", sess.ID, sess.Status)
 	}
+}
+
+func (s *Service) reserveRevive(ctx context.Context, sessionID string, slot *launchSlot) error {
+	if !s.reserve(sessionID, slot) {
+		return api.Errorf(api.ErrInvalidState, "session %s is already being continued or stopped", sessionID)
+	}
+	current, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		s.release(sessionID, slot)
+		return api.Errorf(api.ErrUnavailable, "read session: %v", err)
+	}
+	if current.Status != api.StateSuspended {
+		s.release(sessionID, slot)
+		return api.Errorf(api.ErrInvalidState, "session %s is %s; it can no longer be continued", sessionID, current.Status)
+	}
+	return nil
 }
 
 const continuationClause = "\n\n(Continuing an earlier conversation, with its workspace and transcript.)"

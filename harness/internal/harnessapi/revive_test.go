@@ -1,7 +1,9 @@
 package harnessapi_test
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -9,7 +11,9 @@ import (
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
+	"github.com/pomerium/agentops/harness/internal/harnessapi"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
+	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
 func TestReviveRunsTheStoredTemplate(t *testing.T) {
@@ -191,5 +195,69 @@ func suspendReason(rec *recorder) api.Reason {
 			return sc.GetReason()
 		}
 		from = i + 1
+	}
+}
+
+type readBarrier struct {
+	sessionstore.Sessions
+	mu      sync.Mutex
+	waiting int
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func (b *readBarrier) GetSession(ctx context.Context, id string) (sessionstore.Session, error) {
+	sess, err := b.Sessions.GetSession(ctx, id)
+	b.mu.Lock()
+	hold := b.waiting > 0
+	if hold {
+		b.waiting--
+	}
+	b.mu.Unlock()
+	if hold {
+		b.arrived <- struct{}{}
+		<-b.release
+	}
+	return sess, err
+}
+
+func TestConcurrentRevivesAcceptOneTurn(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+	h.svc.SuspendForTest(ctx, ref.GetSessionId())
+	waitForStoredState(t, h, ref, api.StateSuspended)
+
+	h.launcher.gate = make(chan struct{})
+	defer h.launcher.openGate()
+	barrier := &readBarrier{
+		Sessions: h.store, waiting: 2,
+		arrived: make(chan struct{}, 2), release: make(chan struct{}),
+	}
+	svc := harnessapi.New(barrier, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+
+	results := make(chan error, 2)
+	for _, content := range []string{"one", "two"} {
+		go func() {
+			_, err := svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: content})
+			results <- err
+		}()
+	}
+	<-barrier.arrived
+	<-barrier.arrived
+	close(barrier.release)
+
+	accepted := 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			accepted++
+		case !errors.Is(err, api.ErrInvalidState):
+			t.Errorf("the losing revive: got %v, want ErrInvalidState", err)
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted %d turns, but only one revive can run", accepted)
 	}
 }

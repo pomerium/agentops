@@ -27,18 +27,18 @@ type launchOpts struct {
 	turnID string
 }
 
-func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts) {
+func (s *Service) newLaunch(ctx context.Context) (context.Context, *launchSlot) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return ctx, &launchSlot{cancel: cancel, outcome: &runOutcome{}}
+}
+
+func (s *Service) launch(ctx context.Context, slot *launchSlot, sessionID string, opts launchOpts) {
 	ctx = telemetry.With(ctx, "session_id", sessionID, "reviving", opts.revive)
 	ctx, op := s.tel.Start(ctx, "launch")
 	defer op.Complete()
 
-	ctx, cancel := context.WithCancel(ctx)
+	cancel := slot.cancel
 	defer cancel()
-	slot := &launchSlot{cancel: cancel, outcome: &runOutcome{}}
-	if !s.reserve(sessionID, slot) {
-		s.tel.Debug(ctx, "launch already in progress for this session; skipping")
-		return
-	}
 	registered := false
 	defer func() {
 		if !registered {
@@ -52,8 +52,8 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 		s.log.ErrorContext(ctx, "launch: could not read the session", "err", err)
 		return
 	}
-	if api.Terminal(sess.Status) {
-		s.tel.Debug(ctx, "the session ended before its launch began; skipping")
+	if outcome.isStopped() {
+		s.failLaunch(ctx, sess, opts, outcome, "", api.EndLaunchFailed, "")
 		return
 	}
 	from := sess.Status
