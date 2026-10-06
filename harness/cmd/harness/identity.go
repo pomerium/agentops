@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
+
+	"connectrpc.com/connect"
 
 	"github.com/pomerium/agentops/harness/internal/agentlink"
 	"github.com/pomerium/agentops/harness/internal/apiserver"
@@ -15,6 +18,9 @@ func assertionIdentity(v *agentlink.Verifier) apiserver.Identify {
 			return "", apiserver.ErrNoIdentity
 		}
 		claims, err := v.VerifyClaims(ctx, raw)
+		if errors.Is(err, agentlink.ErrKeysUnavailable) {
+			return "", connect.NewError(connect.CodeUnavailable, err)
+		}
 		if err != nil {
 			return "", err
 		}
