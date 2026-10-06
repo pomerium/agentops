@@ -111,7 +111,8 @@ type attachedRun struct {
 	hbInterval  time.Duration
 	hbMissLimit uint32
 
-	io *agentio.Stream
+	io     *agentio.Stream
+	ioTurn chan struct{}
 
 	attached chan struct{}
 	ready    chan struct{}
@@ -144,17 +145,44 @@ func (c *ioClaim) close() {
 	c.closeOnce.Do(func() { close(c.closed) })
 }
 
-func (r *attachedRun) claimIO() *ioClaim {
+var errIOSuperseded = errors.New("superseded by a newer agent io stream")
+
+func (r *attachedRun) claimIO(ctx context.Context) (*ioClaim, error) {
 	claim := newIOClaim()
 	r.mu.Lock()
+	if r.finished() {
+		r.mu.Unlock()
+		return nil, errForgotten
+	}
 	prev := r.ioStream
 	r.ioStream = claim
 	r.mu.Unlock()
 	prev.close()
-	return claim
+
+	select {
+	case r.ioTurn <- struct{}{}:
+	case <-ctx.Done():
+		r.dropIO(claim)
+		return nil, ctx.Err()
+	}
+	select {
+	case <-claim.closed:
+		r.releaseIO(claim)
+		if r.finished() {
+			return nil, errForgotten
+		}
+		return nil, errIOSuperseded
+	default:
+		return claim, nil
+	}
 }
 
 func (r *attachedRun) releaseIO(claim *ioClaim) {
+	r.dropIO(claim)
+	<-r.ioTurn
+}
+
+func (r *attachedRun) dropIO(claim *ioClaim) {
 	claim.close()
 	r.mu.Lock()
 	if r.ioStream == claim {

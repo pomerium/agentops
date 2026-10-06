@@ -32,14 +32,23 @@ func (s *Server) AgentIO(stream agentlinkpb.AgentLinkService_AgentIOServer) erro
 	if open == nil {
 		return status.Error(codes.FailedPrecondition, "the first AgentIO frame must be Open")
 	}
+
+	claim, err := run.claimIO(ctx)
+	switch {
+	case errors.Is(err, errForgotten):
+		return status.Errorf(codes.NotFound, "run %s is no longer expected", run.runID)
+	case errors.Is(err, errIOSuperseded):
+		return status.Errorf(codes.Aborted, "run %s: %v", run.runID, err)
+	case err != nil:
+		return status.FromContextError(err).Err()
+	}
+	defer run.releaseIO(claim)
+
 	if err := run.io.ValidateResume(open.GetConsumed()); err != nil {
 		s.log.Error("harness: agent io resume is unserviceable", "run_id", run.runID, "err", err)
 		s.fail(run, reasonResumeInvalid, err)
 		return status.Errorf(codes.FailedPrecondition, "%s: %v", reasonResumeInvalid, err)
 	}
-
-	claim := run.claimIO()
-	defer run.releaseIO(claim)
 
 	if err := stream.Send(agentio.OpenFrame(run.io.Consumed())); err != nil {
 		return err

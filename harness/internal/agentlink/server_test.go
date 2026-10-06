@@ -376,6 +376,7 @@ type agentIOPeer struct {
 	stream   agentlinkpb.AgentLinkService_AgentIOClient
 	cancel   context.CancelFunc
 	consumed uint64
+	resumeAt uint64
 	got      []byte
 }
 
@@ -402,7 +403,7 @@ func (g *testLink) openAgentIO(parent context.Context, runID string, consumed ui
 		cancel()
 		return nil, status.Errorf(codes.Internal, "first manager AgentIO frame was %v, want Open", frame)
 	}
-	return &agentIOPeer{stream: stream, cancel: cancel, consumed: consumed}, nil
+	return &agentIOPeer{stream: stream, cancel: cancel, consumed: consumed, resumeAt: frame.GetOpen().GetConsumed()}, nil
 }
 
 func TestAgentIORoundTrip(t *testing.T) {
@@ -750,5 +751,88 @@ func TestAttachDuringJWKSOutageIsRetryable(t *testing.T) {
 		if codeOf(err) != codes.Unavailable {
 			t.Fatalf("attempt %d: err = %v (code %s), want Unavailable", attempt+1, err, codeOf(err))
 		}
+	}
+}
+
+func TestAgentIOTakeoverWaitsForThePendingInboundWrite(t *testing.T) {
+	g := newTestLink(t, time.Hour, 3)
+	handle, err := g.srv.Expect("run-takeover", testSeal, nil)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, err := g.attach(g.ctx(ctx, "run-takeover", nil), 1, false); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	old, err := g.openAgentIO(ctx, "run-takeover", 0)
+	if err != nil {
+		t.Fatalf("openAgentIO: %v", err)
+	}
+	defer old.cancel()
+	_, stdout, err := handle.AwaitAgentIO(ctx)
+	if err != nil {
+		t.Fatalf("AwaitAgentIO: %v", err)
+	}
+
+	const sent = "abc"
+	send := func(p *agentIOPeer, through uint64) {
+		t.Helper()
+		if p.resumeAt >= through {
+			return
+		}
+		if err := p.stream.Send(&agentlinkpb.AgentIOFrame{
+			Msg: &agentlinkpb.AgentIOFrame_Data{Data: &agentlinkpb.AgentIOData{
+				Seq: through, Payload: []byte(sent[p.resumeAt:through]),
+			}},
+		}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	send(old, 2)
+	first := make([]byte, 1)
+	if _, err := io.ReadFull(stdout, first); err != nil || first[0] != 'a' {
+		t.Fatalf("first byte = %q, %v", first, err)
+	}
+
+	type opened struct {
+		peer *agentIOPeer
+		err  error
+	}
+	openCh := make(chan opened, 1)
+	go func() {
+		p, err := g.openAgentIO(ctx, "run-takeover", 0)
+		openCh <- opened{p, err}
+	}()
+	var fresh opened
+	select {
+	case fresh = <-openCh:
+	case <-time.After(200 * time.Millisecond):
+	}
+	rest := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, len(sent)-1)
+		if _, err := io.ReadFull(stdout, buf); err == nil {
+			rest <- buf
+		}
+	}()
+	if fresh.peer == nil && fresh.err == nil {
+		fresh = <-openCh
+	}
+	if fresh.err != nil {
+		t.Fatalf("reopen: %v", fresh.err)
+	}
+	defer fresh.peer.cancel()
+	send(fresh.peer, uint64(len(sent)))
+
+	select {
+	case got := <-rest:
+		if string(got) != sent[1:] {
+			t.Fatalf("agent stdout after takeover = %q, want %q (resumed at %d)", got, sent[1:], fresh.peer.resumeAt)
+		}
+	case <-ctx.Done():
+		t.Fatalf("agent stdout stalled after takeover (resumed at %d)", fresh.peer.resumeAt)
 	}
 }
