@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	agentsv1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sbxv1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
@@ -660,6 +662,71 @@ func TestCancelledPrepareStillDeletesTheClaim(t *testing.T) {
 	}
 	if names := claims.deletedNames(); len(names) != 1 {
 		t.Errorf("a cancelled prepare leaked its claim: deleted %v", names)
+	}
+}
+
+type ctxClaims struct{ *fakeClaims }
+
+func (f ctxClaims) Get(ctx context.Context, name string) (*sbxv1.SandboxClaim, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return f.fakeClaims.Get(ctx, name)
+}
+
+type cancelOnResume struct {
+	cancel context.CancelFunc
+
+	mu   sync.Mutex
+	mode string
+}
+
+func (f *cancelOnResume) Get(context.Context, string) (*agentsv1.Sandbox, error) { return nil, nil }
+
+func (f *cancelOnResume) Patch(ctx context.Context, _ string, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var patch struct {
+		Spec struct {
+			OperatingMode string `json:"operatingMode"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(data, &patch); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.mode = patch.Spec.OperatingMode
+	f.mu.Unlock()
+	if patch.Spec.OperatingMode == string(agentsv1.SandboxOperatingModeRunning) {
+		f.cancel()
+	}
+	return nil
+}
+
+func (f *cancelOnResume) operatingMode() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mode
+}
+
+func TestCancelledReviveRestoresSuspension(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	claims := newFakeClaims()
+	spec := LaunchSpec{SessionID: "s1", Template: testTemplate()}
+	claim, err := claims.Create(context.Background(), BuildSandboxClaim("ns", spec))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sandboxes := &cancelOnResume{cancel: cancel, mode: string(agentsv1.SandboxOperatingModeSuspended)}
+	o := New(ctxClaims{claims}, testPods(), sandboxes, newFakeAgentLink(), WithNamespace("ns"))
+
+	if _, err := o.Revive(ctx, claim.Name, spec); err == nil {
+		t.Fatal("Revive succeeded although its context was cancelled")
+	}
+	if got := sandboxes.operatingMode(); got != string(agentsv1.SandboxOperatingModeSuspended) {
+		t.Errorf("a cancelled revive left the sandbox %s", got)
 	}
 }
 

@@ -32,7 +32,7 @@ const (
 	sandboxCwd        = "/workspace"
 	readyTimeout      = 3 * time.Minute
 	readyPollInterval = 2 * time.Second
-	teardownTimeout   = 30 * time.Second
+	cleanupTimeout    = 30 * time.Second
 )
 
 type ClaimClient interface {
@@ -218,7 +218,9 @@ func (o *Orchestrator) Revive(ctx context.Context, claimName string, spec Launch
 	defer op.Complete()
 
 	fail := func(err error) (*Prepared, error) {
-		if serr := o.Suspend(ctx, claimName); serr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		if serr := o.Suspend(cleanupCtx, claimName); serr != nil {
 			o.log.WarnContext(ctx, "could not re-suspend a sandbox after a failed revive; it may be left running",
 				"claim", claimName, "err", serr)
 		}
@@ -582,7 +584,7 @@ func (o *Orchestrator) Teardown(ctx context.Context, claimName string) error {
 }
 
 func (o *Orchestrator) teardownQuietly(ctx context.Context, claimName string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
 	if err := o.Teardown(ctx, claimName); err != nil {
 		o.log.WarnContext(ctx, "failed to tear down sandbox claim after launch failure",
