@@ -212,15 +212,23 @@ func (l *Loop) Run(ctx context.Context) error {
 				return err
 			}
 		case PollRetryable:
-			if held := l.Current(); held != nil && l.cfg.Now().Sub(heldAt) >= held.ExpiresIn {
-				l.log.Error(label+": AS still unreachable and the last token has expired; the run is over",
-					"err", res.Err)
-				return &TerminalError{Reason: ReasonASUnreachable, Err: res.Err}
+			held := l.Current()
+			var remaining time.Duration
+			if held != nil {
+				remaining = held.ExpiresIn - l.cfg.Now().Sub(heldAt)
+				if remaining <= 0 {
+					l.log.Error(label+": AS still unreachable and the last token has expired; the run is over",
+						"err", res.Err)
+					return &TerminalError{Reason: ReasonASUnreachable, Err: res.Err}
+				}
 			}
 			pendingSince, pendingLoggedAt = time.Time{}, time.Time{}
 			wait := retry.NextBackOff()
+			if held != nil {
+				wait = min(wait, remaining)
+			}
 			l.log.Warn(label+": AS unreachable; serving last token",
-				"backoff", wait, "have_token", l.Current() != nil, "err", res.Err)
+				"backoff", wait, "have_token", held != nil, "err", res.Err)
 			if err := l.sleep(ctx, wait); err != nil {
 				return err
 			}

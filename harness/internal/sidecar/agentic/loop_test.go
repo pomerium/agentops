@@ -175,6 +175,36 @@ func TestLoop_ASUnreachablePastTokenExpiry(t *testing.T) {
 	assert.Equal(t, []string{"Bearer pom_art_1"}, delivered)
 }
 
+func TestLoop_RetrySleepStopsAtTokenExpiry(t *testing.T) {
+	t.Parallel()
+	poll := &scriptPoller{seq: []PollResult{
+		{Kind: PollOk, Token: tok("Bearer pom_art_1", 3*time.Second)},
+		{Kind: PollRetryable, Err: errors.New("token exchange unavailable (503)")},
+	}}
+
+	now := time.Unix(1000, 0)
+	expiresAt := now.Add(3 * time.Second)
+	var slept []time.Duration
+	loop := NewLoop(LoopConfig{
+		Poll:             poll,
+		Sink:             func(*Token) error { return nil },
+		RotationInterval: time.Second,
+		Now:              func() time.Time { return now },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			now = now.Add(d)
+			return ctx.Err()
+		},
+	})
+
+	err := loop.Run(context.Background())
+	var te *TerminalError
+	require.ErrorAs(t, err, &te)
+	assert.Equal(t, ReasonASUnreachable, te.Reason)
+	assert.Equal(t, expiresAt, now, "the loop must stop when the token expires, not after it")
+	assert.Equal(t, []time.Duration{time.Second, time.Second, time.Second}, slept)
+}
+
 func TestLoop_ContextCancelStops(t *testing.T) {
 	t.Parallel()
 	poll := &scriptPoller{seq: []PollResult{{Kind: PollPending}}}
