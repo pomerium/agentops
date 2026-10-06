@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,4 +87,28 @@ func TestStopInterruptsInboundDelivery(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReturnedPumpLeavesNoGoroutines(t *testing.T) {
+	s := New()
+	defer s.Close(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- s.Pump(ctx, newScriptedTransport(ctx), 0) }()
+	cancel()
+	<-done
+
+	deadline := time.Now().Add(2 * time.Second)
+	for n := pumpGoroutines(); n > 0; n = pumpGoroutines() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines started by Pump outlived it", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func pumpGoroutines() int {
+	buf := make([]byte, 1<<20)
+	return strings.Count(string(buf[:runtime.Stack(buf, true)]), "created by github.com/pomerium/agentops/harness/internal/agentio.(*Stream).Pump")
 }

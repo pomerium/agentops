@@ -146,13 +146,26 @@ func (s *Stream) ValidateResume(offset uint64) error {
 }
 
 func (s *Stream) FramesAfter(cursor uint64) ([]*agentlinkpb.AgentIOFrame, uint64, error) {
+	return s.framesAfter(context.Background(), cursor)
+}
+
+func (s *Stream) framesAfter(ctx context.Context, cursor uint64) ([]*agentlinkpb.AgentIOFrame, uint64, error) {
+	defer context.AfterFunc(ctx, func() {
+		s.mu.Lock()
+		s.cond.Broadcast()
+		s.mu.Unlock()
+	})()
 	s.mu.Lock()
-	for s.outSeq == cursor && !s.closed {
+	for s.outSeq == cursor && !s.closed && ctx.Err() == nil {
 		s.cond.Wait()
 	}
 	if s.closed {
 		s.mu.Unlock()
 		return nil, cursor, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return nil, cursor, err
 	}
 	if cursor < s.outAcked || cursor > s.outSeq {
 		outAcked, outSeq := s.outAcked, s.outSeq

@@ -29,6 +29,8 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 	for _, opt := range opts {
 		opt(&o)
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	streamDone := make(chan struct{})
 	defer close(streamDone)
 	out := make(chan *agentlinkpb.AgentIOFrame, 32)
@@ -70,7 +72,7 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 	go func() {
 		c := cursor
 		for {
-			frames, next, err := s.FramesAfter(c)
+			frames, next, err := s.framesAfter(ctx, c)
 			if err != nil {
 				report(err)
 				return
