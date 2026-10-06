@@ -45,6 +45,11 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		s.log.ErrorContext(ctx, "launch: could not read the session", "err", err)
+		if opts.turnID != "" {
+			s.emit(ctx, sessionID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{
+				Reason: "the session could not be read to continue it",
+			}}})
+		}
 		return
 	}
 	if s.stopped(o) {

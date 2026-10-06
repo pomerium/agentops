@@ -2,6 +2,7 @@ package harnessapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -55,4 +56,34 @@ func TestACanceledLaunchStillRecordsItsOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+type refusedLaunchRead struct{ sessionstore.Sessions }
+
+func (refusedLaunchRead) GetSession(context.Context, string) (sessionstore.Session, error) {
+	return sessionstore.Session{}, errors.New("the session could not be read")
+}
+
+func TestAReviveThatCannotReadItsSessionFailsItsTurn(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+	launchCtx, o := svc.newLaunch(ctx, "client")
+	if !svc.claim("s1", o) {
+		t.Fatal("claim the revive")
+	}
+	svc.store = refusedLaunchRead{Sessions: st}
+
+	svc.launch(launchCtx, o, "s1", launchOpts{revive: true, turnID: "t1", agentPrompt: "carry on"})
+
+	events, err := svc.events.History(ctx, "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	for _, ev := range events {
+		if ev.GetTurnId() == "t1" && ev.GetTurnFailed() != nil {
+			return
+		}
+	}
+	t.Error("the revive's accepted turn never got TurnFailed")
 }
