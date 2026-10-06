@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -132,6 +133,8 @@ type Service struct {
 
 	mu     sync.Mutex
 	owners map[string]*owner
+
+	emitLocks [emitStripes]sync.Mutex
 }
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*Service)(nil)
@@ -545,10 +548,37 @@ func storedTemplate(sess sessionstore.Session) (*v1alpha1.AgentTemplate, string,
 
 func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
 	ev.SessionId = sessionID
-	if err := s.events.Append(context.WithoutCancel(ctx), ev); err != nil {
+	ctx = context.WithoutCancel(ctx)
+	lock := &s.emitLocks[emitStripe(sessionID)]
+	lock.Lock()
+	defer lock.Unlock()
+	if !endsSession(ev) {
+		current, err := s.store.GetSession(ctx, sessionID)
+		if err == nil && api.Terminal(current.Status) {
+			s.tel.Debug(ctx, "the session has ended; dropping a later event", "session", sessionID, "event", api.Kind(ev))
+			return
+		}
+	}
+	if err := s.events.Append(ctx, ev); err != nil {
 		s.log.ErrorContext(ctx, "could not record a session event; clients will see a gap",
 			"session", sessionID, "event", api.Kind(ev), "err", err)
 	}
+}
+
+func endsSession(ev *pb.Event) bool {
+	if ev.GetSessionEnded() != nil {
+		return true
+	}
+	sc := ev.GetStateChanged()
+	return sc != nil && api.Terminal(sc.GetNew())
+}
+
+const emitStripes = 64
+
+func emitStripe(sessionID string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sessionID))
+	return int(h.Sum32() % emitStripes)
 }
 
 func (s *Service) write(ctx context.Context, sessionID string, update func(context.Context) error) bool {

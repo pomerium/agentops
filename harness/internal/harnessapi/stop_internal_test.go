@@ -144,3 +144,33 @@ func TestAStoppedBindingRunsNoMoreTurns(t *testing.T) {
 		t.Error("a stopped binding accepted another turn")
 	}
 }
+
+func TestNoEventFollowsSessionEnded(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	b.lastActivity.Store(time.Now().Add(-time.Hour).UnixNano())
+	svc.cfg.sessionIdleTTL = 2 * time.Hour
+	svc.cfg.idleWarnLead = 90 * time.Minute
+
+	svc.stopSession(ctx, "s1", stopSpec{end: api.EndEnded})
+	svc.mu.Lock()
+	svc.owners["s1"] = b.owner
+	svc.mu.Unlock()
+	svc.sweepIdle(ctx)
+	approved := &runOutcome{}
+	approved.markApproved()
+	svc.reportAttachDelayed(ctx, "s1", "run", approved, time.Minute)
+
+	events, err := svc.events.History(ctx, "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, api.Kind(ev))
+	}
+	if kinds[len(kinds)-1] != "session_ended" {
+		t.Errorf("events followed session_ended: %v", kinds)
+	}
+}
