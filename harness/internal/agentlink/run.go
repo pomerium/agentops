@@ -1,0 +1,276 @@
+package agentlink
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/pomerium/agentops/harness/internal/agenticrun"
+	"github.com/pomerium/agentops/harness/internal/agentio"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
+)
+
+const ProtocolVersion uint32 = 1
+
+type ExpectCallbacks struct {
+	OnAttached  func(attempt uint32, agentRunning bool)
+	OnLost      func(cause error)
+	OnError     func(reason string, cause error)
+	OnAgentExit func(exitCode int32)
+}
+
+type ExpectOption func(*ExpectCallbacks)
+
+func WithOnAttached(f func(attempt uint32, agentRunning bool)) ExpectOption {
+	return func(o *ExpectCallbacks) { o.OnAttached = f }
+}
+
+func WithOnLost(f func(cause error)) ExpectOption { return func(o *ExpectCallbacks) { o.OnLost = f } }
+
+func WithOnError(f func(reason string, cause error)) ExpectOption {
+	return func(o *ExpectCallbacks) { o.OnError = f }
+}
+
+func WithOnAgentExit(f func(exitCode int32)) ExpectOption {
+	return func(o *ExpectCallbacks) { o.OnAgentExit = f }
+}
+
+func newExpectCallbacks(opts []ExpectOption) ExpectCallbacks {
+	var o ExpectCallbacks
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+var errForgotten = errors.New("harness: run expectation dropped")
+
+type attachStream struct {
+	send     chan *agentlinkpb.ManagerFrame
+	closed   chan struct{}
+	lastRecv atomic.Int64
+
+	closeOnce sync.Once
+	mu        sync.Mutex
+	cause     error
+}
+
+func newAttachStream(now time.Time) *attachStream {
+	s := &attachStream{
+		send:   make(chan *agentlinkpb.ManagerFrame, 8),
+		closed: make(chan struct{}),
+	}
+	s.lastRecv.Store(now.UnixNano())
+	return s
+}
+
+func (s *attachStream) close(cause error) {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.cause = cause
+		s.mu.Unlock()
+		close(s.closed)
+	})
+}
+
+func (s *attachStream) err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cause
+}
+
+func (s *attachStream) touch(now time.Time) { s.lastRecv.Store(now.UnixNano()) }
+
+func (s *attachStream) silentFor(now time.Time) time.Duration {
+	return now.Sub(time.Unix(0, s.lastRecv.Load()))
+}
+
+func (s *attachStream) dispatch(ctx context.Context, f *agentlinkpb.ManagerFrame) error {
+	select {
+	case s.send <- f:
+		return nil
+	case <-s.closed:
+		return fmt.Errorf("attach stream closed: %w", s.err())
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type attachedRun struct {
+	runID  string
+	seal   agenticrun.Executor
+	config *agentlinkpb.SandboxConfig
+	opts   ExpectCallbacks
+	log    *slog.Logger
+
+	hbInterval  time.Duration
+	hbMissLimit uint32
+
+	io *agentio.Stream
+
+	attached chan struct{}
+	ready    chan struct{}
+	ioReady  chan struct{}
+	done     chan struct{}
+
+	attachedOnce sync.Once
+	readyOnce    sync.Once
+	ioReadyOnce  sync.Once
+	doneOnce     sync.Once
+
+	mu       sync.Mutex
+	live     *attachStream
+	ioStream *ioClaim
+	attempts uint32
+	err      error
+}
+
+type ioClaim struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func newIOClaim() *ioClaim { return &ioClaim{closed: make(chan struct{})} }
+
+func (c *ioClaim) close() {
+	if c == nil {
+		return
+	}
+	c.closeOnce.Do(func() { close(c.closed) })
+}
+
+func (r *attachedRun) claimIO() *ioClaim {
+	claim := newIOClaim()
+	r.mu.Lock()
+	prev := r.ioStream
+	r.ioStream = claim
+	r.mu.Unlock()
+	prev.close()
+	return claim
+}
+
+func (r *attachedRun) releaseIO(claim *ioClaim) {
+	claim.close()
+	r.mu.Lock()
+	if r.ioStream == claim {
+		r.ioStream = nil
+	}
+	r.mu.Unlock()
+}
+
+func (r *attachedRun) markAttached() { r.attachedOnce.Do(func() { close(r.attached) }) }
+
+func (r *attachedRun) markReady() { r.readyOnce.Do(func() { close(r.ready) }) }
+
+func (r *attachedRun) markIOReady() { r.ioReadyOnce.Do(func() { close(r.ioReady) }) }
+
+func (r *attachedRun) finish(cause error) {
+	r.doneOnce.Do(func() {
+		r.mu.Lock()
+		r.err = cause
+		live, ioStream := r.live, r.ioStream
+		r.live, r.ioStream = nil, nil
+		r.mu.Unlock()
+		close(r.done)
+		if live != nil {
+			live.close(cause)
+		}
+		ioStream.close()
+		r.io.Close(cause)
+	})
+}
+
+func (r *attachedRun) current() *attachStream {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.live
+}
+
+type RunHandle struct {
+	srv *Server
+	run *attachedRun
+}
+
+func (h *RunHandle) RunID() string { return h.run.runID }
+
+func (h *RunHandle) AwaitAttach(ctx context.Context) error {
+	select {
+	case <-h.run.attached:
+		return nil
+	case <-h.run.done:
+		return h.terminalErr()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *RunHandle) AwaitReady(ctx context.Context) error {
+	select {
+	case <-h.run.ready:
+		return nil
+	case <-h.run.done:
+		return h.terminalErr()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (h *RunHandle) SpawnAgent(ctx context.Context) error {
+	live := h.run.current()
+	if live == nil {
+		return fmt.Errorf("spawn agent for run %s: no live attach", h.run.runID)
+	}
+	return live.dispatch(ctx, &agentlinkpb.ManagerFrame{
+		Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{}},
+	})
+}
+
+func (h *RunHandle) AwaitAgentIO(ctx context.Context) (io.Writer, io.Reader, error) {
+	select {
+	case <-h.run.ioReady:
+		return h.run.io.Outbound(), h.run.io.Inbound(), nil
+	case <-h.run.done:
+		return nil, nil, h.terminalErr()
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+}
+
+func (h *RunHandle) Shutdown(reason string) {
+	live := h.run.current()
+	if live == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := live.dispatch(ctx, &agentlinkpb.ManagerFrame{
+		Msg: &agentlinkpb.ManagerFrame_Shutdown{Shutdown: &agentlinkpb.Shutdown{Reason: reason}},
+	}); err != nil {
+		h.run.log.Debug("harness: shutdown directive not delivered", "run_id", h.run.runID, "err", err)
+	}
+}
+
+func (h *RunHandle) Done() <-chan struct{} { return h.run.done }
+
+func (h *RunHandle) Err() error {
+	select {
+	case <-h.run.done:
+		return h.terminalErr()
+	default:
+		return nil
+	}
+}
+
+func (h *RunHandle) terminalErr() error {
+	h.run.mu.Lock()
+	defer h.run.mu.Unlock()
+	if h.run.err != nil {
+		return h.run.err
+	}
+	return errForgotten
+}
