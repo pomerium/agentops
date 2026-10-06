@@ -124,29 +124,28 @@ func (s *Service) Run(stream runnerpb.AgentRunnerService_RunServer) error {
 }
 
 func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *agentProc) error {
+	ctx := stream.Context()
 	streamDone := make(chan struct{})
 	defer close(streamDone)
 	out := make(chan *runnerpb.RunnerServerFrame, 16)
-	sendErr := make(chan error, 1)
+	sendDone := make(chan struct{})
+	var sendErr error
 
 	push := func(f *runnerpb.RunnerServerFrame) bool {
 		select {
 		case out <- f:
 			return true
-		case <-streamDone:
+		case <-sendDone:
 			return false
 		}
 	}
 
 	go func() {
+		defer close(sendDone)
 		for {
 			select {
 			case f := <-out:
-				if err := stream.Send(f); err != nil {
-					select {
-					case sendErr <- err:
-					default:
-					}
+				if sendErr = stream.Send(f); sendErr != nil || f.GetExited() != nil {
 					return
 				}
 			case <-streamDone:
@@ -215,9 +214,9 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 			if sig := r.frame.GetSignal(); sig != nil {
 				proc.signal(s.log, syscall.Signal(sig.GetSignum()))
 			}
-		case <-stream.Context().Done():
+		case <-ctx.Done():
 			s.log.Info("agent-runner: run stream canceled; stopping the agent", "pid", proc.pid())
-			return stream.Context().Err()
+			return ctx.Err()
 		case <-proc.done:
 			code := proc.exitCode()
 			drained := make(chan struct{})
@@ -230,11 +229,15 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 			push(&runnerpb.RunnerServerFrame{
 				Msg: &runnerpb.RunnerServerFrame_Exited{Exited: &runnerpb.Exited{ExitCode: int32(code)}},
 			})
-			time.Sleep(50 * time.Millisecond)
-			return nil
-		case err := <-sendErr:
-			s.log.Info("agent-runner: send failed; stopping the agent", "pid", proc.pid(), "err", err)
-			return err
+			select {
+			case <-sendDone:
+				return sendErr
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case <-sendDone:
+			s.log.Info("agent-runner: send failed; stopping the agent", "pid", proc.pid(), "err", sendErr)
+			return sendErr
 		}
 	}
 }
