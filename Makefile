@@ -60,6 +60,7 @@ generate: generate-harness-api
 	$(HARNESS_GO) tool controller-gen object:headerFile=/dev/null paths=./apis/...
 	$(HARNESS_GO) tool controller-gen crd paths=./apis/... output:crd:artifacts:config=../config/crd/bases
 	cd internal/chatops/db && $(SQLC) generate
+	cd $(HARNESS_DIR)/internal/sessionstore/sqlite && GOWORK=off go tool sqlc generate
 	$(BUF) generate
 	$(MAKE) sdk-generate
 	$(MAKE) helm-sync-crds
