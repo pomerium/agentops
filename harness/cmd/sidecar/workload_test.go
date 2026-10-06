@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -194,5 +195,41 @@ func TestServeWorkload_ShutdownAlwaysStopsAReadyEnvoy(t *testing.T) {
 
 		require.Eventually(t, func() bool { return syscall.Kill(pid, 0) == syscall.ESRCH },
 			5*time.Second, 5*time.Millisecond, "run %d: serve returned but envoy is still running", i)
+	}
+}
+
+type loopWatch struct {
+	slog.Handler
+	returned *atomic.Bool
+	polled   chan string
+}
+
+func (h loopWatch) Handle(ctx context.Context, r slog.Record) error {
+	if h.returned.Load() && strings.HasPrefix(r.Message, "workload token:") {
+		select {
+		case h.polled <- r.Message:
+		default:
+		}
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func TestServeWorkload_ReturningStopsTheTokenLoop(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 0.3; exit 3\n")
+	watch := loopWatch{Handler: slog.NewTextHandler(io.Discard, nil), returned: &atomic.Bool{}, polled: make(chan string, 1)}
+	s.log = slog.New(watch)
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte(workloadJWT(t, 6*time.Second)), 0o600))
+
+	err := await(t, runWorkload(context.Background(), s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"}))
+	require.ErrorContains(t, err, "proxy exited")
+	watch.returned.Store(true)
+	require.NoError(t, os.Remove(tokenFile))
+
+	select {
+	case msg := <-watch.polled:
+		t.Fatalf("the token loop kept running after serve returned: %q", msg)
+	case <-time.After(2 * time.Second):
 	}
 }

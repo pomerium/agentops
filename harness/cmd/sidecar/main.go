@@ -72,16 +72,20 @@ func (s *sidecar) proxy(caFile string) *server.Envoy {
 	})
 }
 
-func awaitToken(ctx context.Context, loop *agentic.Loop) (<-chan error, error) {
+func awaitToken(ctx context.Context, loop *agentic.Loop) (<-chan error, <-chan struct{}, error) {
 	loopErr := make(chan error, 1)
-	go func() { loopErr <- loop.Run(ctx) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		loopErr <- loop.Run(ctx)
+	}()
 	select {
 	case <-loop.Ready():
-		return loopErr, nil
+		return loopErr, done, nil
 	case err := <-loopErr:
-		return nil, err
+		return nil, done, err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, done, ctx.Err()
 	}
 }
 
@@ -158,7 +162,12 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 		return err
 	}
 
-	loopErr, err := awaitToken(ctx, loop)
+	ctx, cancel := context.WithCancel(ctx)
+	loopErr, loopDone, err := awaitToken(ctx, loop)
+	defer func() {
+		cancel()
+		<-loopDone
+	}()
 	if err != nil {
 		return err
 	}
@@ -169,6 +178,7 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 	var running server.Process
 	proxyStopped := false
 	defer func() {
+		cancel()
 		proxyMu.Lock()
 		defer proxyMu.Unlock()
 		proxyStopped = true
@@ -176,8 +186,6 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 			running.Stop()
 		}
 	}()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	startProxy := func(endpoints []envoyconfig.Endpoint) error {
 		proxyMu.Lock()
 		defer proxyMu.Unlock()
