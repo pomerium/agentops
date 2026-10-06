@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package runner.v1;
+
+option go_package = "github.com/pomerium/agentops/harness/internal/runner/pb;runnerpb";
+
+// AgentRunnerService is served by the agent-runner process (PID 1 of the agent
+// container) on a pod-local unix socket. It spawns and supervises exactly one
+// ACP agent process at a time and bridges its stdio. The sidecar is the only
+// client; the kernel guarantees ordered lossless delivery on a live socket, so
+// this hop carries no seq/ack.
+service AgentRunnerService {
+  rpc Run(stream RunnerClientFrame) returns (stream RunnerServerFrame);
+}
+
+message RunnerClientFrame {
+  oneof msg {
+    // Spawn is the first frame; it runs
+    // `/bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'`.
+    Spawn spawn = 1;
+    bytes stdin = 2;
+    // Signal delivers a signal to the agent process. TERM-then-KILL escalation
+    // on stream close is the runner's job.
+    Signal signal = 3;
+  }
+}
+
+message RunnerServerFrame {
+  oneof msg {
+    Started started = 1; // pid
+    bytes stdout = 2; // ACP bytes
+    // stderr is forwarded verbatim; the sidecar logs it line-buffered and
+    // never mixes it into ACP.
+    bytes stderr = 3;
+    Exited exited = 4; // terminal
+  }
+}
+
+message Spawn {}
+
+message Signal {
+  int32 signum = 1;
+}
+
+message Started {
+  int64 pid = 1;
+}
+
+message Exited {
+  int32 exit_code = 1;
+}
