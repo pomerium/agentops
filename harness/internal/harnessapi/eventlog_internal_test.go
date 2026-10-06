@@ -2,6 +2,7 @@ package harnessapi
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,13 @@ type memEvents struct {
 	rows      []sessionstore.SessionEvent
 	firstRead chan struct{}
 	readOnce  sync.Once
+	readErr   error
+}
+
+func (m *memEvents) failReads(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.readErr = err
 }
 
 func newMemEvents() *memEvents {
@@ -33,6 +41,10 @@ func (m *memEvents) AppendSessionEvent(_ context.Context, sessionID, eventType, 
 
 func (m *memEvents) ListSessionEvents(_ context.Context, sessionID string, afterSeq int64, limit int) ([]sessionstore.SessionEvent, error) {
 	m.mu.Lock()
+	if m.readErr != nil {
+		m.mu.Unlock()
+		return nil, m.readErr
+	}
 	var out []sessionstore.SessionEvent
 	for _, r := range m.rows {
 		if r.SessionID == sessionID && r.Seq > afterSeq && len(out) < limit {
@@ -91,5 +103,61 @@ func TestSubscribeDeliversEventsDroppedFromAFullBuffer(t *testing.T) {
 		}
 	case <-deadline:
 		t.Fatal("the subscription did not close after SessionEnded")
+	}
+}
+
+func TestSubscribeReportsAFailedFirstRead(t *testing.T) {
+	ctx := context.Background()
+	readErr := errors.New("database read failed")
+	st := newMemEvents()
+	st.failReads(readErr)
+	log := NewEventLog(st)
+
+	sub, err := log.Subscribe(ctx, "s", 0)
+	if sub != nil {
+		sub.Close()
+	}
+	if !errors.Is(err, readErr) {
+		t.Fatalf("Subscribe: got %v, want %v", err, readErr)
+	}
+}
+
+func TestSubscribeReportsAFailedLaterRead(t *testing.T) {
+	ctx := context.Background()
+	readErr := errors.New("database read failed")
+	st := newMemEvents()
+	log := NewEventLog(st)
+	if err := log.Append(ctx, &pb.Event{SessionId: "s"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	sub, err := log.Subscribe(ctx, "s", 0)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	<-st.firstRead
+	st.failReads(readErr)
+
+	for seq := 2; seq <= subscriberBuffer+3; seq++ {
+		if err := log.Append(ctx, &pb.Event{SessionId: "s"}); err != nil {
+			t.Fatalf("Append %d: %v", seq, err)
+		}
+	}
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case _, ok := <-sub.Events():
+			if ok {
+				continue
+			}
+			if !errors.Is(sub.Err(), readErr) {
+				t.Fatalf("Err: got %v, want %v", sub.Err(), readErr)
+			}
+			return
+		case <-deadline:
+			t.Fatal("the subscription did not end after the failed read")
+		}
 	}
 }

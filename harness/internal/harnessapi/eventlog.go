@@ -25,6 +25,8 @@ type EventLog interface {
 type Subscription interface {
 	Events() <-chan *pb.Event
 
+	Err() error
+
 	Close()
 }
 
@@ -119,7 +121,12 @@ func (l *durableLog) Subscribe(ctx context.Context, sessionID string, afterSeq i
 	l.subs[sessionID][s] = struct{}{}
 	l.mu.Unlock()
 
-	go s.pump(ctx, afterSeq)
+	batch, err := l.History(ctx, sessionID, afterSeq, sessionstore.DefaultEventPage)
+	if err != nil {
+		l.unsubscribe(s)
+		return nil, err
+	}
+	go s.pump(ctx, afterSeq, batch)
 	return s, nil
 }
 
@@ -140,12 +147,15 @@ type subscription struct {
 	live      chan *pb.Event
 	stale     chan struct{}
 	out       chan *pb.Event
+	err       error
 
 	closeOnce sync.Once
 	done      chan struct{}
 }
 
 func (s *subscription) Events() <-chan *pb.Event { return s.out }
+
+func (s *subscription) Err() error { return s.err }
 
 func (s *subscription) Close() {
 	s.closeOnce.Do(func() {
@@ -154,16 +164,11 @@ func (s *subscription) Close() {
 	})
 }
 
-func (s *subscription) pump(ctx context.Context, afterSeq int64) {
+func (s *subscription) pump(ctx context.Context, sent int64, batch []*pb.Event) {
 	defer close(s.out)
 	defer s.log.unsubscribe(s)
 
-	sent := afterSeq
 	for {
-		batch, err := s.log.History(ctx, s.sessionID, sent, sessionstore.DefaultEventPage)
-		if err != nil {
-			return
-		}
 		for _, ev := range batch {
 			if ev.Seq <= sent {
 				continue
@@ -180,11 +185,7 @@ func (s *subscription) pump(ctx context.Context, afterSeq int64) {
 				return
 			}
 		}
-		if len(batch) == sessionstore.DefaultEventPage {
-			continue
-		}
-
-		contiguous := true
+		contiguous := len(batch) < sessionstore.DefaultEventPage
 		for contiguous {
 			select {
 			case ev := <-s.live:
@@ -213,6 +214,12 @@ func (s *subscription) pump(ctx context.Context, afterSeq int64) {
 			case <-ctx.Done():
 				return
 			}
+		}
+
+		var err error
+		if batch, err = s.log.History(ctx, s.sessionID, sent, sessionstore.DefaultEventPage); err != nil {
+			s.err = err
+			return
 		}
 	}
 }
