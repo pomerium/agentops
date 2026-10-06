@@ -102,8 +102,10 @@ type Client struct {
 	statusCh   chan *agentlinkpb.Status
 	configured sync.Once
 
-	mu    sync.Mutex
-	agent *AgentSession
+	mu       sync.Mutex
+	agent    *AgentSession
+	exit     *int32
+	exitSent bool
 }
 
 func New(cfg Config) (*Client, error) {
@@ -255,7 +257,7 @@ func (c *Client) session(parent context.Context, attempt uint32) error {
 		Msg: &agentlinkpb.SidecarFrame_Hello{Hello: &agentlinkpb.SidecarHello{
 			ProtocolVersion: 1,
 			Attempt:         attempt,
-			AgentRunning:    c.currentAgent() != nil,
+			AgentRunning:    c.agentRunning(),
 		}},
 	}); err != nil {
 		return err
@@ -359,12 +361,14 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 			}
 		case code := <-agentExited:
 			agentExited = nil
+			c.recordExit(code, false)
 			c.log.Info("harness: agent process exited", "exit_code", code)
 			if err := stream.Send(&agentlinkpb.SidecarFrame{
 				Msg: &agentlinkpb.SidecarFrame_Exited{Exited: &agentlinkpb.AgentExited{ExitCode: code}},
 			}); err != nil {
 				return err
 			}
+			c.recordExit(code, true)
 			lastSent = time.Now()
 		case err := <-ioLost:
 			return status.Errorf(codes.Unavailable, "agent io lost: %v", err)
@@ -422,7 +426,7 @@ func (c *Client) spawnAgent(ctx context.Context, ioLost chan<- error) error {
 		return err
 	}
 	c.mu.Lock()
-	c.agent = ag
+	c.agent, c.exit, c.exitSent = ag, nil, false
 	c.mu.Unlock()
 	c.log.Info("harness: agent spawned", "pid", ag.PID)
 	go c.pumpAgentIO(ctx, ag, ioLost)
@@ -435,11 +439,30 @@ func (c *Client) currentAgent() *AgentSession {
 	return c.agent
 }
 
+func (c *Client) agentRunning() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.agent != nil && c.exit == nil
+}
+
 func (c *Client) agentExitChan() <-chan int32 {
-	if ag := c.currentAgent(); ag != nil {
-		return ag.Exited
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.agent == nil || c.exitSent:
+		return nil
+	case c.exit != nil:
+		unsent := make(chan int32, 1)
+		unsent <- *c.exit
+		return unsent
 	}
-	return nil
+	return c.agent.Exited
+}
+
+func (c *Client) recordExit(code int32, sent bool) {
+	c.mu.Lock()
+	c.exit, c.exitSent = &code, sent
+	c.mu.Unlock()
 }
 
 func (c *Client) stopAgent() {
