@@ -124,6 +124,8 @@ type attachedRun struct {
 	ioReadyOnce  sync.Once
 	doneOnce     sync.Once
 
+	notifyMu sync.Mutex
+
 	mu       sync.Mutex
 	live     *attachStream
 	ioStream *ioClaim
@@ -189,6 +191,14 @@ func (r *attachedRun) dropIO(claim *ioClaim) {
 		r.ioStream = nil
 	}
 	r.mu.Unlock()
+}
+
+func (r *attachedRun) notifyAttached(attempt uint32, agentRunning bool) {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	if r.opts.OnAttached != nil {
+		r.opts.OnAttached(attempt, agentRunning)
+	}
 }
 
 func (r *attachedRun) markAttached() { r.attachedOnce.Do(func() { close(r.attached) }) }

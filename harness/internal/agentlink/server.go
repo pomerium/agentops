@@ -242,9 +242,7 @@ func (s *Server) Attach(stream agentlinkpb.AgentLinkService_AttachServer) error 
 		return err
 	}
 	run.markAttached()
-	if run.opts.OnAttached != nil {
-		run.opts.OnAttached(hello.GetAttempt(), hello.GetAgentRunning())
-	}
+	run.notifyAttached(hello.GetAttempt(), hello.GetAgentRunning())
 
 	cause := s.serveAttach(ctx, stream, run, live)
 	s.release(run, live, cause)
@@ -280,6 +278,8 @@ func (s *Server) claim(run *attachedRun, hello *agentlinkpb.SidecarHello) (*atta
 
 func (s *Server) release(run *attachedRun, live *attachStream, cause error) {
 	live.close(cause)
+	run.notifyMu.Lock()
+	defer run.notifyMu.Unlock()
 	run.mu.Lock()
 	stillOurs := run.live == live
 	if stillOurs {
