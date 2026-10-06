@@ -175,14 +175,23 @@ func (r *attachedRun) finish(cause error) {
 		r.err = cause
 		live, ioStream := r.live, r.ioStream
 		r.live, r.ioStream = nil, nil
-		r.mu.Unlock()
 		close(r.done)
+		r.mu.Unlock()
 		if live != nil {
 			live.close(cause)
 		}
 		ioStream.close()
 		r.io.Close(cause)
 	})
+}
+
+func (r *attachedRun) finished() bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *attachedRun) current() *attachStream {

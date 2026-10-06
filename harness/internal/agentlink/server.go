@@ -174,10 +174,8 @@ func (s *Server) lookup(a *Assertion) (*attachedRun, error) {
 			"sealed_pod", run.seal.PodName, "sealed_pod_uid", run.seal.PodUID)
 		return nil, status.Errorf(codes.FailedPrecondition, "run %s is sealed to a different pod", a.RunID)
 	}
-	select {
-	case <-run.done:
+	if run.finished() {
 		return nil, status.Errorf(codes.NotFound, "run %s is no longer expected", a.RunID)
-	default:
 	}
 	return run, nil
 }
@@ -255,6 +253,10 @@ func (s *Server) Attach(stream agentlinkpb.AgentLinkService_AttachServer) error 
 func (s *Server) claim(run *attachedRun, hello *agentlinkpb.SidecarHello) (*attachStream, error) {
 	now := s.now()
 	run.mu.Lock()
+	if run.finished() {
+		run.mu.Unlock()
+		return nil, status.Errorf(codes.NotFound, "run %s is no longer expected", run.runID)
+	}
 	if prev := run.live; prev != nil {
 		if prev.silentFor(now) < run.hbInterval {
 			run.mu.Unlock()
