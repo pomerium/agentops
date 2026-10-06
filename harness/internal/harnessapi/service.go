@@ -674,33 +674,53 @@ func (s *Service) launchesOf(clientID string) map[string]struct{} {
 	return out
 }
 
-func (s *Service) detachBinding(b *binding) bool {
+func heldSlot() *launchSlot { return &launchSlot{outcome: &runOutcome{}} }
+
+func (s *Service) detachBinding(b *binding) *launchSlot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.live[b.sessionID] != b {
-		return false
+		return nil
 	}
 	delete(s.live, b.sessionID)
-	return true
+	held := heldSlot()
+	s.launching[b.sessionID] = held
+	return held
 }
 
 func (s *Service) detach(sessionID string, spec stopSpec) (*binding, *launchSlot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	held := heldSlot()
 	if b, ok := s.live[sessionID]; ok {
 		delete(s.live, sessionID)
-		return b, nil
+		s.launching[sessionID] = held
+		return b, held
 	}
 	if slot, ok := s.launching[sessionID]; ok {
-		if slot.cancel != nil {
+		switch {
+		case slot.cancel != nil:
 			slot.outcome.stop(spec)
 			slot.cancel()
+		case spec.suspend == pb.Reason_REASON_UNSPECIFIED:
+			slot.outcome.stop(spec)
 		}
 		return nil, nil
 	}
-	held := &launchSlot{}
 	s.launching[sessionID] = held
 	return nil, held
+}
+
+func (s *Service) releaseUnlessStopped(sessionID string, slot *launchSlot) (stopSpec, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if spec, stopped := slot.outcome.take(); stopped {
+		return spec, true
+	}
+	if s.launching[sessionID] == slot {
+		delete(s.launching, sessionID)
+	}
+	return stopSpec{}, false
 }
 
 func newID() string {

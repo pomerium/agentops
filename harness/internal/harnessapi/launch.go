@@ -42,7 +42,7 @@ func (s *Service) launch(ctx context.Context, slot *launchSlot, sessionID string
 	registered := false
 	defer func() {
 		if !registered {
-			s.release(sessionID, slot)
+			s.settle(ctx, sessionID, slot)
 		}
 	}()
 	outcome := slot.outcome
@@ -239,7 +239,7 @@ func (s *Service) activateAndRun(
 
 func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opts launchOpts, outcome *runOutcome, claimName string, reason api.EndReason, detail string) {
 	ctx = context.WithoutCancel(ctx)
-	if spec, stopped := outcome.stopped(); stopped {
+	if spec, stopped := outcome.take(); stopped {
 		reason, detail = spec.end, spec.detail
 		if claimName == "" {
 			claimName = sess.SandboxClaimName
@@ -305,6 +305,17 @@ func (o *runOutcome) stopped() (stopSpec, bool) {
 		return stopSpec{}, false
 	}
 	return *o.stoppedBy, true
+}
+
+func (o *runOutcome) take() (stopSpec, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stoppedBy == nil {
+		return stopSpec{}, false
+	}
+	spec := *o.stoppedBy
+	o.stoppedBy = nil
+	return spec, true
 }
 
 func (o *runOutcome) isStopped() bool { _, ok := o.stopped(); return ok }
