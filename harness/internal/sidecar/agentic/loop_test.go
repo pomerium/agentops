@@ -299,6 +299,35 @@ func TestLoop_HangingExchangeEndsAtTokenExpiry(t *testing.T) {
 	assert.Less(t, time.Since(started), 10*time.Second, "a hung exchange must not keep an expired token in service")
 }
 
+func TestLoop_PendingAfterTokenEndsAtExpiry(t *testing.T) {
+	t.Parallel()
+	poll := &scriptPoller{seq: []PollResult{
+		{Kind: PollOk, Token: tok("Bearer pom_art_1", 6*time.Second)},
+		{Kind: PollPending},
+	}}
+	now := time.Unix(1000, 0)
+	expiresAt := now.Add(6 * time.Second)
+	errSleptPastExpiry := errors.New("slept past the held token's expiry")
+	loop := NewLoop(LoopConfig{
+		Poll: poll,
+		Sink: func(*Token) error { return nil },
+		Now:  func() time.Time { return now },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			now = now.Add(d)
+			if now.After(expiresAt) {
+				return errSleptPastExpiry
+			}
+			return ctx.Err()
+		},
+	})
+
+	err := loop.Run(context.Background())
+	var te *TerminalError
+	require.ErrorAs(t, err, &te)
+	assert.Equal(t, ReasonRevokedOrExpired, te.Reason)
+	assert.Equal(t, expiresAt, now)
+}
+
 func TestLoop_ContextCancelStops(t *testing.T) {
 	t.Parallel()
 	poll := &scriptPoller{seq: []PollResult{{Kind: PollPending}}}

@@ -3,6 +3,7 @@ package agentic
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -159,7 +160,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			return err
 		}
 		polledAt := l.cfg.Now()
-		res := l.poll(ctx, polledAt.Sub(heldAt))
+		res := l.poll(ctx, heldAt)
 		switch res.Kind {
 		case PollOk:
 			first := heldAt.IsZero()
@@ -196,6 +197,11 @@ func (l *Loop) Run(ctx context.Context) error {
 				return err
 			}
 		case PollPending:
+			remaining, holding := l.remaining(heldAt)
+			if holding && remaining <= 0 {
+				l.log.Error(label + ": authorization_pending and the last token has expired; the run is over")
+				return &TerminalError{Reason: ReasonRevokedOrExpired, Err: errors.New("authorization_pending after the held token expired")}
+			}
 			now := l.cfg.Now()
 			switch {
 			case pendingSince.IsZero():
@@ -209,27 +215,27 @@ func (l *Loop) Run(ctx context.Context) error {
 			default:
 				l.log.Debug(label + ": authorization_pending; still waiting for approval")
 			}
-			if err := l.sleep(ctx, l.cfg.PendingInterval); err != nil {
+			wait := l.cfg.PendingInterval
+			if holding {
+				wait = min(wait, remaining)
+			}
+			if err := l.sleep(ctx, wait); err != nil {
 				return err
 			}
 		case PollRetryable:
-			held := l.Current()
-			var remaining time.Duration
-			if held != nil {
-				remaining = held.ExpiresIn - l.cfg.Now().Sub(heldAt)
-				if remaining <= 0 {
-					l.log.Error(label+": AS still unreachable and the last token has expired; the run is over",
-						"err", res.Err)
-					return &TerminalError{Reason: ReasonASUnreachable, Err: res.Err}
-				}
+			remaining, holding := l.remaining(heldAt)
+			if holding && remaining <= 0 {
+				l.log.Error(label+": AS still unreachable and the last token has expired; the run is over",
+					"err", res.Err)
+				return &TerminalError{Reason: ReasonASUnreachable, Err: res.Err}
 			}
 			pendingSince, pendingLoggedAt = time.Time{}, time.Time{}
 			wait := retry.NextBackOff()
-			if held != nil {
+			if holding {
 				wait = min(wait, remaining)
 			}
 			l.log.Warn(label+": AS unreachable; serving last token",
-				"backoff", wait, "have_token", held != nil, "err", res.Err)
+				"backoff", wait, "have_token", holding, "err", res.Err)
 			if err := l.sleep(ctx, wait); err != nil {
 				return err
 			}
@@ -240,10 +246,18 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
-func (l *Loop) poll(ctx context.Context, heldFor time.Duration) PollResult {
-	if held := l.Current(); held != nil {
+func (l *Loop) remaining(heldAt time.Time) (time.Duration, bool) {
+	held := l.Current()
+	if held == nil {
+		return 0, false
+	}
+	return held.ExpiresIn - l.cfg.Now().Sub(heldAt), true
+}
+
+func (l *Loop) poll(ctx context.Context, heldAt time.Time) PollResult {
+	if remaining, holding := l.remaining(heldAt); holding {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, held.ExpiresIn-heldFor)
+		ctx, cancel = context.WithTimeout(ctx, remaining)
 		defer cancel()
 	}
 	return l.cfg.Poll.Poll(ctx)
