@@ -94,6 +94,10 @@ func (l *durableLog) publish(ev *pb.Event) {
 		select {
 		case s.live <- ev:
 		default:
+			select {
+			case s.stale <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -103,6 +107,7 @@ func (l *durableLog) Subscribe(ctx context.Context, sessionID string, afterSeq i
 		log:       l,
 		sessionID: sessionID,
 		live:      make(chan *pb.Event, subscriberBuffer),
+		stale:     make(chan struct{}, 1),
 		out:       make(chan *pb.Event),
 		done:      make(chan struct{}),
 	}
@@ -133,6 +138,7 @@ type subscription struct {
 	log       *durableLog
 	sessionID string
 	live      chan *pb.Event
+	stale     chan struct{}
 	out       chan *pb.Event
 
 	closeOnce sync.Once
@@ -200,6 +206,8 @@ func (s *subscription) pump(ctx context.Context, afterSeq int64) {
 				if ev.GetSessionEnded() != nil {
 					return
 				}
+			case <-s.stale:
+				contiguous = false
 			case <-s.done:
 				return
 			case <-ctx.Done():
