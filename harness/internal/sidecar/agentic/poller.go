@@ -89,8 +89,8 @@ func (p *HTTPPoller) Poll(ctx context.Context) PollResult {
 		return PollResult{Kind: PollTerminal, Reason: ReasonConfigError, Err: fmt.Errorf("token exchange rejected the projected token (401)")}
 	case http.StatusForbidden:
 		return PollResult{Kind: PollTerminal, Reason: ReasonRevokedOrExpired, Err: fmt.Errorf("token exchange denied (403)")}
-	case http.StatusServiceUnavailable:
-		return PollResult{Kind: PollRetryable, Err: fmt.Errorf("databroker unavailable (503)")}
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return PollResult{Kind: PollRetryable, Err: fmt.Errorf("token exchange unavailable (%d)", resp.StatusCode)}
 	default:
 		return PollResult{Kind: PollTerminal, Reason: ReasonConfigError, Err: fmt.Errorf("unexpected status %d", resp.StatusCode)}
 	}

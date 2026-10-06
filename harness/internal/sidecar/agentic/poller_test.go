@@ -94,6 +94,9 @@ func TestHTTPPoller_Classification(t *testing.T) {
 		{"revoked_plain", http.StatusForbidden, `revoked`, PollTerminal, ReasonRevokedOrExpired},
 		{"bad_sa_token", http.StatusUnauthorized, `unauthorized`, PollTerminal, ReasonConfigError},
 		{"databroker", http.StatusServiceUnavailable, `unavailable`, PollRetryable, ""},
+		{"bad_gateway", http.StatusBadGateway, `bad gateway`, PollRetryable, ""},
+		{"gateway_timeout", http.StatusGatewayTimeout, `gateway timeout`, PollRetryable, ""},
+		{"internal_error", http.StatusInternalServerError, `boom`, PollTerminal, ReasonConfigError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
