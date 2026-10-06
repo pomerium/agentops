@@ -306,3 +306,49 @@ func TestBuildBootstrapHostRewriteOmitsDefaultPort(t *testing.T) {
 		t.Errorf("host rewrite = %q, want api.anthropic.com (default port omitted)", got)
 	}
 }
+
+func TestBuildBootstrapHTTPSUpstreamVerifiesHostname(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		ep      envoyconfig.Endpoint
+		sanType tlsv3.SubjectAltNameMatcher_SanType
+		want    string
+	}{
+		"url host": {
+			ep:      envoyconfig.Endpoint{Name: "a", ListenPort: 9100, UpstreamURL: "https://api.example.com"},
+			sanType: tlsv3.SubjectAltNameMatcher_DNS, want: "api.example.com",
+		},
+		"dial address override": {
+			ep: envoyconfig.Endpoint{
+				Name: "a", ListenPort: 9100, UpstreamURL: "https://admin-mcp.example.com",
+				DialAddress: "gateway.gateway.svc.cluster.local:443",
+			},
+			sanType: tlsv3.SubjectAltNameMatcher_DNS, want: "admin-mcp.example.com",
+		},
+		"mixed case host": {
+			ep:      envoyconfig.Endpoint{Name: "a", ListenPort: 9100, UpstreamURL: "https://API.Example.com"},
+			sanType: tlsv3.SubjectAltNameMatcher_DNS, want: "api.example.com",
+		},
+		"ip host": {
+			ep:      envoyconfig.Endpoint{Name: "a", ListenPort: 9100, UpstreamURL: "https://10.0.0.7:8443"},
+			sanType: tlsv3.SubjectAltNameMatcher_IP_ADDRESS, want: "10.0.0.7",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, clusters := mustBuild(t, []envoyconfig.Endpoint{tc.ep})
+			var tlsCtx tlsv3.UpstreamTlsContext
+			if err := clusters[0].TransportSocket.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+				t.Fatalf("unpack tls context: %v", err)
+			}
+			matchers := tlsCtx.GetCommonTlsContext().GetValidationContext().GetMatchTypedSubjectAltNames()
+			if len(matchers) != 1 {
+				t.Fatalf("got %d SAN matchers, want 1 for %s", len(matchers), tc.want)
+			}
+			m := matchers[0]
+			if m.GetSanType() != tc.sanType || m.GetMatcher().GetExact() != tc.want {
+				t.Errorf("SAN matcher = %v %q, want %v %q", m.GetSanType(), m.GetMatcher().GetExact(), tc.sanType, tc.want)
+			}
+		})
+	}
+}

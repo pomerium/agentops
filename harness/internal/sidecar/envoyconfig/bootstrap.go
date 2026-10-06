@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	bootstrapv3 "github.com/envoyproxy/go-control-plane/envoy/config/bootstrap/v3"
@@ -17,6 +18,7 @@ import (
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	matcherv3 "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -281,6 +283,7 @@ func buildCluster(ep Endpoint, up upstream, caFile string) (*clusterv3.Cluster, 
 						TrustedCa: &corev3.DataSource{
 							Specifier: &corev3.DataSource_Filename{Filename: caFile},
 						},
+						MatchTypedSubjectAltNames: []*tlsv3.SubjectAltNameMatcher{upstreamSAN(up.host)},
 					},
 				},
 			},
@@ -295,6 +298,19 @@ func buildCluster(ep Endpoint, up upstream, caFile string) (*clusterv3.Cluster, 
 		}
 	}
 	return cluster, nil
+}
+
+func upstreamSAN(host string) *tlsv3.SubjectAltNameMatcher {
+	if ip := net.ParseIP(host); ip != nil {
+		return &tlsv3.SubjectAltNameMatcher{
+			SanType: tlsv3.SubjectAltNameMatcher_IP_ADDRESS,
+			Matcher: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_Exact{Exact: ip.String()}},
+		}
+	}
+	return &tlsv3.SubjectAltNameMatcher{
+		SanType: tlsv3.SubjectAltNameMatcher_DNS,
+		Matcher: &matcherv3.StringMatcher{MatchPattern: &matcherv3.StringMatcher_Exact{Exact: strings.ToLower(host)}},
+	}
 }
 
 func pipeAddress(path string) *corev3.Address {
