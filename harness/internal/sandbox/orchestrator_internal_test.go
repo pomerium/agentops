@@ -561,23 +561,27 @@ func TestForgottenAttachmentNeverReportsDown(t *testing.T) {
 
 func TestReattachWithoutAgentClosesTheSession(t *testing.T) {
 	link := newFakeAgentLink()
-	o := New(newFakeClaims(), testPods(), nil, link, WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"))
+	o := newTestOrchestrator(t, newFakeClaims(), link)
 
 	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
 	downs := make(chan string, 1)
-	if _, err := o.Expect("run-1", prepared, WithOnDown(func(cause string) { downs <- cause })); err != nil {
+	att, err := o.Expect("run-1", prepared, WithOnDown(func(cause string) { downs <- cause }))
+	if err != nil {
 		t.Fatalf("Expect: %v", err)
 	}
 	h := link.handle("run-1")
 
-	h.opts.OnAttached(1, false)
+	h.attach(1, false)
+	if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
 	select {
 	case cause := <-downs:
 		t.Fatalf("the first attach closed the session (%s)", cause)
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	h.opts.OnAttached(2, false)
@@ -588,6 +592,36 @@ func TestReattachWithoutAgentClosesTheSession(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("a re-attach without the agent did not close the session")
+	}
+}
+
+func TestFirstAttachAfterRetriesKeepsSupervision(t *testing.T) {
+	link := newFakeAgentLink()
+	o := newTestOrchestrator(t, newFakeClaims(), link)
+
+	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	downs := make(chan string, 4)
+	att, err := o.Expect("run-1", prepared, WithOnDown(func(cause string) { downs <- cause }))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	h := link.handle("run-1")
+
+	h.attach(3, false)
+	if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	h.opts.OnAgentExit(1)
+	select {
+	case cause := <-downs:
+		if cause != "agent_exited" {
+			t.Errorf("cause = %q, want agent_exited", cause)
+		}
+	default:
+		t.Fatal("the agent exit was never reported")
 	}
 }
 

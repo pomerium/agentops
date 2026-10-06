@@ -253,6 +253,7 @@ type Attachment struct {
 	link   AgentLink
 
 	forgotten atomic.Bool
+	spawned   atomic.Bool
 	down      func(cause string)
 	downOnce  sync.Once
 	onDelayed func(waited time.Duration)
@@ -300,7 +301,7 @@ func (o *Orchestrator) Expect(runID string, prepared *Prepared, opts ...Supervis
 				att.cancelGrace()
 				o.log.Info("sandbox attached", "run_id", runID, "pod", prepared.SandboxName,
 					"attempt", attempt, "agent_running", agentRunning)
-				if attempt > 1 && !agentRunning {
+				if att.spawned.Load() && !agentRunning {
 					att.fire("sidecar_restarted")
 				}
 			}),
@@ -394,6 +395,7 @@ func (o *Orchestrator) Activate(ctx context.Context, sink EventSink, prepared *P
 	if err := att.handle.SpawnAgent(ctx); err != nil {
 		return fail(fmt.Errorf("spawn agent: %w", err))
 	}
+	att.spawned.Store(true)
 	stdin, stdout, err := att.handle.AwaitAgentIO(attachCtx)
 	if err != nil {
 		return fail(fmt.Errorf("await agent io: %w", err))
