@@ -272,15 +272,23 @@ func (s *Service) pump(f *os.File, push func(*runnerpb.RunnerServerFrame) bool, 
 	if err != nil {
 		return
 	}
-	for {
+	var pending int
+	var ioctlErr error
+	if err := rc.Control(func(fd uintptr) {
+		pending, ioctlErr = pipeBuffered(int(fd))
+	}); err != nil || ioctlErr != nil {
+		return
+	}
+	for pending > 0 {
 		var n int
 		var rerr error
 		if err := rc.Read(func(fd uintptr) bool {
-			n, rerr = syscall.Read(int(fd), buf)
+			n, rerr = syscall.Read(int(fd), buf[:min(pending, len(buf))])
 			return true
 		}); err != nil || rerr != nil || n <= 0 || !emit(n) {
 			return
 		}
+		pending -= n
 	}
 }
 
