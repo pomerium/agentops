@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -157,40 +156,6 @@ func New(st sessionstore.Sessions, ev EventLog, l Launcher, t Templates, runs ag
 	}
 }
 
-type binding struct {
-	sessionID string
-	owner     *owner
-	claimName string
-	session   LiveSession
-	sink      *logSink
-
-	ready chan struct{}
-
-	done chan struct{}
-
-	busy atomic.Int32
-
-	turn sync.Mutex
-
-	lastActivity atomic.Int64
-
-	idleWarned atomic.Bool
-
-	leaseUntil atomic.Int64
-}
-
-func (b *binding) touch() {
-	b.lastActivity.Store(time.Now().UnixNano())
-	b.idleWarned.Store(false)
-}
-
-func (b *binding) idleFor(now time.Time) time.Duration {
-	if b.busy.Load() > 0 {
-		return 0
-	}
-	return now.Sub(time.Unix(0, b.lastActivity.Load()))
-}
-
 func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionRequest) (*pb.CreateSessionResponse, error) {
 	clientID, err := apiserver.ClientID(ctx)
 	if err != nil {
@@ -298,11 +263,12 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 	switch sess.Status {
 	case api.StateRunning:
 		b := s.lookup(sess.ID)
-		if b == nil {
+		if b == nil || !b.enter() {
 			return "", api.Errorf(api.ErrInvalidState, "session %s is not attached to this process", sess.ID)
 		}
 		turnID, err := s.nextTurnID(ctx, sess.ID)
 		if err != nil {
+			b.leave()
 			return "", err
 		}
 		go s.runTurn(context.WithoutCancel(ctx), b, turnID, content)

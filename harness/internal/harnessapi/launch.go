@@ -186,22 +186,17 @@ func (s *Service) activateAndRun(
 		return nil
 	}
 
-	b := &binding{
-		sessionID: sess.ID,
-		claimName: prepared.ClaimName,
-		session:   liveSess,
-		sink:      sink,
-		ready:     make(chan struct{}),
-		done:      make(chan struct{}),
-	}
+	b := newBinding(sess.ID, prepared.ClaimName, liveSess, sink)
 	defer close(b.ready)
-
-	b.touch()
 	if !prepared.LeaseUntil.IsZero() {
 		b.leaseUntil.Store(prepared.LeaseUntil.UnixNano())
 	}
+	opening := opts.agentPrompt != "" && b.enter()
 
 	if !s.register(o, b) {
+		if opening {
+			b.leave()
+		}
 		_ = liveSess.Close()
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, "")
 		return nil
@@ -223,12 +218,13 @@ func (s *Service) activateAndRun(
 		s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_Revived{Revived: &pb.Revived{}}})
 	}
 
-	if opts.agentPrompt != "" {
+	if opening {
 		turnID := opts.turnID
 		if turnID == "" {
 			id, err := s.nextTurnID(ctx, sess.ID)
 			if err != nil {
 				s.log.WarnContext(ctx, "could not allocate the opening turn", "err", err)
+				b.leave()
 				return b
 			}
 			turnID = id
@@ -414,12 +410,16 @@ func (s *Service) reportAttachDelayed(ctx context.Context, sessionID, runID stri
 }
 
 func (s *Service) runTurn(ctx context.Context, b *binding, turnID, text string) {
-	if b == nil {
-		return
-	}
-
-	b.touch()
-	defer b.touch()
+	defer b.leave()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func(finished <-chan struct{}) {
+		select {
+		case <-b.done:
+			cancel()
+		case <-finished:
+		}
+	}(ctx.Done())
 
 	s.extendLease(ctx, b)
 
@@ -427,10 +427,12 @@ func (s *Service) runTurn(ctx context.Context, b *binding, turnID, text string) 
 	ctx, op := s.tel.Start(ctx, "runTurn", "chars", len(text))
 	defer op.Complete()
 
-	b.busy.Add(1)
-	defer b.busy.Add(-1)
 	b.turn.Lock()
 	defer b.turn.Unlock()
+	if ctx.Err() != nil {
+		s.emit(ctx, b.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: "the session stopped before this turn ran"}}})
+		return
+	}
 	b.sink.beginTurn(turnID)
 	defer b.sink.endTurn(ctx)
 

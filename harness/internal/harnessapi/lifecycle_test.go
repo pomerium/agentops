@@ -450,3 +450,61 @@ func TestEndedLaunchNeverRuns(t *testing.T) {
 		})
 	}
 }
+
+func TestTurnsFinishBeforeTheSessionEnds(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error) {
+		if text == "first" {
+			close(entered)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-release:
+			}
+		}
+		sink.AgentMessage(ctx, text+" reply")
+		return acp.StopReasonEndTurn, nil
+	})
+	first, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "first"})
+	if err != nil {
+		t.Fatalf("Prompt (first): %v", err)
+	}
+	<-entered
+	second, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "second"})
+	if err != nil {
+		t.Fatalf("Prompt (second): %v", err)
+	}
+	if _, err := h.svc.EndSession(ctx, &pb.EndSessionRequest{Ref: ref}); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	waitForStoredState(t, h, ref, api.StateEnded)
+	close(release)
+
+	ended := map[string]bool{}
+	var kinds []string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !(ended[first.GetTurnId()] && ended[second.GetTurnId()]) {
+		page, err := h.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref})
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		kinds = kinds[:0]
+		for _, ev := range page.GetEvents() {
+			kinds = append(kinds, api.Kind(ev))
+			if ev.GetTurnCompleted() != nil || ev.GetTurnFailed() != nil {
+				ended[ev.GetTurnId()] = true
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !ended[first.GetTurnId()] || !ended[second.GetTurnId()] {
+		t.Fatalf("an accepted turn never ended: %v", kinds)
+	}
+	if kinds[len(kinds)-1] != "session_ended" {
+		t.Errorf("events followed session_ended: %v", kinds)
+	}
+}

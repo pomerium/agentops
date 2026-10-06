@@ -133,3 +133,14 @@ func TestTheIdleSweepRechecksActivityBeforeItStops(t *testing.T) {
 		t.Error("the idle sweep detached a session that became active")
 	}
 }
+
+func TestAStoppedBindingRunsNoMoreTurns(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	svc.stopSession(context.Background(), "s1", stopSpec{end: api.EndEnded})
+
+	if b.enter() {
+		b.leave()
+		t.Error("a stopped binding accepted another turn")
+	}
+}

@@ -42,10 +42,10 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
 	ctx = context.WithoutCancel(ctx)
 	sessionID := b.sessionID
 	_ = b.session.Close()
-	close(b.done)
 	<-b.ready
 
 	b.sink.supersedeAll()
+	b.drain()
 
 	suspended := false
 	if spec.suspend != pb.Reason_REASON_UNSPECIFIED {
@@ -299,7 +299,7 @@ func (s *Service) Shutdown() {
 	s.mu.Lock()
 	var live []*binding
 	for id, o := range s.owners {
-		if o.live != nil {
+		if o.live != nil && o.live.close(0) {
 			live = append(live, o.live)
 			delete(s.owners, id)
 		}
@@ -307,6 +307,5 @@ func (s *Service) Shutdown() {
 	s.mu.Unlock()
 	for _, b := range live {
 		_ = b.session.Close()
-		close(b.done)
 	}
 }

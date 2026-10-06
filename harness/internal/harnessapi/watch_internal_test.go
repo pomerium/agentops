@@ -23,6 +23,7 @@ type quietLauncher struct{ Launcher }
 
 func (quietLauncher) Suspend(context.Context, string) error  { return nil }
 func (quietLauncher) Teardown(context.Context, string) error { return nil }
+func (quietLauncher) LeaseLength() time.Duration             { return 0 }
 
 type idleSession struct{}
 
@@ -39,10 +40,7 @@ func attach(svc *Service, b *binding) bool {
 }
 
 func readyBinding(svc *Service, sessionID string) *binding {
-	b := &binding{
-		sessionID: sessionID, claimName: "claim", session: idleSession{},
-		sink: newLogSink(svc, sessionID, time.Minute), ready: make(chan struct{}), done: make(chan struct{}),
-	}
+	b := newBinding(sessionID, "claim", idleSession{}, newLogSink(svc, sessionID, time.Minute))
 	close(b.ready)
 	return b
 }
