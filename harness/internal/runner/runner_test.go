@@ -189,6 +189,36 @@ func TestStreamDropKillsTheAgent(t *testing.T) {
 	}
 }
 
+func TestStreamDropKillsAnAgentThatStoppedReadingStdin(t *testing.T) {
+	client := serve(t, []string{"/bin/sh", "-c", "head -c 1 >/dev/null; echo reading; exec sleep 60"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stream, pid := spawn(t, ctx, client)
+	defer func() { _ = syscall.Kill(-int(pid), syscall.SIGKILL) }()
+	if err := stream.Send(&runnerpb.RunnerClientFrame{
+		Msg: &runnerpb.RunnerClientFrame_Stdin{Stdin: make([]byte, 1<<20)},
+	}); err != nil {
+		t.Fatalf("send stdin: %v", err)
+	}
+	frame, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	if string(frame.GetStdout()) != "reading\n" {
+		t.Fatalf("frame = %v, want stdout %q", frame, "reading\n")
+	}
+	cancel()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for processAlive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("agent %d survived the dropped stream while its stdin was full", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func processAlive(pid int64) bool {
 	proc, err := os.FindProcess(int(pid))
 	if err != nil {

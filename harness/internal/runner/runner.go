@@ -184,6 +184,12 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 	go func() {
 		for {
 			f, err := stream.Recv()
+			if b := f.GetStdin(); err == nil && b != nil {
+				if _, err := proc.stdin.Write(b); err != nil {
+					s.log.Warn("agent-runner: write to agent stdin failed", "err", err)
+				}
+				continue
+			}
 			select {
 			case recvCh <- recvResult{f, err}:
 			case <-streamDone:
@@ -206,14 +212,12 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 				s.log.Info("agent-runner: run stream failed; stopping the agent", "pid", proc.pid(), "err", r.err)
 				return r.err
 			}
-			switch {
-			case r.frame.GetStdin() != nil:
-				if _, err := proc.stdin.Write(r.frame.GetStdin()); err != nil {
-					s.log.Warn("agent-runner: write to agent stdin failed", "err", err)
-				}
-			case r.frame.GetSignal() != nil:
-				proc.signal(s.log, syscall.Signal(r.frame.GetSignal().GetSignum()))
+			if sig := r.frame.GetSignal(); sig != nil {
+				proc.signal(s.log, syscall.Signal(sig.GetSignum()))
 			}
+		case <-stream.Context().Done():
+			s.log.Info("agent-runner: run stream canceled; stopping the agent", "pid", proc.pid())
+			return stream.Context().Err()
 		case <-proc.done:
 			code := proc.exitCode()
 			drained := make(chan struct{})
