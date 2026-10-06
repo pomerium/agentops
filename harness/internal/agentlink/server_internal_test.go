@@ -1,7 +1,9 @@
 package agentlink
 
 import (
+	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -71,5 +73,54 @@ func TestReconnectAttachIsNotifiedAfterTheOldLoss(t *testing.T) {
 		if got := <-events; got != want {
 			t.Fatalf("callback order: got %q, want %q", got, want)
 		}
+	}
+}
+
+type blockedAttachSend struct {
+	agentlinkpb.AgentLinkService_AttachServer
+	ctx     context.Context
+	entered chan struct{}
+}
+
+func (b *blockedAttachSend) Context() context.Context { return b.ctx }
+
+func (b *blockedAttachSend) Send(*agentlinkpb.ManagerFrame) error {
+	close(b.entered)
+	<-b.ctx.Done()
+	return io.EOF
+}
+
+func (b *blockedAttachSend) Recv() (*agentlinkpb.SidecarFrame, error) {
+	<-b.ctx.Done()
+	return nil, b.ctx.Err()
+}
+
+func TestBlockedHelloAckDoesNotHoldAForgottenRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &blockedAttachSend{ctx: ctx, entered: make(chan struct{})}
+	run := &attachedRun{
+		runID: "blocked-send", hbInterval: time.Hour, hbMissLimit: 3, io: agentio.New(),
+		attached: make(chan struct{}), done: make(chan struct{}),
+	}
+	live := newAttachStream(time.Now())
+	run.live = live
+	s := &Server{now: time.Now, log: slog.Default()}
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- s.serveAttach(ctx, stream, run, live, &agentlinkpb.SidecarHello{ProtocolVersion: ProtocolVersion, Attempt: 1})
+	}()
+	<-stream.entered
+	run.finish(errForgotten)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveAttach stayed inside a blocked Send after the run was forgotten")
+	}
+	select {
+	case <-run.attached:
+		t.Fatal("the run was marked attached although its HelloAck was never sent")
+	default:
 	}
 }

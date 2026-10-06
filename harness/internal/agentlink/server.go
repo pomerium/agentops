@@ -231,21 +231,7 @@ func (s *Server) Attach(stream agentlinkpb.AgentLinkService_AttachServer) error 
 		"attempt", hello.GetAttempt(), "agent_running", hello.GetAgentRunning(),
 		"protocol_version", hello.GetProtocolVersion())
 
-	if err := stream.Send(&agentlinkpb.ManagerFrame{
-		Msg: &agentlinkpb.ManagerFrame_HelloAck{HelloAck: &agentlinkpb.ManagerHelloAck{
-			ProtocolVersion:    ProtocolVersion,
-			HeartbeatSeconds:   uint32(run.hbInterval / time.Second),
-			HeartbeatMissLimit: run.hbMissLimit,
-			Config:             run.config,
-		}},
-	}); err != nil {
-		s.release(run, live, fmt.Errorf("send hello ack: %w", err))
-		return err
-	}
-	run.markAttached()
-	run.notifyAttached(hello.GetAttempt(), hello.GetAgentRunning())
-
-	cause := s.serveAttach(ctx, stream, run, live)
+	cause := s.serveAttach(ctx, stream, run, live, hello)
 	s.release(run, live, cause)
 	return cause
 }
@@ -302,7 +288,7 @@ func (s *Server) release(run *attachedRun, live *attachStream, cause error) {
 }
 
 func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkService_AttachServer,
-	run *attachedRun, live *attachStream,
+	run *attachedRun, live *attachStream, hello *agentlinkpb.SidecarHello,
 ) error {
 	type recvResult struct {
 		frame *agentlinkpb.SidecarFrame
@@ -323,10 +309,52 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 		}
 	}()
 
+	sendCh := make(chan *agentlinkpb.ManagerFrame, 1)
+	sentCh := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case f := <-sendCh:
+				sentCh <- stream.Send(f)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var pending *agentlinkpb.ManagerFrame
+	var pendingSince time.Time
+	send := func(f *agentlinkpb.ManagerFrame) {
+		pending, pendingSince = f, s.now()
+		sendCh <- f
+	}
+	directives := func() <-chan *agentlinkpb.ManagerFrame {
+		if pending != nil {
+			return nil
+		}
+		return live.send
+	}
+
+	var notified chan struct{}
+	defer func() {
+		if notified != nil {
+			<-notified
+		}
+	}()
+
 	ticker := time.NewTicker(run.hbInterval)
 	defer ticker.Stop()
 	lastSent := s.now()
 	deadline := time.Duration(run.hbMissLimit) * run.hbInterval
+
+	send(&agentlinkpb.ManagerFrame{
+		Msg: &agentlinkpb.ManagerFrame_HelloAck{HelloAck: &agentlinkpb.ManagerHelloAck{
+			ProtocolVersion:    ProtocolVersion,
+			HeartbeatSeconds:   uint32(run.hbInterval / time.Second),
+			HeartbeatMissLimit: run.hbMissLimit,
+			Config:             run.config,
+		}},
+	})
 
 	for {
 		select {
@@ -338,30 +366,46 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 			if err := s.handleSidecarFrame(ctx, run, r.frame); err != nil {
 				return err
 			}
-		case f := <-live.send:
-			if err := stream.Send(f); err != nil {
-				return fmt.Errorf("send directive: %w", err)
+		case err := <-sentCh:
+			f := pending
+			pending = nil
+			if err != nil {
+				return fmt.Errorf("send %s: %w", frameKind(f), err)
 			}
 			lastSent = s.now()
-			if f.GetShutdown() != nil {
+			switch {
+			case f.GetHelloAck() != nil:
+				run.markAttached()
+				notified = make(chan struct{})
+				go func(done chan struct{}) {
+					defer close(done)
+					run.notifyAttached(hello.GetAttempt(), hello.GetAgentRunning())
+				}(notified)
+			case f.GetShutdown() != nil:
 				s.tel.Debug(ctx, "shutdown directive sent", "reason", f.GetShutdown().GetReason())
 			}
+		case f := <-directives():
+			send(f)
 		case <-ticker.C:
 			now := s.now()
+			if pending != nil {
+				if blocked := now.Sub(pendingSince); blocked > deadline {
+					s.log.Warn("harness: sidecar stopped reading its control stream",
+						"run_id", run.runID, "blocked_for", blocked.String(), "deadline", deadline.String())
+					return status.Errorf(codes.DeadlineExceeded, "%s: %s blocked for %s", reasonHeartbeatMissed, frameKind(pending), blocked)
+				}
+			}
 			if silent := live.silentFor(now); silent > deadline {
 				s.log.Warn("harness: sidecar missed the heartbeat deadline",
 					"run_id", run.runID, "silent_for", silent.String(), "deadline", deadline.String())
 				return status.Errorf(codes.DeadlineExceeded, "%s: no frame for %s", reasonHeartbeatMissed, silent)
 			}
-			if now.Sub(lastSent) < run.hbInterval {
+			if pending != nil || now.Sub(lastSent) < run.hbInterval {
 				continue
 			}
-			if err := stream.Send(&agentlinkpb.ManagerFrame{
+			send(&agentlinkpb.ManagerFrame{
 				Msg: &agentlinkpb.ManagerFrame_Heartbeat{Heartbeat: &agentlinkpb.Heartbeat{}},
-			}); err != nil {
-				return fmt.Errorf("send heartbeat: %w", err)
-			}
-			lastSent = now
+			})
 		case <-live.closed:
 			return live.err()
 		case <-run.done:
@@ -369,6 +413,17 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+func frameKind(f *agentlinkpb.ManagerFrame) string {
+	switch {
+	case f.GetHelloAck() != nil:
+		return "hello ack"
+	case f.GetHeartbeat() != nil:
+		return "heartbeat"
+	default:
+		return "directive"
 	}
 }
 

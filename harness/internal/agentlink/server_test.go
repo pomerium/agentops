@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -853,5 +854,48 @@ func TestSubSecondHeartbeatIsAdvertisedAsWholeSeconds(t *testing.T) {
 	}
 	if got := ack.GetHeartbeatSeconds(); got != 1 {
 		t.Fatalf("HelloAck heartbeat = %ds for a 500ms server interval, want 1s", got)
+	}
+}
+
+func TestSidecarThatStopsReadingIsLost(t *testing.T) {
+	g := newTestLink(t, time.Second, 1)
+	lost := make(chan error, 1)
+	cfg := &agentlinkpb.SandboxConfig{Endpoints: []*agentlinkpb.ProxiedEndpoint{{
+		Name: "big", UpstreamUrl: "https://" + strings.Repeat("x", 1<<20),
+	}}}
+	handle, err := g.srv.Expect("run-unread", testSeal, cfg, agentlink.WithOnLost(func(cause error) { lost <- cause }))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	stream, err := g.client.Attach(g.ctx(ctx, "run-unread", nil))
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := stream.Send(&agentlinkpb.SidecarFrame{
+		Msg: &agentlinkpb.SidecarFrame_Hello{Hello: &agentlinkpb.SidecarHello{
+			ProtocolVersion: agentlink.ProtocolVersion, Attempt: 1,
+		}},
+	}); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+	beat := time.NewTicker(100 * time.Millisecond)
+	defer beat.Stop()
+	for {
+		select {
+		case cause := <-lost:
+			t.Logf("lost: %v", cause)
+			return
+		case <-beat.C:
+			g.clock.advance(100 * time.Millisecond)
+			_ = stream.Send(&agentlinkpb.SidecarFrame{
+				Msg: &agentlinkpb.SidecarFrame_Status{Status: &agentlinkpb.Status{State: agentlinkpb.Status_STATE_READY}},
+			})
+		case <-ctx.Done():
+			t.Fatal("OnLost never fired for a sidecar that stopped reading its control stream")
+		}
 	}
 }
