@@ -240,12 +240,12 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 func (l *Loop) rotationInterval(t *Token) time.Duration {
+	d := 10 * time.Minute
 	if l.cfg.RotationInterval > 0 {
-		return l.cfg.RotationInterval
+		d = l.cfg.RotationInterval
 	}
-	d := t.ExpiresIn / 6
-	if d <= 0 || d > 10*time.Minute {
-		d = 10 * time.Minute
+	if share := t.ExpiresIn / 6; share > 0 {
+		d = min(d, share)
 	}
 	return d
 }

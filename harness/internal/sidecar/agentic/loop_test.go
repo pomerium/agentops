@@ -99,6 +99,15 @@ func TestLoop_RotationIntervalDefault(t *testing.T) {
 	assert.Equal(t, 5*time.Second, l.rotationInterval(tok("b", time.Hour)))
 }
 
+func TestLoop_ConfiguredRotationStaysBeforeExpiry(t *testing.T) {
+	t.Parallel()
+	l := NewLoop(LoopConfig{RotationInterval: 5 * time.Second})
+	assert.Equal(t, 500*time.Millisecond, l.rotationInterval(tok("b", 3*time.Second)),
+		"a configured interval must not outlast the default share of the token lifetime")
+	l = NewLoop(LoopConfig{RotationInterval: time.Hour})
+	assert.Equal(t, 20*time.Minute, l.rotationInterval(tok("b", 2*time.Hour)))
+}
+
 func TestLoop_BackoffCapped(t *testing.T) {
 	t.Parallel()
 	seq := make([]PollResult, 0, 12)
@@ -178,12 +187,12 @@ func TestLoop_ASUnreachablePastTokenExpiry(t *testing.T) {
 func TestLoop_RetrySleepStopsAtTokenExpiry(t *testing.T) {
 	t.Parallel()
 	poll := &scriptPoller{seq: []PollResult{
-		{Kind: PollOk, Token: tok("Bearer pom_art_1", 3*time.Second)},
+		{Kind: PollOk, Token: tok("Bearer pom_art_1", 6*time.Second)},
 		{Kind: PollRetryable, Err: errors.New("token exchange unavailable (503)")},
 	}}
 
 	now := time.Unix(1000, 0)
-	expiresAt := now.Add(3 * time.Second)
+	expiresAt := now.Add(6 * time.Second)
 	var slept []time.Duration
 	loop := NewLoop(LoopConfig{
 		Poll:             poll,
@@ -202,7 +211,7 @@ func TestLoop_RetrySleepStopsAtTokenExpiry(t *testing.T) {
 	require.ErrorAs(t, err, &te)
 	assert.Equal(t, ReasonASUnreachable, te.Reason)
 	assert.Equal(t, expiresAt, now, "the loop must stop when the token expires, not after it")
-	assert.Equal(t, []time.Duration{time.Second, time.Second, time.Second}, slept)
+	assert.Equal(t, []time.Duration{time.Second, time.Second, 2 * time.Second, 2 * time.Second}, slept)
 }
 
 func TestLoop_ContextCancelStops(t *testing.T) {
