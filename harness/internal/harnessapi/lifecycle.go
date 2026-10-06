@@ -29,9 +29,16 @@ func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSp
 	}
 }
 
+func (s *Service) stopBinding(ctx context.Context, b *binding, spec stopSpec) {
+	if s.detachBinding(b) {
+		s.stopLive(ctx, b, spec)
+	}
+}
+
 func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
 	sessionID := b.sessionID
 	_ = b.session.Close()
+	close(b.done)
 	<-b.ready
 
 	b.sink.supersedeAll()
@@ -260,5 +267,6 @@ func (s *Service) Shutdown() {
 	s.mu.Unlock()
 	for _, b := range live {
 		_ = b.session.Close()
+		close(b.done)
 	}
 }

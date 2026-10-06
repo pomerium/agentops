@@ -68,6 +68,7 @@ type options struct {
 	suspendedTTL      time.Duration
 	permissionTimeout time.Duration
 	runTTL            time.Duration
+	runWatchInterval  time.Duration
 	logger            *slog.Logger
 }
 
@@ -106,6 +107,9 @@ func (c *options) applyDefaults() {
 	}
 	if c.runTTL == 0 {
 		c.runTTL = 15 * time.Minute
+	}
+	if c.runWatchInterval == 0 {
+		c.runWatchInterval = time.Minute
 	}
 }
 
@@ -160,6 +164,8 @@ type binding struct {
 	sink      *logSink
 
 	ready chan struct{}
+
+	done chan struct{}
 
 	busy atomic.Int32
 
@@ -621,6 +627,16 @@ func (s *Service) register(b *binding, slot *launchSlot) bool {
 	}
 	s.live[b.sessionID] = b
 	delete(s.launching, b.sessionID)
+	return true
+}
+
+func (s *Service) detachBinding(b *binding) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.live[b.sessionID] != b {
+		return false
+	}
+	delete(s.live, b.sessionID)
 	return true
 }
 

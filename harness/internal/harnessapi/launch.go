@@ -132,9 +132,10 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 
 	go s.pollRun(ctx, cancel, sess.ID, res.RunID, outcome)
 
-	registered = s.activateAndRun(ctx, sess, opts, prepared, att, res.RunID, slot)
+	b := s.activateAndRun(ctx, sess, opts, prepared, att, res.RunID, slot)
+	registered = b != nil
 	if registered {
-		go s.watchRun(context.WithoutCancel(ctx), sess.ID, res.RunID)
+		go s.watchRun(context.WithoutCancel(ctx), b, res.RunID)
 	}
 }
 
@@ -160,7 +161,7 @@ func (s *Service) activateAndRun(
 	att *sandbox.Attachment,
 	runID string,
 	slot *launchSlot,
-) bool {
+) *binding {
 	outcome := slot.outcome
 	sink := newLogSink(s, sess.ID, s.cfg.permissionTimeout)
 
@@ -169,7 +170,7 @@ func (s *Service) activateAndRun(
 		if errors.Is(err, sandbox.ErrResumeUnavailable) && opts.revive && !outcome.isStopped() {
 			s.log.InfoContext(ctx, "this conversation could not be continued", "err", err)
 			s.failRevive(ctx, sess, opts, api.ReasonResumeUnavailable, "the conversation could not be continued")
-			return false
+			return nil
 		}
 		reason, detail := api.EndLaunchFailed, "the workspace could not be activated"
 
@@ -185,7 +186,7 @@ func (s *Service) activateAndRun(
 		}
 		s.log.ErrorContext(ctx, "activate failed", "err", err)
 		s.failLaunch(ctx, sess, opts, outcome, prepared.ClaimName, reason, detail)
-		return false
+		return nil
 	}
 
 	b := &binding{
@@ -194,6 +195,7 @@ func (s *Service) activateAndRun(
 		session:   liveSess,
 		sink:      sink,
 		ready:     make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	defer close(b.ready)
 
@@ -205,7 +207,7 @@ func (s *Service) activateAndRun(
 	if !s.register(b, slot) {
 		_ = liveSess.Close()
 		s.failLaunch(ctx, sess, opts, outcome, prepared.ClaimName, api.EndLaunchFailed, "")
-		return false
+		return nil
 	}
 	ctx = context.WithoutCancel(ctx)
 	_ = s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching)
@@ -226,13 +228,13 @@ func (s *Service) activateAndRun(
 			id, err := s.nextTurnID(ctx, sess.ID)
 			if err != nil {
 				s.log.WarnContext(ctx, "could not allocate the opening turn", "err", err)
-				return true
+				return b
 			}
 			turnID = id
 		}
 		go s.runTurn(context.WithoutCancel(ctx), b, turnID, opts.agentPrompt)
 	}
-	return true
+	return b
 }
 
 func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opts launchOpts, outcome *runOutcome, claimName string, reason api.EndReason, detail string) {
@@ -359,19 +361,17 @@ func (s *Service) pollRun(ctx context.Context, cancel context.CancelFunc, sessio
 	}
 }
 
-const runWatchInterval = 60 * time.Second
-
-func (s *Service) watchRun(ctx context.Context, sessionID, runID string) {
-	ticker := time.NewTicker(runWatchInterval)
+func (s *Service) watchRun(ctx context.Context, b *binding, runID string) {
+	sessionID := b.sessionID
+	ticker := time.NewTicker(s.cfg.runWatchInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-		}
-		if s.lookup(sessionID) == nil {
+		case <-b.done:
 			return
+		case <-ticker.C:
 		}
 		st, err := s.runs.GetRun(ctx, runID)
 		if err != nil {
@@ -380,15 +380,15 @@ func (s *Service) watchRun(ctx context.Context, sessionID, runID string) {
 			}
 			s.log.WarnContext(ctx, "run watch terminal error; ending the session",
 				"session", sessionID, "run_id", runID, "err", err)
-			s.stopSession(ctx, sessionID, stopSpec{end: api.EndRevoked, detail: "this session's run could not be read"})
+			s.stopBinding(ctx, b, stopSpec{end: api.EndRevoked, detail: "this session's run could not be read"})
 			return
 		}
 		switch {
 		case st.Revoked:
-			s.stopSession(ctx, sessionID, stopSpec{end: api.EndRevoked})
+			s.stopBinding(ctx, b, stopSpec{end: api.EndRevoked})
 			return
 		case !st.ExpiresAt.IsZero() && time.Now().After(st.ExpiresAt):
-			s.stopSession(ctx, sessionID, stopSpec{end: api.EndExpired})
+			s.stopBinding(ctx, b, stopSpec{end: api.EndExpired})
 			return
 		}
 	}
