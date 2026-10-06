@@ -127,7 +127,7 @@ type Service struct {
 
 	mu        sync.Mutex
 	live      map[string]*binding
-	launching map[string]struct{}
+	launching map[string]*launchSlot
 }
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*Service)(nil)
@@ -149,7 +149,7 @@ func New(st sessionstore.Sessions, ev EventLog, l Launcher, t Templates, runs ag
 		resolved:  newResolvedRequests(),
 		prompts:   newPromptKeys(),
 		live:      map[string]*binding{},
-		launching: map[string]struct{}{},
+		launching: map[string]*launchSlot{},
 	}
 }
 
@@ -158,6 +158,8 @@ type binding struct {
 	claimName string
 	session   LiveSession
 	sink      *logSink
+
+	ready chan struct{}
 
 	busy atomic.Int32
 
@@ -585,7 +587,12 @@ func (s *Service) counts() (live, launching int) {
 	return len(s.live), len(s.launching)
 }
 
-func (s *Service) reserve(sessionID string) bool {
+type launchSlot struct {
+	cancel  context.CancelFunc
+	outcome *runOutcome
+}
+
+func (s *Service) reserve(sessionID string, slot *launchSlot) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, live := s.live[sessionID]; live {
@@ -594,28 +601,46 @@ func (s *Service) reserve(sessionID string) bool {
 	if _, launching := s.launching[sessionID]; launching {
 		return false
 	}
-	s.launching[sessionID] = struct{}{}
+	s.launching[sessionID] = slot
 	return true
 }
 
-func (s *Service) releaseReservation(sessionID string) {
+func (s *Service) release(sessionID string, slot *launchSlot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.launching, sessionID)
+	if s.launching[sessionID] == slot {
+		delete(s.launching, sessionID)
+	}
 }
 
-func (s *Service) register(b *binding) {
+func (s *Service) register(b *binding, slot *launchSlot) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if slot.outcome.isStopped() {
+		return false
+	}
 	s.live[b.sessionID] = b
 	delete(s.launching, b.sessionID)
+	return true
 }
 
-func (s *Service) unregister(sessionID string) {
+func (s *Service) detach(sessionID string, spec stopSpec) (*binding, *launchSlot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.live, sessionID)
-	delete(s.launching, sessionID)
+	if b, ok := s.live[sessionID]; ok {
+		delete(s.live, sessionID)
+		return b, nil
+	}
+	if slot, ok := s.launching[sessionID]; ok {
+		if slot.cancel != nil {
+			slot.outcome.stop(spec)
+			slot.cancel()
+		}
+		return nil, nil
+	}
+	held := &launchSlot{}
+	s.launching[sessionID] = held
+	return nil, held
 }
 
 func newID() string {

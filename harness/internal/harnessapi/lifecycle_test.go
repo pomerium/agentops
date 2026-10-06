@@ -3,6 +3,7 @@ package harnessapi_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -392,5 +393,60 @@ func TestOverlappingPromptsKeepTheirReplies(t *testing.T) {
 	}
 	if got := replies[second.GetTurnId()]; got != "second reply" {
 		t.Errorf("the second turn's reply is %q, want %q", got, "second reply")
+	}
+}
+
+func TestEndedLaunchNeverRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gate  func(*fakeLauncher) *chan struct{}
+		reach api.SessionState
+	}{
+		{"while preparing", func(l *fakeLauncher) *chan struct{} { return &l.prepareGate }, api.StateLaunching},
+		{"while awaiting approval", func(l *fakeLauncher) *chan struct{} { return &l.gate }, api.StateAwaitingApproval},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := as(stubClient)
+			h := newHarness(t)
+			gate := make(chan struct{})
+			*tc.gate(h.launcher) = gate
+
+			created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+				Template: "deploy", ConversationRef: "stub:conv-1", ApprovalPrompt: "ship the thing",
+			})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			ref := byID(created.GetSession().GetId())
+			sub, err := h.subscribe(ctx, &pb.SubscribeRequest{Ref: ref})
+			if err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+			defer sub.Close()
+			rec := record(t, sub)
+			waitForStoredState(t, h, ref, tc.reach)
+
+			if _, err := h.svc.EndSession(ctx, &pb.EndSessionRequest{Ref: ref}); err != nil {
+				t.Fatalf("EndSession: %v", err)
+			}
+			close(gate)
+			rec.waitFor("session_ended", 0)
+			waitForStoredState(t, h, ref, api.StateEnded)
+
+			deadline := time.Now().Add(200 * time.Millisecond)
+			for time.Now().Before(deadline) {
+				res, err := h.svc.GetSession(ctx, &pb.GetSessionRequest{Ref: &pb.SessionRef{SessionId: ref.GetSessionId(), IncludeTerminal: true}})
+				if err != nil {
+					t.Fatalf("GetSession: %v", err)
+				}
+				if got := res.GetSession().GetState(); got != api.StateEnded {
+					t.Fatalf("an ended session became %v", got)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if _, _, teardowns, _, _ := h.launcher.snapshot(); !slices.Contains(teardowns, "claim-1") {
+				t.Errorf("the ended launch's workspace was not released: teardowns %v", teardowns)
+			}
+		})
 	}
 }

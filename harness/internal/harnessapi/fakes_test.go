@@ -134,6 +134,8 @@ type fakeLauncher struct {
 
 	gate chan struct{}
 
+	prepareGate chan struct{}
+
 	resumeErr   error
 	activateErr error
 }
@@ -143,6 +145,12 @@ func newFakeLauncher() *fakeLauncher {
 }
 
 func (l *fakeLauncher) Prepare(_ context.Context, spec sandbox.LaunchSpec) (*sandbox.Prepared, error) {
+	l.mu.Lock()
+	prepareGate := l.prepareGate
+	l.mu.Unlock()
+	if prepareGate != nil {
+		<-prepareGate
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.prepares++
@@ -168,12 +176,16 @@ func (l *fakeLauncher) Expect(runID string, _ *sandbox.Prepared, opts ...sandbox
 	return &sandbox.Attachment{}, nil
 }
 
-func (l *fakeLauncher) Activate(_ context.Context, sink sandbox.EventSink, _ *sandbox.Prepared, _ *sandbox.Attachment) (harnessapi.LiveSession, error) {
+func (l *fakeLauncher) Activate(ctx context.Context, sink sandbox.EventSink, _ *sandbox.Prepared, _ *sandbox.Attachment) (harnessapi.LiveSession, error) {
 	l.mu.Lock()
 	gate, activateErr := l.gate, l.activateErr
 	l.mu.Unlock()
 	if gate != nil {
-		<-gate
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if activateErr != nil {
 		return nil, activateErr

@@ -19,13 +19,20 @@ type stopSpec struct {
 }
 
 func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSpec) {
-	b := s.lookup(sessionID)
-	if b == nil {
+	b, held := s.detach(sessionID, spec)
+	switch {
+	case b != nil:
+		s.stopLive(ctx, b, spec)
+	case held != nil:
+		defer s.release(sessionID, held)
 		s.stopDetached(ctx, sessionID, spec)
-		return
 	}
-	s.unregister(sessionID)
+}
+
+func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
+	sessionID := b.sessionID
 	_ = b.session.Close()
+	<-b.ready
 
 	b.sink.supersedeAll()
 

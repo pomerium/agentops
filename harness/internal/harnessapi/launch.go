@@ -32,20 +32,28 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 	ctx, op := s.tel.Start(ctx, "launch")
 	defer op.Complete()
 
-	if !s.reserve(sessionID) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	slot := &launchSlot{cancel: cancel, outcome: &runOutcome{}}
+	if !s.reserve(sessionID, slot) {
 		s.tel.Debug(ctx, "launch already in progress for this session; skipping")
 		return
 	}
 	registered := false
 	defer func() {
 		if !registered {
-			s.releaseReservation(sessionID)
+			s.release(sessionID, slot)
 		}
 	}()
+	outcome := slot.outcome
 
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		s.log.ErrorContext(ctx, "launch: could not read the session", "err", err)
+		return
+	}
+	if api.Terminal(sess.Status) {
+		s.tel.Debug(ctx, "the session ended before its launch began; skipping")
 		return
 	}
 	from := sess.Status
@@ -72,7 +80,7 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 	}
 	if err != nil {
 		s.log.ErrorContext(ctx, "could not get a workspace ready", "err", err)
-		s.failLaunch(ctx, sess, opts, "", api.EndPrepareFailed, "the workspace could not be prepared")
+		s.failLaunch(ctx, sess, opts, outcome, "", api.EndPrepareFailed, "the workspace could not be prepared")
 		return
 	}
 
@@ -89,12 +97,10 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 	})
 	if err != nil {
 		s.log.ErrorContext(ctx, "create run failed", "err", err)
-		s.failLaunch(ctx, sess, opts, prepared.ClaimName, api.EndRunCreateFailed, "a run could not be created for this session")
+		s.failLaunch(ctx, sess, opts, outcome, prepared.ClaimName, api.EndRunCreateFailed, "a run could not be created for this session")
 		return
 	}
 	_ = s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
-
-	outcome := &runOutcome{}
 
 	att, err := s.launcher.Expect(res.RunID, prepared,
 		sandbox.WithOnDown(func(cause string) {
@@ -106,7 +112,7 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 	)
 	if err != nil {
 		s.log.ErrorContext(ctx, "register harness expectation failed", "run_id", res.RunID, "err", err)
-		s.failLaunch(ctx, sess, opts, prepared.ClaimName, api.EndLaunchFailed,
+		s.failLaunch(ctx, sess, opts, outcome, prepared.ClaimName, api.EndLaunchFailed,
 			"this session could not be registered with the agent link")
 		return
 	}
@@ -124,11 +130,9 @@ func (s *Service) launch(ctx context.Context, sessionID string, opts launchOpts)
 		ApprovalUrl: res.ApprovalURL, ExpiresAt: api.Timestamp(res.ExpiresAt),
 	}}})
 
-	launchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go s.pollRun(launchCtx, cancel, sess.ID, res.RunID, outcome)
+	go s.pollRun(ctx, cancel, sess.ID, res.RunID, outcome)
 
-	registered = s.activateAndRun(launchCtx, sess, opts, prepared, att, res.RunID, outcome)
+	registered = s.activateAndRun(ctx, sess, opts, prepared, att, res.RunID, slot)
 	if registered {
 		go s.watchRun(context.WithoutCancel(ctx), sess.ID, res.RunID)
 	}
@@ -155,13 +159,14 @@ func (s *Service) activateAndRun(
 	prepared *sandbox.Prepared,
 	att *sandbox.Attachment,
 	runID string,
-	outcome *runOutcome,
+	slot *launchSlot,
 ) bool {
+	outcome := slot.outcome
 	sink := newLogSink(s, sess.ID, s.cfg.permissionTimeout)
 
 	liveSess, err := s.launcher.Activate(ctx, sink, prepared, att)
 	if err != nil {
-		if errors.Is(err, sandbox.ErrResumeUnavailable) && opts.revive {
+		if errors.Is(err, sandbox.ErrResumeUnavailable) && opts.revive && !outcome.isStopped() {
 			s.log.InfoContext(ctx, "this conversation could not be continued", "err", err)
 			s.failRevive(ctx, sess, opts, api.ReasonResumeUnavailable, "the conversation could not be continued")
 			return false
@@ -179,7 +184,7 @@ func (s *Service) activateAndRun(
 			reason, detail = api.EndRevoked, "this session's run was revoked"
 		}
 		s.log.ErrorContext(ctx, "activate failed", "err", err)
-		s.failLaunch(ctx, sess, opts, prepared.ClaimName, reason, detail)
+		s.failLaunch(ctx, sess, opts, outcome, prepared.ClaimName, reason, detail)
 		return false
 	}
 
@@ -188,14 +193,21 @@ func (s *Service) activateAndRun(
 		claimName: prepared.ClaimName,
 		session:   liveSess,
 		sink:      sink,
+		ready:     make(chan struct{}),
 	}
+	defer close(b.ready)
 
 	b.touch()
 	if !prepared.LeaseUntil.IsZero() {
 		b.leaseUntil.Store(prepared.LeaseUntil.UnixNano())
 	}
 
-	s.register(b)
+	if !s.register(b, slot) {
+		_ = liveSess.Close()
+		s.failLaunch(ctx, sess, opts, outcome, prepared.ClaimName, api.EndLaunchFailed, "")
+		return false
+	}
+	ctx = context.WithoutCancel(ctx)
 	_ = s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching)
 	_ = s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
 
@@ -223,9 +235,17 @@ func (s *Service) activateAndRun(
 	return true
 }
 
-func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opts launchOpts, claimName string, reason api.EndReason, detail string) {
+func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opts launchOpts, outcome *runOutcome, claimName string, reason api.EndReason, detail string) {
 	ctx = context.WithoutCancel(ctx)
-	if opts.revive {
+	if spec, stopped := outcome.stopped(); stopped {
+		reason, detail = spec.end, spec.detail
+		if claimName == "" {
+			claimName = sess.SandboxClaimName
+		}
+		if opts.turnID != "" {
+			s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: "the session ended"}}})
+		}
+	} else if opts.revive {
 		s.failRevive(ctx, sess, opts, api.ReasonReviveFailed, detail)
 		return
 	}
@@ -270,7 +290,22 @@ type runOutcome struct {
 	reason api.EndReason
 
 	approved bool
+
+	stoppedBy *stopSpec
 }
+
+func (o *runOutcome) stop(spec stopSpec) { o.mu.Lock(); o.stoppedBy = &spec; o.mu.Unlock() }
+
+func (o *runOutcome) stopped() (stopSpec, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stoppedBy == nil {
+		return stopSpec{}, false
+	}
+	return *o.stoppedBy, true
+}
+
+func (o *runOutcome) isStopped() bool { _, ok := o.stopped(); return ok }
 
 func (o *runOutcome) set(r api.EndReason) { o.mu.Lock(); o.reason = r; o.mu.Unlock() }
 func (o *runOutcome) get() api.EndReason  { o.mu.Lock(); defer o.mu.Unlock(); return o.reason }
