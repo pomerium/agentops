@@ -79,7 +79,9 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		return
 	}
 
-	_ = s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching)
+	s.write(ctx, sess.ID, func(ctx context.Context) error {
+		return s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching)
+	})
 
 	res, err := s.runs.CreateRun(ctx, agenticrun.CreateRunRequest{
 		Prompt:          opts.approvalPrompt,
@@ -95,7 +97,9 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndRunCreateFailed, "a run could not be created for this session")
 		return
 	}
-	_ = s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
+	s.write(ctx, sess.ID, func(ctx context.Context) error {
+		return s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
+	})
 
 	att, err := s.launcher.Expect(res.RunID, prepared,
 		sandbox.WithOnDown(func(cause string) {
@@ -205,8 +209,12 @@ func (s *Service) activateAndRun(
 		return nil
 	}
 	ctx = context.WithoutCancel(ctx)
-	_ = s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching)
-	_ = s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
+	s.write(ctx, sess.ID, func(ctx context.Context) error {
+		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching); err != nil {
+			return err
+		}
+		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
+	})
 
 	s.recordApproverFromRun(ctx, sess.ID, runID)
 
@@ -262,9 +270,10 @@ func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opt
 				"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
 		}
 	}
-	if err := s.store.UpdateSessionSuspended(ctx, sess.ID, api.StateSuspended, suspendedAtOf(sess)); err != nil {
-		s.log.WarnContext(ctx, "could not restore a session's suspended status after a failed continuation",
-			"session", sess.ID, "err", err)
+	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
+		return s.store.UpdateSessionSuspended(ctx, sess.ID, api.StateSuspended, suspendedAtOf(sess))
+	}) {
+		return
 	}
 	if opts.turnID != "" {
 		s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: detail}}})

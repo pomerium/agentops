@@ -62,8 +62,10 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
 
 	if suspended {
 		now := time.Now()
-		if err := s.store.UpdateSessionSuspended(ctx, sessionID, api.StateSuspended, now); err != nil {
-			s.log.WarnContext(ctx, "record session suspension failed", "session", sessionID, "err", err)
+		if !s.write(ctx, sessionID, func(ctx context.Context) error {
+			return s.store.UpdateSessionSuspended(ctx, sessionID, api.StateSuspended, now)
+		}) {
+			return
 		}
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
 			Old: api.StateRunning, New: api.StateSuspended, Reason: spec.suspend,
@@ -104,7 +106,9 @@ func (s *Service) endSession(ctx context.Context, sessionID string, from api.Ses
 	if reason == api.EndInterrupted {
 		to = api.StateInterrupted
 	}
-	s.setState(ctx, sessionID, from, to, pb.Reason_REASON_UNSPECIFIED)
+	if !s.setState(ctx, sessionID, from, to, pb.Reason_REASON_UNSPECIFIED) {
+		return
+	}
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason, Detail: detail}}})
 }
 
@@ -139,9 +143,14 @@ func (s *Service) ReconcileOnStartup(ctx context.Context) <-chan struct{} {
 }
 
 func (s *Service) reconcile(ctx context.Context, sessions []sessionstore.Session) {
+	ctx = context.WithoutCancel(ctx)
 	interrupted := 0
 	for _, sess := range sessions {
 		if sess.Status == api.StateSuspended {
+			continue
+		}
+		o := &owner{}
+		if !s.claim(sess.ID, o) {
 			continue
 		}
 		if sess.SandboxClaimName != "" {
@@ -152,6 +161,7 @@ func (s *Service) reconcile(ctx context.Context, sessions []sessionstore.Session
 		}
 		s.endSession(ctx, sess.ID, sess.Status, api.EndInterrupted,
 			"the harness restarted while this session was live")
+		s.settle(ctx, sess.ID, o)
 		interrupted++
 	}
 	s.log.InfoContext(ctx, "startup reconcile complete",
@@ -230,6 +240,7 @@ func (s *Service) suspendedFor(sess sessionstore.Session) time.Duration {
 }
 
 func (s *Service) releaseSuspended(ctx context.Context, sessionID string) {
+	ctx = context.WithoutCancel(ctx)
 	o := &owner{}
 	if !s.claim(sessionID, o) {
 		return

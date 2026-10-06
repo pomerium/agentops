@@ -80,3 +80,32 @@ func TestRetentionSparesASessionThatMovedOn(t *testing.T) {
 		})
 	}
 }
+
+type cancelOnTeardown struct {
+	quietLauncher
+	cancel context.CancelFunc
+}
+
+func (l cancelOnTeardown) Teardown(context.Context, string) error {
+	l.cancel()
+	return nil
+}
+
+func TestRetentionRecordsTheEndAfterItsSweepIsCanceled(t *testing.T) {
+	svc, st := runningService(t, quietLauncher{})
+	svc.stopSession(context.Background(), "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+	svc.cfg.suspendedTTL = time.Nanosecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc.launcher = cancelOnTeardown{cancel: cancel}
+	svc.releaseSuspended(ctx, "s1")
+
+	got, err := st.GetSession(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.Status != api.StateEnded {
+		t.Errorf("a released workspace left the session %v, want %v", got.Status, api.StateEnded)
+	}
+}

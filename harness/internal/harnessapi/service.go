@@ -585,12 +585,31 @@ func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
 	}
 }
 
-func (s *Service) setState(ctx context.Context, sessionID string, from, to api.SessionState, reason api.Reason) {
-	if err := s.store.UpdateSessionStatus(ctx, sessionID, to); err != nil {
-		s.log.WarnContext(ctx, "update session status failed",
-			"session", sessionID, "status", to, "err", err)
+func (s *Service) write(ctx context.Context, sessionID string, update func(context.Context) error) bool {
+	ctx = context.WithoutCancel(ctx)
+	current, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		s.log.WarnContext(ctx, "read session before a state write failed", "session", sessionID, "err", err)
+		return false
+	}
+	if api.Terminal(current.Status) {
+		s.tel.Debug(ctx, "the session has ended; refusing a later state write", "session", sessionID)
+		return false
+	}
+	if err := update(ctx); err != nil {
+		s.log.WarnContext(ctx, "update session state failed", "session", sessionID, "err", err)
+	}
+	return true
+}
+
+func (s *Service) setState(ctx context.Context, sessionID string, from, to api.SessionState, reason api.Reason) bool {
+	if !s.write(ctx, sessionID, func(ctx context.Context) error {
+		return s.store.UpdateSessionStatus(ctx, sessionID, to)
+	}) {
+		return false
 	}
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: from, New: to, Reason: reason}}})
+	return true
 }
 
 func (s *Service) nextTurnID(ctx context.Context, sessionID string) (string, error) {
