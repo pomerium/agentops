@@ -36,6 +36,7 @@ func (s *Service) stopBinding(ctx context.Context, b *binding, spec stopSpec) {
 }
 
 func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
+	ctx = context.WithoutCancel(ctx)
 	sessionID := b.sessionID
 	_ = b.session.Close()
 	close(b.done)
@@ -75,6 +76,7 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
 }
 
 func (s *Service) stopDetached(ctx context.Context, sessionID string, spec stopSpec) {
+	ctx = context.WithoutCancel(ctx)
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		s.log.WarnContext(ctx, "stop: could not read the session", "session", sessionID, "err", err)
