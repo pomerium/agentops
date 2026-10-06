@@ -281,9 +281,6 @@ func (c *Client) session(parent context.Context, attempt uint32) error {
 		return err
 	}
 
-	if ag := c.currentAgent(); ag != nil {
-		go c.pumpAgentIO(ctx, ag)
-	}
 	return c.serve(ctx, stream, interval, missLimit)
 }
 
@@ -334,6 +331,10 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 	deadline := time.Duration(missLimit) * interval
 
 	agentExited := c.agentExitChan()
+	ioLost := make(chan error, 1)
+	if ag := c.currentAgent(); ag != nil {
+		go c.pumpAgentIO(ctx, ag, ioLost)
+	}
 
 	for {
 		select {
@@ -344,7 +345,7 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 			lastRecv = time.Now()
 			switch {
 			case r.frame.GetSpawn() != nil:
-				if err := c.spawnAgent(ctx); err != nil {
+				if err := c.spawnAgent(ctx, ioLost); err != nil {
 					c.log.Error("harness: spawn failed", "err", err)
 					_ = stream.Send(statusFrame(ReasonRunnerFailure))
 					return &TerminalError{Reason: ReasonRunnerFailure, Err: err}
@@ -365,6 +366,8 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 				return err
 			}
 			lastSent = time.Now()
+		case err := <-ioLost:
+			return status.Errorf(codes.Unavailable, "agent io lost: %v", err)
 		case st := <-c.statusCh:
 			if err := stream.Send(&agentlinkpb.SidecarFrame{
 				Msg: &agentlinkpb.SidecarFrame_Status{Status: st},
@@ -410,7 +413,7 @@ func (c *Client) configure(cfg *agentlinkpb.SandboxConfig) error {
 	return err
 }
 
-func (c *Client) spawnAgent(ctx context.Context) error {
+func (c *Client) spawnAgent(ctx context.Context, ioLost chan<- error) error {
 	if c.currentAgent() != nil {
 		return nil
 	}
@@ -422,7 +425,7 @@ func (c *Client) spawnAgent(ctx context.Context) error {
 	c.agent = ag
 	c.mu.Unlock()
 	c.log.Info("harness: agent spawned", "pid", ag.PID)
-	go c.pumpAgentIO(ctx, ag)
+	go c.pumpAgentIO(ctx, ag, ioLost)
 	return nil
 }
 
@@ -453,42 +456,46 @@ func (c *Client) stopAgent() {
 	}
 }
 
-func (c *Client) pumpAgentIO(ctx context.Context, ag *AgentSession) {
+func (c *Client) pumpAgentIO(ctx context.Context, ag *AgentSession, lost chan<- error) {
+	if err := c.agentIO(ctx, ag); err != nil && ctx.Err() == nil {
+		select {
+		case lost <- err:
+		default:
+		}
+	}
+}
+
+func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 	stream, err := c.client.AgentIO(ctx)
 	if err != nil {
-		c.log.Warn("harness: open agent io failed", "err", err)
-		return
+		return fmt.Errorf("open agent io: %w", err)
 	}
 	if err := stream.Send(agentio.OpenFrame(ag.IO.Consumed())); err != nil {
-		c.log.Warn("harness: send agent io open failed", "err", err)
-		return
+		return fmt.Errorf("send agent io open: %w", err)
 	}
 	first, err := stream.Recv()
 	if err != nil {
-		c.log.Warn("harness: agent io closed before Open", "err", err)
-		return
+		return fmt.Errorf("agent io closed before Open: %w", err)
 	}
 	open := first.GetOpen()
 	if open == nil {
-		c.log.Error("harness: the first manager AgentIO frame was not Open")
-		return
+		return errors.New("the first manager AgentIO frame was not Open")
 	}
 	if err := ag.IO.ValidateResume(open.GetConsumed()); err != nil {
 		c.log.Error("harness: agent io resume is unserviceable", "err", err)
 		c.Fail("agentio_buffer_overflow")
-		return
+		return nil
 	}
 	ag.IO.StartRecorder()
 	c.log.Info("harness: agent io attached", "peer_consumed", open.GetConsumed(), "our_consumed", ag.IO.Consumed())
 
-	if err := ag.IO.Pump(ctx, stream, open.GetConsumed(), agentio.WithStop(ctx.Done())); err != nil {
-		if errors.Is(err, agentio.ErrProtocol) {
-			c.log.Error("harness: agent io protocol violation", "err", err)
-			c.Fail("agentio_protocol_violation")
-			return
-		}
-		c.log.Debug("harness: agent io ended", "err", err)
+	err = ag.IO.Pump(ctx, stream, open.GetConsumed(), agentio.WithStop(ctx.Done()))
+	if errors.Is(err, agentio.ErrProtocol) {
+		c.log.Error("harness: agent io protocol violation", "err", err)
+		c.Fail("agentio_protocol_violation")
+		return nil
 	}
+	return err
 }
 
 func DialTargetFor(rawURL, dialAddress string) string {

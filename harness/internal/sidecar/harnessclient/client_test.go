@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
@@ -142,7 +143,14 @@ func sessionConfig() *agentlinkpb.SandboxConfig {
 	}}}
 }
 
+type serveFunc func(t *testing.T, srv *agentlink.Server, assertion func() string) string
+
 func newRig(t *testing.T, opts ...agentlink.ExpectOption) *rig {
+	t.Helper()
+	return newRigServed(t, agentlinktest.Serve, opts...)
+}
+
+func newRigServed(t *testing.T, serve serveFunc, opts ...agentlink.ExpectOption) *rig {
 	t.Helper()
 	idp := agentlinktest.NewIDP(t)
 	srv, err := agentlink.New(idp.Verifier(t),
@@ -153,7 +161,7 @@ func newRig(t *testing.T, opts ...agentlink.ExpectOption) *rig {
 	if err != nil {
 		t.Fatalf("agentlink.New: %v", err)
 	}
-	addr := agentlinktest.Serve(t, srv, func() string { return idp.SignFor(t, runID, seal) })
+	addr := serve(t, srv, func() string { return idp.SignFor(t, runID, seal) })
 
 	handle, err := srv.Expect(runID, seal, sessionConfig(), opts...)
 	if err != nil {
@@ -341,6 +349,116 @@ func TestResumeAcrossTunnelDrop(t *testing.T) {
 	defer mu.Unlock()
 	if lost == 0 {
 		t.Error("the dropped control stream should have been reported lost")
+	}
+}
+
+type ctxStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s ctxStream) Context() context.Context { return s.ctx }
+
+type ioResetter struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+func (r *ioResetter) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cancel != nil {
+		r.cancel()
+	}
+}
+
+func (r *ioResetter) serve(t *testing.T, srv *agentlink.Server, assertion func() string) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	stamp := func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		md, _ := metadata.FromIncomingContext(ss.Context())
+		md = md.Copy()
+		md.Set(agentlink.AssertionMetadataKey, assertion())
+		return handler(srv, ctxStream{ServerStream: ss, ctx: metadata.NewIncomingContext(ss.Context(), md)})
+	}
+	gs := grpc.NewServer(grpc.ChainStreamInterceptor(stamp, r.intercept))
+	srv.Register(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+	return lis.Addr().String()
+}
+
+func (r *ioResetter) intercept(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if info.FullMethod != agentlinkpb.AgentLinkService_AgentIO_FullMethodName {
+		return handler(srv, ss)
+	}
+	ctx, cancel := context.WithCancel(ss.Context())
+	defer cancel()
+	r.mu.Lock()
+	r.cancel = cancel
+	r.mu.Unlock()
+	err := handler(srv, ctxStream{ServerStream: ss, ctx: ctx})
+	if ctx.Err() != nil && ss.Context().Err() == nil {
+		return status.Error(codes.Unavailable, "agent io reset by a proxy")
+	}
+	return err
+}
+
+func TestAgentIOResetAloneKeepsTheConversationFlowing(t *testing.T) {
+	resetter := &ioResetter{}
+	r := newRigServed(t, resetter.serve)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	r.start(ctx)
+
+	if err := r.handle.AwaitAttach(ctx); err != nil {
+		t.Fatalf("AwaitAttach: %v", err)
+	}
+	if err := r.handle.SpawnAgent(ctx); err != nil {
+		t.Fatalf("SpawnAgent: %v", err)
+	}
+	stdin, stdout, err := r.handle.AwaitAgentIO(ctx)
+	if err != nil {
+		t.Fatalf("AwaitAgentIO: %v", err)
+	}
+	lines := make(chan string)
+	go func() {
+		reader := bufio.NewReader(stdout)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			select {
+			case lines <- line:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	exchange := func(i int) {
+		t.Helper()
+		if _, err := fmt.Fprintf(stdin, "turn-%d\n", i); err != nil {
+			t.Fatalf("turn %d: write: %v", i, err)
+		}
+		select {
+		case got := <-lines:
+			if want := fmt.Sprintf("echo:turn-%d\n", i); got != want {
+				t.Fatalf("turn %d: got %q, want %q", i, got, want)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("turn %d: no reply after the agent io reset", i)
+		}
+	}
+
+	exchange(0)
+	resetter.reset()
+	for i := 1; i < 4; i++ {
+		exchange(i)
 	}
 }
 
