@@ -101,7 +101,7 @@ func (s *Service) stopDetached(ctx context.Context, sessionID string, spec stopS
 	return s.endSession(ctx, sessionID, sess.Status, spec.end, spec.detail)
 }
 
-func (s *Service) endSession(ctx context.Context, sessionID string, from api.SessionState, reason api.EndReason, detail string) bool {
+func (s *Service) endSession(ctx context.Context, sessionID string, from api.SessionState, reason api.EndReason, detail string, preface ...*pb.Event) bool {
 	if reason == pb.EndReason_END_REASON_UNSPECIFIED {
 		reason = api.EndEnded
 	}
@@ -109,11 +109,17 @@ func (s *Service) endSession(ctx context.Context, sessionID string, from api.Ses
 	if reason == api.EndInterrupted {
 		to = api.StateInterrupted
 	}
-	if !s.setState(ctx, sessionID, from, to, pb.Reason_REASON_UNSPECIFIED) {
+	if !s.write(ctx, sessionID, func(ctx context.Context) error {
+		return s.store.UpdateSessionStatus(ctx, sessionID, to)
+	}) {
 		s.log.ErrorContext(ctx, "the session's end was not recorded; it stays live until an end is retried",
 			"session", sessionID, "reason", reason)
 		return false
 	}
+	for _, ev := range preface {
+		s.emit(ctx, sessionID, ev)
+	}
+	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: from, New: to}}})
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason, Detail: detail}}})
 	return true
 }
@@ -281,11 +287,11 @@ func (s *Service) releaseSuspended(ctx context.Context, sessionID string) {
 		}
 	}
 
-	s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_Released{Released: &pb.Released{
-		RetainedFor: durationpb.New(s.cfg.suspendedTTL),
-	}}})
 	s.endSession(ctx, sess.ID, api.StateSuspended, api.EndExpired,
-		"the workspace retention window lapsed")
+		"the workspace retention window lapsed",
+		&pb.Event{Payload: &pb.Event_Released{Released: &pb.Released{
+			RetainedFor: durationpb.New(s.cfg.suspendedTTL),
+		}}})
 }
 
 func (s *Service) sweepAbsolute(ctx context.Context, sessions []sessionstore.Session) {

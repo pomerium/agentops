@@ -109,3 +109,23 @@ func TestRetentionRecordsTheEndAfterItsSweepIsCanceled(t *testing.T) {
 		t.Errorf("a released workspace left the session %v, want %v", got.Status, api.StateEnded)
 	}
 }
+
+func TestRetentionPublishesNoReleaseTheStoreDidNotSave(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+	svc.cfg.suspendedTTL = time.Nanosecond
+	svc.store = failingStatusStore{Sessions: st}
+
+	svc.releaseSuspended(ctx, "s1")
+
+	events, err := svc.events.History(ctx, "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	for _, ev := range events {
+		if ev.GetReleased() != nil {
+			t.Error("published released although the store kept the session suspended")
+		}
+	}
+}

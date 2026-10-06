@@ -573,7 +573,7 @@ func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
 }
 
 func endsSession(ev *pb.Event) bool {
-	if ev.GetSessionEnded() != nil {
+	if ev.GetSessionEnded() != nil || ev.GetReleased() != nil {
 		return true
 	}
 	sc := ev.GetStateChanged()
