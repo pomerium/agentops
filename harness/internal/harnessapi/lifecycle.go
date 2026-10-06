@@ -57,7 +57,9 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 	}
 	if !suspended {
 		if err := s.launcher.Teardown(ctx, b.claimName); err != nil {
-			s.log.WarnContext(ctx, "sandbox teardown failed", "claim", b.claimName, "err", err)
+			s.log.ErrorContext(ctx, "sandbox teardown failed; the session stays live so a stop can retry",
+				"session", sessionID, "claim", b.claimName, "err", err)
+			return false
 		}
 	}
 
@@ -157,19 +159,25 @@ func (s *Service) reconcile(ctx context.Context, sessions []sessionstore.Session
 		if !s.claim(sess.ID, o) {
 			continue
 		}
-		if sess.SandboxClaimName != "" {
-			if err := s.launcher.Teardown(ctx, sess.SandboxClaimName); err != nil {
-				s.log.WarnContext(ctx, "startup reconcile: teardown failed",
-					"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
-			}
+		if s.interrupt(ctx, sess) {
+			interrupted++
 		}
-		s.endSession(ctx, sess.ID, sess.Status, api.EndInterrupted,
-			"the harness restarted while this session was live")
 		s.settle(ctx, sess.ID, o)
-		interrupted++
 	}
 	s.log.InfoContext(ctx, "startup reconcile complete",
 		"active_sessions", len(sessions), "interrupted", interrupted)
+}
+
+func (s *Service) interrupt(ctx context.Context, sess sessionstore.Session) bool {
+	if sess.SandboxClaimName != "" {
+		if err := s.launcher.Teardown(ctx, sess.SandboxClaimName); err != nil {
+			s.log.ErrorContext(ctx, "startup reconcile: teardown failed; the session stays live so a stop can retry",
+				"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
+			return false
+		}
+	}
+	return s.endSession(ctx, sess.ID, sess.Status, api.EndInterrupted,
+		"the harness restarted while this session was live")
 }
 
 func (s *Service) SweepExpired(ctx context.Context) {

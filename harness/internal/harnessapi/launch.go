@@ -274,10 +274,21 @@ func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opt
 	}
 	if claimName != "" {
 		if err := s.launcher.Teardown(ctx, claimName); err != nil {
-			s.log.WarnContext(ctx, "failed launch: teardown failed", "claim", claimName, "err", err)
+			if s.recordsClaim(ctx, sess.ID, claimName) {
+				s.log.ErrorContext(ctx, "failed launch: teardown failed; the session stays live so a stop can retry",
+					"session", sess.ID, "claim", claimName, "err", err)
+				return
+			}
+			s.log.ErrorContext(ctx, "failed launch: teardown failed and the session records no workspace to retry; its lease bounds the sandbox",
+				"session", sess.ID, "claim", claimName, "err", err)
 		}
 	}
 	s.endSession(ctx, sess.ID, api.StateLaunching, reason, detail)
+}
+
+func (s *Service) recordsClaim(ctx context.Context, sessionID, claimName string) bool {
+	current, err := s.store.GetSession(ctx, sessionID)
+	return err == nil && current.SandboxClaimName == claimName
 }
 
 func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opts launchOpts, reason api.Reason, detail string) {

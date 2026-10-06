@@ -199,3 +199,79 @@ func TestAnEndTheStoreRefusedIsNotPublished(t *testing.T) {
 		}
 	}
 }
+
+type refusedTeardown struct{ quietLauncher }
+
+func (refusedTeardown) Teardown(context.Context, string) error {
+	return errors.New("the workspace could not be deleted")
+}
+
+func TestAnEndStaysRetryableUntilTheWorkspaceIsGone(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, refusedTeardown{})
+
+	if svc.stopSession(ctx, "s1", stopSpec{end: api.EndEnded}) {
+		t.Error("a stop reported success although the workspace was not deleted")
+	}
+	row, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if api.Terminal(row.Status) {
+		t.Fatalf("the session is %v although its workspace remains", row.Status)
+	}
+
+	svc.launcher = quietLauncher{}
+	if !svc.stopSession(ctx, "s1", stopSpec{end: api.EndEnded}) {
+		t.Error("a retried stop failed after deletion recovered")
+	}
+	row, err = st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if row.Status != api.StateEnded {
+		t.Errorf("the retried stop left the session %v", row.Status)
+	}
+}
+
+func TestAFailedLaunchStaysRetryableUntilTheWorkspaceIsGone(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, refusedTeardown{})
+	if err := st.UpdateSessionStatus(ctx, "s1", api.StateLaunching); err != nil {
+		t.Fatalf("UpdateSessionStatus: %v", err)
+	}
+	sess, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	svc.failLaunch(ctx, sess, launchOpts{}, &owner{}, "claim", api.EndRunCreateFailed, "")
+
+	row, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if api.Terminal(row.Status) {
+		t.Errorf("the failed launch is %v although its workspace remains", row.Status)
+	}
+}
+
+func TestReconcileLeavesASessionWhoseWorkspaceRemains(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, refusedTeardown{})
+	sessions, err := st.ListActiveSessions(ctx)
+	if err != nil {
+		t.Fatalf("ListActiveSessions: %v", err)
+	}
+	svc.Shutdown()
+
+	svc.reconcile(ctx, sessions)
+
+	row, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if api.Terminal(row.Status) {
+		t.Errorf("reconcile marked the session %v although its workspace remains", row.Status)
+	}
+}
