@@ -73,6 +73,10 @@ func Load(getenv func(string) string) (Config, error) {
 		{"SESSION_IDLE_WARN_LEAD", &cfg.Harness.SessionIdleWarnLead},
 		{"SUSPENDED_TTL", &cfg.Harness.SuspendedTTL},
 		{"SANDBOX_LEASE", &cfg.Harness.SandboxLease},
+	}); err != nil {
+		return Config{}, err
+	}
+	if err := parseDurations(getenv, true, []durationEnv{
 		{"AGENTIC_RUN_TTL", &cfg.Harness.AgenticRunTTL},
 	}); err != nil {
 		return Config{}, err
