@@ -480,7 +480,10 @@ func (s *Service) Subscribe(ctx context.Context, req *pb.SubscribeRequest, strea
 		return err
 	}
 	defer sub.Close()
-	return server.Stream(ctx, stream, sub.Events())
+	if err := server.Stream(ctx, stream, sub.Events()); err != nil {
+		return err
+	}
+	return sub.Err()
 }
 
 func (s *Service) caller(ctx context.Context) (string, *v1alpha1.ClientBinding, error) {
