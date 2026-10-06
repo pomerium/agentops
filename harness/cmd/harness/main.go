@@ -233,13 +233,25 @@ func serveClientAPI(ctx context.Context, cfg config.Config, impl *harnessapi.Ser
 		Handler:           adminMux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	for _, s := range []struct {
+	servers := []struct {
 		name string
 		srv  *http.Server
-	}{{"harness client API", apiSrv}, {"harness admin", adminSrv}} {
+		lis  net.Listener
+	}{{name: "harness client API", srv: apiSrv}, {name: "harness admin", srv: adminSrv}}
+	for i := range servers {
+		lis, err := net.Listen("tcp", servers[i].srv.Addr)
+		if err != nil {
+			for _, s := range servers[:i] {
+				_ = s.lis.Close()
+			}
+			return nil, fmt.Errorf("listen for the %s on %s: %w", servers[i].name, servers[i].srv.Addr, err)
+		}
+		servers[i].lis = lis
+	}
+	for _, s := range servers {
 		go func() {
-			log.Info(s.name+" listening", "addr", s.srv.Addr)
-			if err := s.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Info(s.name+" listening", "addr", s.lis.Addr().String())
+			if err := s.srv.Serve(s.lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error(s.name+" stopped", "err", err)
 			}
 		}()
