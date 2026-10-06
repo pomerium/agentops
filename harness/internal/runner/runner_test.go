@@ -166,7 +166,7 @@ func TestSecondConcurrentRunIsRejected(t *testing.T) {
 	}
 	if err := second.Send(&runnerpb.RunnerClientFrame{
 		Msg: &runnerpb.RunnerClientFrame_Spawn{Spawn: &runnerpb.Spawn{}},
-	}); err != nil {
+	}); err != nil && err != io.EOF {
 		t.Fatalf("send spawn: %v", err)
 	}
 	if _, err := second.Recv(); status.Code(err) != codes.AlreadyExists {
