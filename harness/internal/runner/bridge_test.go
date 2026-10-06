@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -88,5 +89,50 @@ func TestBridgeSendsFinalOutputAndExitedBeforeReturning(t *testing.T) {
 	}
 	if last := frames[len(frames)-1]; last.GetExited() == nil || last.GetExited().GetExitCode() != 0 {
 		t.Errorf("last frame = %v, want Exited with code 0", last)
+	}
+}
+
+func TestBridgeSendsAllOutputBeforeExitedToASlowClient(t *testing.T) {
+	svc := New(WithCommand([]string{"/bin/sh", "-c", "for i in $(seq 1 40); do echo $i; sleep 0.01; done"}))
+	p, err := svc.spawn()
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer p.terminate(svc.log, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s := &gatedStream{ctx: ctx, started: make(chan struct{}), gate: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(s.gate) })
+	defer release()
+	done := make(chan error, 1)
+	go func() { done <- svc.bridge(s, p) }()
+
+	<-s.started
+	<-p.done
+	time.Sleep(2500 * time.Millisecond)
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("bridge: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bridge did not return after the sends completed")
+	}
+
+	var want, stdout []byte
+	for i := 1; i <= 40; i++ {
+		want = fmt.Appendf(want, "%d\n", i)
+	}
+	frames := s.frames()
+	for _, f := range frames {
+		stdout = append(stdout, f.GetStdout()...)
+	}
+	if string(stdout) != string(want) {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	if last := frames[len(frames)-1]; last.GetExited() == nil {
+		t.Errorf("last frame = %v, want Exited", last)
 	}
 }

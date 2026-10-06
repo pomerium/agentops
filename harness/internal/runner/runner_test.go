@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -255,6 +256,37 @@ func TestAgentExitStopsTheChildrenItLeft(t *testing.T) {
 			t.Fatalf("child %d survived the agent's exit", child)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestEscapedGrandchildHoldingStdoutDoesNotHoldUpExited(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is not installed")
+	}
+	client := serve(t, []string{"/bin/sh", "-c", "setsid sleep 60 & echo $!; exit 3"})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	stream, _ := spawn(t, ctx, client)
+	var stdout []byte
+	var code int32 = -99
+	for code == -99 {
+		frame, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		stdout = append(stdout, frame.GetStdout()...)
+		if exited := frame.GetExited(); exited != nil {
+			code = exited.GetExitCode()
+		}
+	}
+	holder, err := strconv.Atoi(strings.TrimSpace(string(stdout)))
+	if err != nil {
+		t.Fatalf("holder pid from %q: %v", stdout, err)
+	}
+	_ = syscall.Kill(holder, syscall.SIGKILL)
+	if code != 3 {
+		t.Errorf("exit code = %d, want 3", code)
 	}
 }
 

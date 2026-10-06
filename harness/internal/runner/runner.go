@@ -219,11 +219,15 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 			return ctx.Err()
 		case <-proc.done:
 			code := proc.exitCode()
+			proc.signal(s.log, syscall.SIGKILL)
+			_ = proc.stdout.SetReadDeadline(time.Now())
+			_ = proc.stderr.SetReadDeadline(time.Now())
 			drained := make(chan struct{})
 			go func() { pumps.Wait(); close(drained) }()
 			select {
 			case <-drained:
-			case <-time.After(2 * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 			s.log.Info("agent-runner: agent exited", "pid", proc.pid(), "exit_code", code)
 			push(&runnerpb.RunnerServerFrame{
@@ -242,18 +246,39 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 	}
 }
 
-func (s *Service) pump(r io.Reader, push func(*runnerpb.RunnerServerFrame) bool, wrap func([]byte) *runnerpb.RunnerServerFrame) {
+func (s *Service) pump(f *os.File, push func(*runnerpb.RunnerServerFrame) bool, wrap func([]byte) *runnerpb.RunnerServerFrame) {
 	buf := make([]byte, stdioChunk)
+	emit := func(n int) bool {
+		chunk := make([]byte, n)
+		copy(chunk, buf[:n])
+		return push(wrap(chunk))
+	}
 	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			if !push(wrap(chunk)) {
-				return
-			}
+		n, err := f.Read(buf)
+		if n > 0 && !emit(n) {
+			return
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			break
 		}
 		if err != nil {
+			return
+		}
+	}
+	if err := f.SetReadDeadline(time.Time{}); err != nil {
+		return
+	}
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return
+	}
+	for {
+		var n int
+		var rerr error
+		if err := rc.Read(func(fd uintptr) bool {
+			n, rerr = syscall.Read(int(fd), buf)
+			return true
+		}); err != nil || rerr != nil || n <= 0 || !emit(n) {
 			return
 		}
 	}
