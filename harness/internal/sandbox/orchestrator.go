@@ -32,6 +32,7 @@ const (
 	sandboxCwd        = "/workspace"
 	readyTimeout      = 3 * time.Minute
 	readyPollInterval = 2 * time.Second
+	teardownTimeout   = 30 * time.Second
 )
 
 type ClaimClient interface {
@@ -581,6 +582,8 @@ func (o *Orchestrator) Teardown(ctx context.Context, claimName string) error {
 }
 
 func (o *Orchestrator) teardownQuietly(ctx context.Context, claimName string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
+	defer cancel()
 	if err := o.Teardown(ctx, claimName); err != nil {
 		o.log.WarnContext(ctx, "failed to tear down sandbox claim after launch failure",
 			"claim", claimName, "err", err)

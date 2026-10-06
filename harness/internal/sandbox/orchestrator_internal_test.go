@@ -625,6 +625,44 @@ func TestFirstAttachAfterRetriesKeepsSupervision(t *testing.T) {
 	}
 }
 
+type cancelOnCreate struct {
+	*fakeClaims
+	cancel context.CancelFunc
+}
+
+func (f *cancelOnCreate) Create(ctx context.Context, claim *sbxv1.SandboxClaim) (*sbxv1.SandboxClaim, error) {
+	defer f.cancel()
+	return f.fakeClaims.Create(ctx, claim)
+}
+
+func (f *cancelOnCreate) Get(ctx context.Context, name string) (*sbxv1.SandboxClaim, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return f.fakeClaims.Get(ctx, name)
+}
+
+func (f *cancelOnCreate) Delete(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return f.fakeClaims.Delete(ctx, name)
+}
+
+func TestCancelledPrepareStillDeletesTheClaim(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	claims := &cancelOnCreate{fakeClaims: newFakeClaims(), cancel: cancel}
+	o := newTestOrchestrator(t, claims, newFakeAgentLink())
+
+	if _, err := o.Prepare(ctx, LaunchSpec{SessionID: "s1", Template: testTemplate()}); err == nil {
+		t.Fatal("Prepare succeeded although its context was cancelled")
+	}
+	if names := claims.deletedNames(); len(names) != 1 {
+		t.Errorf("a cancelled prepare leaked its claim: deleted %v", names)
+	}
+}
+
 func TestExpectFailureIsReported(t *testing.T) {
 	link := newFakeAgentLink()
 	link.expectErr = errors.New("already expected")
