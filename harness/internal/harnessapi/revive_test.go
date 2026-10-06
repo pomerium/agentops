@@ -3,6 +3,7 @@ package harnessapi_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -259,5 +260,33 @@ func TestConcurrentRevivesAcceptOneTurn(t *testing.T) {
 	}
 	if accepted != 1 {
 		t.Fatalf("accepted %d turns, but only one revive can run", accepted)
+	}
+}
+
+func TestAnEndDuringAFailingReviveWins(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+	h.svc.SuspendForTest(ctx, ref.GetSessionId())
+	waitForStoredState(t, h, ref, api.StateSuspended)
+
+	entered, gate := make(chan struct{}), make(chan struct{})
+	h.launcher.mu.Lock()
+	h.launcher.resumeErr = errors.New("the pod would not come back")
+	h.launcher.suspendEntered, h.launcher.suspendGate = entered, gate
+	h.launcher.mu.Unlock()
+
+	if _, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "carry on"}); err != nil {
+		t.Fatalf("Prompt (revive): %v", err)
+	}
+	<-entered
+	if _, err := h.svc.EndSession(ctx, &pb.EndSessionRequest{Ref: ref}); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	close(gate)
+
+	waitForStoredState(t, h, ref, api.StateEnded)
+	if _, _, teardowns, _, _ := h.launcher.snapshot(); !slices.Contains(teardowns, "claim-1") {
+		t.Errorf("the ended session's workspace was kept: teardowns %v", teardowns)
 	}
 }

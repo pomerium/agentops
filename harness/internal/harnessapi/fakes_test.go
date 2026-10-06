@@ -136,6 +136,9 @@ type fakeLauncher struct {
 
 	prepareGate chan struct{}
 
+	suspendEntered chan struct{}
+	suspendGate    chan struct{}
+
 	resumeErr   error
 	activateErr error
 }
@@ -206,6 +209,14 @@ func (l *fakeLauncher) Teardown(_ context.Context, claimName string) error {
 }
 
 func (l *fakeLauncher) Suspend(_ context.Context, claimName string) error {
+	l.mu.Lock()
+	entered, gate := l.suspendEntered, l.suspendGate
+	l.suspendEntered, l.suspendGate = nil, nil
+	l.mu.Unlock()
+	if gate != nil {
+		close(entered)
+		<-gate
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.suspends = append(l.suspends, claimName)
