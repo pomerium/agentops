@@ -307,3 +307,41 @@ func TestReviveRefusesATemplateNoLongerBound(t *testing.T) {
 		t.Errorf("a refused revive still ran: %v", revives)
 	}
 }
+
+func TestAnUnrecordedReviveFailsItsAcceptedTurn(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+	h.svc.SuspendForTest(ctx, ref.GetSessionId())
+	waitForStoredState(t, h, ref, api.StateSuspended)
+	before, err := h.store.GetSession(ctx, ref.GetSessionId())
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	h.svc = harnessapi.New(failingACPStore{Sessions: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+	sub, err := h.subscribe(ctx, &pb.SubscribeRequest{Ref: ref, AfterSeq: before.EventSeq})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	rec := record(t, sub)
+
+	turn, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "carry on"})
+	if err != nil {
+		t.Fatalf("Prompt (revive): %v", err)
+	}
+	if got := suspendReason(rec); got != api.ReasonReviveFailed {
+		t.Fatalf("an unrecorded revive suspended with %v, want %v", got, api.ReasonReviveFailed)
+	}
+	page, err := h.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref, AfterSeq: before.EventSeq})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, ev := range page.GetEvents() {
+		if ev.GetTurnId() == turn.GetTurnId() && ev.GetTurnFailed() != nil {
+			return
+		}
+	}
+	t.Error("the revive's accepted turn never got TurnFailed")
+}

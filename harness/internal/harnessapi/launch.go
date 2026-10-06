@@ -220,6 +220,9 @@ func (s *Service) activateAndRun(
 		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
 	}) {
 		if opening {
+			if opts.turnID != "" {
+				s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
+			}
 			b.leave()
 		}
 		spec := stopSpec{end: api.EndLaunchFailed, detail: unrecorded}
