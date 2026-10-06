@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -32,6 +33,9 @@ type HTTPPoller struct {
 }
 
 func NewHTTPPoller(cfg HTTPPollerConfig) (*HTTPPoller, error) {
+	if u, err := url.Parse(cfg.BaseURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("agentic AS URL %q: must be an https URL", cfg.BaseURL)
+	}
 	transport, err := pomeriumtls.Transport(cfg.DialAddr, cfg.CAFile)
 	if err != nil {
 		return nil, err
@@ -43,8 +47,14 @@ func NewHTTPPoller(cfg HTTPPollerConfig) (*HTTPPoller, error) {
 	p := &HTTPPoller{
 		url:       strings.TrimRight(cfg.BaseURL, "/") + agenticTokenPath,
 		tokenFile: cfg.TokenFile,
-		hc:        &http.Client{Timeout: 30 * time.Second, Transport: transport},
-		log:       log,
+		hc: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		log: log,
 	}
 	dial := cfg.DialAddr
 	if dial == "" {

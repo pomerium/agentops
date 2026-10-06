@@ -2,6 +2,7 @@ package agentic
 
 import (
 	"context"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,12 +28,20 @@ func writeTokenFile(t *testing.T, val string) string {
 	return p
 }
 
+func writeCA(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
+	return p
+}
+
 func newTestPoller(t *testing.T, srv *httptest.Server, tokenFile string) *HTTPPoller {
 	t.Helper()
 	p, err := NewHTTPPoller(HTTPPollerConfig{
 		BaseURL:   srv.URL,
 		DialAddr:  srv.Listener.Addr().String(),
 		TokenFile: tokenFile,
+		CAFile:    writeCA(t, srv),
 	})
 	require.NoError(t, err)
 	return p
@@ -41,7 +50,7 @@ func newTestPoller(t *testing.T, srv *httptest.Server, tokenFile string) *HTTPPo
 func TestHTTPPoller_OK(t *testing.T) {
 	t.Parallel()
 	var gotAuth, gotPath, gotBody, gotMethod string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		gotMethod = r.Method
@@ -66,7 +75,7 @@ func TestHTTPPoller_OK(t *testing.T) {
 func TestHTTPPoller_ReReadsTokenFile(t *testing.T) {
 	t.Parallel()
 	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Header.Get("Authorization"))
 		_, _ = io.WriteString(w, `{"access_token":"pom_art_x","token_type":"Bearer","expires_in":3600,"run_id":"r"}`)
 	}))
@@ -100,7 +109,7 @@ func TestHTTPPoller_Classification(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tc.status)
 				_, _ = io.WriteString(w, tc.body)
 			}))
@@ -116,11 +125,11 @@ func TestHTTPPoller_Classification(t *testing.T) {
 
 func TestHTTPPoller_NetworkErrorIsRetryable(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	addr := srv.Listener.Addr().String()
 	srv.Close()
 
-	p, err := NewHTTPPoller(HTTPPollerConfig{BaseURL: "http://as.invalid", DialAddr: addr, TokenFile: writeTokenFile(t, "t")})
+	p, err := NewHTTPPoller(HTTPPollerConfig{BaseURL: "https://as.invalid", DialAddr: addr, TokenFile: writeTokenFile(t, "t")})
 	require.NoError(t, err)
 	res := p.Poll(context.Background())
 	assert.Equal(t, PollRetryable, res.Kind)
@@ -128,7 +137,7 @@ func TestHTTPPoller_NetworkErrorIsRetryable(t *testing.T) {
 
 func TestHTTPPoller_NeverLogsToken(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"access_token":"pom_art_SECRET","token_type":"Bearer","expires_in":3600,"run_id":"r"}`)
 	}))
 	defer srv.Close()
@@ -136,7 +145,7 @@ func TestHTTPPoller_NeverLogsToken(t *testing.T) {
 	var buf strings.Builder
 	p, err := NewHTTPPoller(HTTPPollerConfig{
 		BaseURL: srv.URL, DialAddr: srv.Listener.Addr().String(), TokenFile: writeTokenFile(t, "sa"),
-		Logger: newStringLogger(&buf),
+		CAFile: writeCA(t, srv), Logger: newStringLogger(&buf),
 	})
 	require.NoError(t, err)
 	res := p.Poll(context.Background())
@@ -153,7 +162,7 @@ func TestHTTPPoller_RejectsNonPositiveLifetime(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = io.WriteString(w, body)
 			}))
 			defer srv.Close()
@@ -162,5 +171,37 @@ func TestHTTPPoller_RejectsNonPositiveLifetime(t *testing.T) {
 			assert.Equal(t, ReasonConfigError, res.Reason)
 			assert.Nil(t, res.Token)
 		})
+	}
+}
+
+func TestNewHTTPPoller_RejectsPlaintext(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{"http://as.example", "as.example", "https://", "://bad"} {
+		_, err := NewHTTPPoller(HTTPPollerConfig{BaseURL: raw, TokenFile: writeTokenFile(t, "sa-secret")})
+		assert.Errorf(t, err, "%q must be rejected", raw)
+	}
+}
+
+func TestHTTPPoller_DoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+	leaked := make(chan string, 1)
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked <- r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"access_token":"pom_art_x","token_type":"Bearer","expires_in":3600,"run_id":"r"}`)
+	}))
+	defer plain.Close()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	p, err := NewHTTPPoller(HTTPPollerConfig{BaseURL: srv.URL, TokenFile: writeTokenFile(t, "sa-secret"), CAFile: writeCA(t, srv)})
+	require.NoError(t, err)
+	res := p.Poll(context.Background())
+	assert.Equal(t, PollTerminal, res.Kind)
+	select {
+	case got := <-leaked:
+		t.Fatalf("redirect was followed to %s with Authorization %q", plain.URL, got)
+	default:
 	}
 }
