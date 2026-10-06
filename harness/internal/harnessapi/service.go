@@ -357,8 +357,8 @@ func (s *Service) RespondPermission(ctx context.Context, req *pb.RespondPermissi
 	if b == nil {
 		return nil, api.Errorf(api.ErrUnknownRequest, "session %s is not live", sess.ID)
 	}
-	if !b.sink.resolvePermission(req.GetRequestId(), sandbox.PermissionDecision{OptionID: req.GetOptionId()}) {
-		return nil, api.Errorf(api.ErrUnknownRequest, "permission request %q is unknown or already resolved", req.GetRequestId())
+	if err := b.sink.resolvePermission(req.GetRequestId(), sandbox.PermissionDecision{OptionID: req.GetOptionId()}); err != nil {
+		return nil, err
 	}
 	s.resolved.record(sess.ID, req.GetRequestId())
 	return &pb.RespondPermissionResponse{}, nil

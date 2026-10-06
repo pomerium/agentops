@@ -2,6 +2,7 @@ package harnessapi
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +27,12 @@ type logSink struct {
 	buf        strings.Builder
 	thoughtBuf strings.Builder
 	toolTitle  map[string]string
-	waiters    map[string]chan permissionAnswer
+	waiters    map[string]permissionWaiter
+}
+
+type permissionWaiter struct {
+	answer  chan permissionAnswer
+	options []string
 }
 
 type permissionAnswer struct {
@@ -42,7 +48,7 @@ func newLogSink(svc *Service, sessionID string, permTimeout time.Duration) *logS
 		sessionID:   sessionID,
 		permTimeout: permTimeout,
 		toolTitle:   map[string]string{},
-		waiters:     map[string]chan permissionAnswer{},
+		waiters:     map[string]permissionWaiter{},
 	}
 }
 
@@ -177,9 +183,13 @@ func (s *logSink) Usage(ctx context.Context, ev sandbox.UsageEvent) {
 func (s *logSink) Permission(ctx context.Context, req sandbox.PermissionRequest) (sandbox.PermissionDecision, error) {
 	requestID := req.ToolCallID
 	ch := make(chan permissionAnswer, 1)
+	offered := make([]string, 0, len(req.Options))
+	for _, o := range req.Options {
+		offered = append(offered, o.ID)
+	}
 
 	s.mu.Lock()
-	s.waiters[requestID] = ch
+	s.waiters[requestID] = permissionWaiter{answer: ch, options: offered}
 	turnID := s.turnID
 	title := req.Title
 	if title == "" {
@@ -228,27 +238,30 @@ func unanswered(why api.Resolution) *pb.PermissionResolved {
 	return &pb.PermissionResolved{Resolution: &pb.PermissionResolved_Unanswered{Unanswered: why}}
 }
 
-func (s *logSink) resolvePermission(requestID string, d sandbox.PermissionDecision) bool {
+func (s *logSink) resolvePermission(requestID string, d sandbox.PermissionDecision) error {
 	s.mu.Lock()
-	ch := s.waiters[requestID]
+	w, ok := s.waiters[requestID]
 	s.mu.Unlock()
-	if ch == nil {
-		return false
+	if !ok {
+		return api.Errorf(api.ErrUnknownRequest, "permission request %q is unknown or already resolved", requestID)
+	}
+	if !slices.Contains(w.options, d.OptionID) {
+		return api.Errorf(api.ErrInvalidArgument, "option %q was not offered by permission request %q", d.OptionID, requestID)
 	}
 	select {
-	case ch <- permissionAnswer{decision: d, resolved: &pb.PermissionResolved{
+	case w.answer <- permissionAnswer{decision: d, resolved: &pb.PermissionResolved{
 		Resolution: &pb.PermissionResolved_OptionId{OptionId: d.OptionID},
 	}}:
 	default:
 	}
-	return true
+	return nil
 }
 
 func (s *logSink) supersedeAll() {
 	s.mu.Lock()
 	waiters := make([]chan permissionAnswer, 0, len(s.waiters))
-	for _, ch := range s.waiters {
-		waiters = append(waiters, ch)
+	for _, w := range s.waiters {
+		waiters = append(waiters, w.answer)
 	}
 	s.mu.Unlock()
 	for _, ch := range waiters {

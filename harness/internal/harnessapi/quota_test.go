@@ -242,3 +242,50 @@ func TestReviveIsNotChargedAgainstLiveSessions(t *testing.T) {
 		t.Errorf("reviving the client's own only session: got %v, want it accepted", err)
 	}
 }
+
+func TestUnofferedPermissionChoiceIsRefused(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t, harnessapi.WithPermissionTimeout(5*time.Second))
+
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+	sub, err := h.subscribe(ctx, &pb.SubscribeRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	rec := record(t, sub)
+
+	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, _ string) (acp.StopReason, error) {
+		decision, err := sink.Permission(ctx, sandbox.PermissionRequest{
+			ToolCallID: "tc-1",
+			Options:    []sandbox.PermissionOption{{ID: "allow", Name: "Allow", Kind: "allow_once"}},
+		})
+		if err != nil {
+			return "", err
+		}
+		sink.AgentMessage(ctx, "decided: "+decision.OptionID)
+		return acp.StopReasonEndTurn, nil
+	})
+	if _, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "do the thing"}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	permEv, _ := rec.waitFor("permission_request", 0)
+	requestID := permEv.GetPermissionRequest().GetRequestId()
+
+	for _, option := range []string{"", "not-offered"} {
+		if _, err := h.svc.RespondPermission(ctx, &pb.RespondPermissionRequest{
+			Ref: ref, RequestId: requestID, OptionId: option,
+		}); !errors.Is(err, api.ErrInvalidArgument) {
+			t.Errorf("answering with option %q: got %v, want ErrInvalidArgument", option, err)
+		}
+	}
+	if _, err := h.svc.RespondPermission(ctx, &pb.RespondPermissionRequest{
+		Ref: ref, RequestId: requestID, OptionId: "allow",
+	}); err != nil {
+		t.Fatalf("the offered option after a refused one: %v", err)
+	}
+	ev, _ := rec.waitFor("agent_message", 0)
+	if got := ev.GetAgentMessage().GetText(); got != "decided: allow" {
+		t.Errorf("the agent got %q, want the offered option", got)
+	}
+}
