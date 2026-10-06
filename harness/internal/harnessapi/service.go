@@ -286,6 +286,11 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		if err != nil {
 			return "", err
 		}
+		if !s.mayRun(binding, sess.TemplateName) {
+			return "", api.Errorf(api.ErrForbidden,
+				"client %q is no longer bound to template %q, so session %s cannot be continued",
+				sess.ClientID, sess.TemplateName, sess.ID)
+		}
 		launchCtx, o := s.newLaunch(ctx, sess.ClientID)
 		if err := s.admit(ctx, binding, sess.ClientID, spend{}, func() error {
 			return s.claimRevive(ctx, sess.ID, o)

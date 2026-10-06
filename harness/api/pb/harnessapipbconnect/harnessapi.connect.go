@@ -130,6 +130,8 @@ type HarnessAPIServiceClient interface {
 	// Errors:
 	//   - SENTINEL_NOT_FOUND: no live session matches the ref.
 	//   - SENTINEL_INVALID_ARGUMENT: content is empty.
+	//   - SENTINEL_FORBIDDEN: the client cannot use the API, or the session
+	//     is suspended and the client is no longer bound to its template.
 	//   - SENTINEL_INVALID_STATE: the session is not running or suspended,
 	//     or another Prompt is reviving it already.
 	//   - SENTINEL_NOT_REVIVABLE: the session is suspended, but the server
@@ -400,6 +402,8 @@ type HarnessAPIServiceHandler interface {
 	// Errors:
 	//   - SENTINEL_NOT_FOUND: no live session matches the ref.
 	//   - SENTINEL_INVALID_ARGUMENT: content is empty.
+	//   - SENTINEL_FORBIDDEN: the client cannot use the API, or the session
+	//     is suspended and the client is no longer bound to its template.
 	//   - SENTINEL_INVALID_STATE: the session is not running or suspended,
 	//     or another Prompt is reviving it already.
 	//   - SENTINEL_NOT_REVIVABLE: the session is suspended, but the server

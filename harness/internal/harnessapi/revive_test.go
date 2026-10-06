@@ -290,3 +290,20 @@ func TestAnEndDuringAFailingReviveWins(t *testing.T) {
 		t.Errorf("the ended session's workspace was kept: teardowns %v", teardowns)
 	}
 }
+
+func TestReviveRefusesATemplateNoLongerBound(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+	h.svc.SuspendForTest(ctx, ref.GetSessionId())
+	waitForStoredState(t, h, ref, api.StateSuspended)
+
+	bind(h, stubClient, nil, nil)
+
+	if _, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "carry on"}); !errors.Is(err, api.ErrForbidden) {
+		t.Fatalf("reviving a session whose template the client lost: got %v, want ErrForbidden", err)
+	}
+	if revives, _, _, _, _ := h.launcher.snapshot(); len(revives) != 0 {
+		t.Errorf("a refused revive still ran: %v", revives)
+	}
+}
