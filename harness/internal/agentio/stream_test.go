@@ -82,7 +82,7 @@ func TestDeliverInboundRequiresContiguity(t *testing.T) {
 	read := make(chan string, 1)
 	go func() {
 		buf := make([]byte, 3)
-		n, _ := a.inR.Read(buf)
+		n, _ := a.Inbound().Read(buf)
 		read <- string(buf[:n])
 	}()
 	if err := a.DeliverInbound(3, []byte("abc")); err != nil {

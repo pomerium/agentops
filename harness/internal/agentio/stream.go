@@ -1,6 +1,7 @@
 package agentio
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,11 +20,16 @@ const (
 
 var ErrClosed = errors.New("agent io closed")
 
+var errStopped = errors.New("agentio delivery stopped")
+
 type Stream struct {
 	outW *io.PipeWriter
 	outR *io.PipeReader
-	inW  *io.PipeWriter
-	inR  *io.PipeReader
+
+	inData chan []byte
+	inRead chan int
+	inSlot chan struct{}
+	done   chan struct{}
 
 	recorderOnce sync.Once
 
@@ -38,15 +44,34 @@ type Stream struct {
 
 func New() *Stream {
 	outR, outW := io.Pipe()
-	inR, inW := io.Pipe()
-	s := &Stream{outW: outW, outR: outR, inW: inW, inR: inR}
+	s := &Stream{
+		outW:   outW,
+		outR:   outR,
+		inData: make(chan []byte),
+		inRead: make(chan int),
+		inSlot: make(chan struct{}, 1),
+		done:   make(chan struct{}),
+	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
 
 func (s *Stream) Outbound() io.Writer { return s.outW }
 
-func (s *Stream) Inbound() io.Reader { return s.inR }
+func (s *Stream) Inbound() io.Reader { return inbound{s} }
+
+type inbound struct{ s *Stream }
+
+func (r inbound) Read(b []byte) (int, error) {
+	select {
+	case p := <-r.s.inData:
+		n := copy(b, p)
+		r.s.inRead <- n
+		return n, nil
+	case <-r.s.done:
+		return 0, io.ErrClosedPipe
+	}
+}
 
 func (s *Stream) Close(cause error) {
 	s.mu.Lock()
@@ -55,6 +80,7 @@ func (s *Stream) Close(cause error) {
 		return
 	}
 	s.closed = true
+	close(s.done)
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	if cause == nil {
@@ -62,8 +88,6 @@ func (s *Stream) Close(cause error) {
 	}
 	_ = s.outR.CloseWithError(cause)
 	_ = s.outW.CloseWithError(cause)
-	_ = s.inR.CloseWithError(cause)
-	_ = s.inW.CloseWithError(cause)
 }
 
 func (s *Stream) StartRecorder() {
@@ -160,21 +184,40 @@ func (s *Stream) Ack(offset uint64) error {
 }
 
 func (s *Stream) DeliverInbound(seq uint64, payload []byte) error {
-	s.mu.Lock()
-	want := s.inConsumed + uint64(len(payload))
-	s.mu.Unlock()
-	if seq != want {
-		return fmt.Errorf("agentio data seq %d is not contiguous (expected %d)", seq, want)
+	return s.deliver(context.Background(), nil, seq, payload)
+}
+
+func (s *Stream) deliver(ctx context.Context, stop <-chan struct{}, seq uint64, payload []byte) error {
+	select {
+	case s.inSlot <- struct{}{}:
+	case <-s.done:
+		return ErrClosed
+	case <-stop:
+		return errStopped
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if len(payload) == 0 {
-		return nil
+	defer func() { <-s.inSlot }()
+
+	if want := s.Consumed() + uint64(len(payload)); seq != want {
+		return fmt.Errorf("%w: agentio data seq %d is not contiguous (expected %d)", ErrProtocol, seq, want)
 	}
-	if _, err := s.inW.Write(payload); err != nil {
-		return err
+	for len(payload) > 0 {
+		select {
+		case s.inData <- payload:
+			n := <-s.inRead
+			payload = payload[n:]
+			s.mu.Lock()
+			s.inConsumed += uint64(n)
+			s.mu.Unlock()
+		case <-s.done:
+			return ErrClosed
+		case <-stop:
+			return errStopped
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	s.mu.Lock()
-	s.inConsumed = seq
-	s.mu.Unlock()
 	return nil
 }
 

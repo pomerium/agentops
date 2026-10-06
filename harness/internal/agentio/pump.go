@@ -127,11 +127,11 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 					return fmt.Errorf("%w: data frame of %d bytes exceeds the %d limit",
 						ErrProtocol, len(d.GetPayload()), FrameMax)
 				}
-				if err := s.DeliverInbound(d.GetSeq(), d.GetPayload()); err != nil {
-					if errors.Is(err, ErrClosed) {
-						return err
+				if err := s.deliver(ctx, o.stop, d.GetSeq(), d.GetPayload()); err != nil {
+					if errors.Is(err, errStopped) {
+						return nil
 					}
-					return fmt.Errorf("%w: %w", ErrProtocol, err)
+					return err
 				}
 				unacked += uint64(len(d.GetPayload()))
 				if unacked >= AckBytes && !flushAck() {
