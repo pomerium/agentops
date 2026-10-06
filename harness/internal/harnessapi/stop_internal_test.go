@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pomerium/agentops/harness/api"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
@@ -95,5 +96,40 @@ func TestAnEndDuringASuspendWins(t *testing.T) {
 	defer l.mu.Unlock()
 	if !slices.Contains(l.teardowns, "claim") {
 		t.Errorf("the ended session's workspace was kept: teardowns %v", l.teardowns)
+	}
+}
+
+type turnOnIdleLog struct {
+	slog.Handler
+	b *binding
+}
+
+func (turnOnIdleLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h turnOnIdleLog) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == "suspending an idle session" {
+		h.b.touch()
+	}
+	return nil
+}
+
+func TestTheIdleSweepRechecksActivityBeforeItStops(t *testing.T) {
+	svc, st := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	b.lastActivity.Store(time.Now().Add(-time.Hour).UnixNano())
+	svc.cfg.sessionIdleTTL = time.Minute
+	svc.log = slog.New(turnOnIdleLog{Handler: slog.DiscardHandler, b: b})
+
+	svc.sweepIdle(context.Background())
+
+	got, err := st.GetSession(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.Status != api.StateRunning {
+		t.Errorf("a session that became active was %v, want %v", got.Status, api.StateRunning)
+	}
+	if svc.lookup("s1") != b {
+		t.Error("the idle sweep detached a session that became active")
 	}
 }

@@ -2,6 +2,7 @@ package harnessapi
 
 import (
 	"context"
+	"time"
 
 	"github.com/pomerium/agentops/harness/api"
 )
@@ -113,6 +114,9 @@ func (s *Service) detach(sessionID string, want *owner, spec stopSpec) (*binding
 				o.cancel()
 			}
 		}
+		return nil, nil
+	}
+	if o != nil && spec.ifIdleFor > 0 && o.live.idleFor(time.Now()) < spec.ifIdleFor {
 		return nil, nil
 	}
 	held := &owner{}

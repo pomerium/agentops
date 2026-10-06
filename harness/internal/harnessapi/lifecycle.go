@@ -16,6 +16,8 @@ type stopSpec struct {
 
 	end    api.EndReason
 	detail string
+
+	ifIdleFor time.Duration
 }
 
 func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSpec) {
@@ -216,7 +218,9 @@ func (s *Service) sweepIdle(ctx context.Context) {
 			"session", b.sessionID, "idle", b.idleFor(now).String(),
 			"idle_ttl", s.cfg.sessionIdleTTL.String())
 
-		s.stopSession(ctx, b.sessionID, stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+		s.stopOwned(ctx, b.sessionID, b.owner, stopSpec{
+			suspend: api.ReasonIdle, end: api.EndIdle, ifIdleFor: s.cfg.sessionIdleTTL,
+		})
 	}
 }
 
