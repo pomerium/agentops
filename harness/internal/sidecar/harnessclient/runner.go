@@ -71,7 +71,7 @@ func (r *UDSRunner) Spawn(ctx context.Context) (*AgentSession, error) {
 	}
 
 	io := agentio.New()
-	exited := make(chan int32, 1)
+	exited := make(chan AgentExit, 1)
 	session := &AgentSession{IO: io, Exited: exited, PID: started.GetPid()}
 	session.Stop = func() {
 		cancel()
@@ -82,9 +82,10 @@ func (r *UDSRunner) Spawn(ctx context.Context) (*AgentSession, error) {
 	return session, nil
 }
 
-func (r *UDSRunner) readRunner(stream runnerpb.AgentRunnerService_RunClient, tunnel *agentio.Stream, exited chan<- int32) {
+func (r *UDSRunner) readRunner(stream runnerpb.AgentRunnerService_RunClient, tunnel *agentio.Stream, exited chan<- AgentExit) {
 	stderr := &lineLog{log: r.log}
 	defer stderr.flush()
+	var written uint64
 	for {
 		frame, err := stream.Recv()
 		if err != nil {
@@ -92,14 +93,16 @@ func (r *UDSRunner) readRunner(stream runnerpb.AgentRunnerService_RunClient, tun
 				r.log.Warn("harness: runner stream ended", "err", err)
 			}
 			select {
-			case exited <- -1:
+			case exited <- AgentExit{Code: -1, Output: written}:
 			default:
 			}
 			return
 		}
 		switch {
 		case frame.GetStdout() != nil:
-			if _, err := tunnel.Outbound().Write(frame.GetStdout()); err != nil {
+			n, err := tunnel.Outbound().Write(frame.GetStdout())
+			written += uint64(n)
+			if err != nil {
 				r.log.Debug("harness: tunnel closed while forwarding agent stdout", "err", err)
 				return
 			}
@@ -108,7 +111,7 @@ func (r *UDSRunner) readRunner(stream runnerpb.AgentRunnerService_RunClient, tun
 		case frame.GetExited() != nil:
 			stderr.flush()
 			select {
-			case exited <- frame.GetExited().GetExitCode():
+			case exited <- AgentExit{Code: frame.GetExited().GetExitCode(), Output: written}:
 			default:
 			}
 			return

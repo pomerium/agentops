@@ -50,9 +50,16 @@ type Runner interface {
 
 type AgentSession struct {
 	IO     *agentio.Stream
-	Exited <-chan int32
+	Exited <-chan AgentExit
 	Stop   func()
 	PID    int64
+
+	acked ackLevel
+}
+
+type AgentExit struct {
+	Code   int32
+	Output uint64
 }
 
 type Config struct {
@@ -108,7 +115,7 @@ type Client struct {
 	mu       sync.Mutex
 	agent    *AgentSession
 	spawn    *pendingSpawn
-	exit     *int32
+	exit     *AgentExit
 	exitSent bool
 	stopped  bool
 }
@@ -351,9 +358,11 @@ func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLink
 	lastSent := time.Now()
 	deadline := time.Duration(missLimit) * interval
 
-	var agentExited <-chan int32
+	var agentExited, exitAcked <-chan AgentExit
+	var watched *AgentSession
 	ioLost := make(chan error, 1)
 	watch := func(ag *AgentSession) {
+		watched = ag
 		agentExited = c.agentExitChan()
 		go c.pumpAgentIO(ctx, ag, ioLost)
 	}
@@ -397,16 +406,19 @@ func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLink
 			if ag := c.currentAgent(); ag != nil {
 				watch(ag)
 			}
-		case code := <-agentExited:
+		case exit := <-agentExited:
 			agentExited = nil
-			c.recordExit(code, false)
-			c.log.Info("harness: agent process exited", "exit_code", code)
+			c.recordExit(exit, false)
+			c.log.Info("harness: agent process exited", "exit_code", exit.Code)
+			exitAcked = watched.afterOutputAcked(ctx, exit)
+		case exit := <-exitAcked:
+			exitAcked = nil
 			if err := stream.Send(&agentlinkpb.SidecarFrame{
-				Msg: &agentlinkpb.SidecarFrame_Exited{Exited: &agentlinkpb.AgentExited{ExitCode: code}},
+				Msg: &agentlinkpb.SidecarFrame_Exited{Exited: &agentlinkpb.AgentExited{ExitCode: exit.Code}},
 			}); err != nil {
 				return err
 			}
-			c.recordExit(code, true)
+			c.recordExit(exit, true)
 			lastSent = time.Now()
 		case err := <-ioLost:
 			return status.Errorf(codes.Unavailable, "agent io lost: %v", err)
@@ -517,24 +529,86 @@ func (c *Client) agentRunning() bool {
 	return c.spawn != nil || (c.agent != nil && !c.exitSent)
 }
 
-func (c *Client) agentExitChan() <-chan int32 {
+func (c *Client) agentExitChan() <-chan AgentExit {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
 	case c.agent == nil || c.exitSent:
 		return nil
 	case c.exit != nil:
-		unsent := make(chan int32, 1)
+		unsent := make(chan AgentExit, 1)
 		unsent <- *c.exit
 		return unsent
 	}
 	return c.agent.Exited
 }
 
-func (c *Client) recordExit(code int32, sent bool) {
+func (c *Client) recordExit(exit AgentExit, sent bool) {
 	c.mu.Lock()
-	c.exit, c.exitSent = &code, sent
+	c.exit, c.exitSent = &exit, sent
 	c.mu.Unlock()
+}
+
+type ackLevel struct {
+	mu      sync.Mutex
+	offset  uint64
+	changed chan struct{}
+}
+
+func (a *ackLevel) advance(offset uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if offset <= a.offset {
+		return
+	}
+	a.offset = offset
+	if a.changed != nil {
+		close(a.changed)
+		a.changed = nil
+	}
+}
+
+func (a *ackLevel) await(ctx context.Context, offset uint64) error {
+	for {
+		a.mu.Lock()
+		if a.offset >= offset {
+			a.mu.Unlock()
+			return nil
+		}
+		if a.changed == nil {
+			a.changed = make(chan struct{})
+		}
+		changed := a.changed
+		a.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (ag *AgentSession) afterOutputAcked(ctx context.Context, exit AgentExit) <-chan AgentExit {
+	acked := make(chan AgentExit, 1)
+	go func() {
+		if ag.acked.await(ctx, exit.Output) == nil {
+			acked <- exit
+		}
+	}()
+	return acked
+}
+
+type ackObserver struct {
+	agentio.Transport
+	acked *ackLevel
+}
+
+func (o ackObserver) Recv() (*agentlinkpb.AgentIOFrame, error) {
+	f, err := o.Transport.Recv()
+	if ack := f.GetAck(); ack != nil {
+		o.acked.advance(ack.GetConsumed())
+	}
+	return f, err
 }
 
 func (c *Client) stopAgent() {
@@ -593,10 +667,11 @@ func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 		c.Fail("agentio_buffer_overflow")
 		return nil
 	}
+	ag.acked.advance(open.GetConsumed())
 	ag.IO.StartRecorder()
 	c.log.Info("harness: agent io attached", "peer_consumed", open.GetConsumed(), "our_consumed", ag.IO.Consumed())
 
-	err = ag.IO.Pump(ctx, stream, open.GetConsumed(), agentio.WithStop(ctx.Done()))
+	err = ag.IO.Pump(ctx, ackObserver{Transport: stream, acked: &ag.acked}, open.GetConsumed(), agentio.WithStop(ctx.Done()))
 	if errors.Is(err, agentio.ErrProtocol) {
 		c.log.Error("harness: agent io protocol violation", "err", err)
 		c.Fail("agentio_protocol_violation")

@@ -99,8 +99,8 @@ func (s *fakeAttach) agentRunning() bool {
 }
 
 func TestAnExitTheLinkDroppedIsReportedAfterReattach(t *testing.T) {
-	exited := make(chan int32, 1)
-	exited <- 7
+	exited := make(chan AgentExit, 1)
+	exited <- AgentExit{Code: 7}
 	link := &fakeLink{attach: newFakeAttach(status.Error(codes.Unavailable, "link dropped"))}
 	c := &Client{
 		cfg:      Config{Token: bearer("Bearer pom_art_test")},
@@ -176,7 +176,7 @@ type fakeIO struct {
 }
 
 func newFakeIO(frames ...*agentlinkpb.AgentIOFrame) *fakeIO {
-	s := &fakeIO{frames: make(chan *agentlinkpb.AgentIOFrame, len(frames)), opened: make(chan uint64, 1)}
+	s := &fakeIO{frames: make(chan *agentlinkpb.AgentIOFrame, len(frames)+4), opened: make(chan uint64, 1)}
 	for _, f := range frames {
 		s.frames <- f
 	}
@@ -295,7 +295,7 @@ func TestAnAgentThatStartsAfterShutdownIsStopped(t *testing.T) {
 }
 
 func TestAReattachWatchesAnAgentThatFinishedStartingAfterTheDrop(t *testing.T) {
-	exits := make(chan int32, 1)
+	exits := make(chan AgentExit, 1)
 	r := &delayedStart{
 		entered: make(chan struct{}), release: make(chan struct{}),
 		agent: &AgentSession{IO: agentio.New(), Exited: exits},
@@ -327,7 +327,7 @@ func TestAReattachWatchesAnAgentThatFinishedStartingAfterTheDrop(t *testing.T) {
 	go func() { done <- c.session(ctx, 2, c.cfg.Token.Bearer()) }()
 	<-second.helloed
 	close(r.release)
-	exits <- 7
+	exits <- AgentExit{Code: 7}
 
 	select {
 	case code := <-second.exited:
@@ -339,6 +339,63 @@ func TestAReattachWatchesAnAgentThatFinishedStartingAfterTheDrop(t *testing.T) {
 	}
 	if !second.agentRunning() {
 		t.Error("the reattach Hello reported no agent while its start was still in flight")
+	}
+	cancel()
+	<-done
+}
+
+type exitLink struct {
+	agentlinkpb.AgentLinkServiceClient
+	attach *fakeAttach
+	io     *fakeIO
+}
+
+func (l *exitLink) Attach(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AttachClient, error) {
+	l.attach.ctx = ctx
+	return l.attach, nil
+}
+
+func (l *exitLink) AgentIO(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AgentIOClient, error) {
+	l.io.ctx = ctx
+	return l.io, nil
+}
+
+func TestAnExitIsReportedOnlyAfterTheHarnessAckedTheFinalOutput(t *testing.T) {
+	final := []byte("final reply\n")
+	exits := make(chan AgentExit, 1)
+	ag := &AgentSession{IO: agentio.New(), Exited: exits}
+	ag.IO.Record(final)
+	link := &exitLink{attach: newFakeAttach(nil), io: newFakeIO(agentio.OpenFrame(0))}
+	c := &Client{
+		cfg:      Config{Token: bearer("Bearer pom_art_test")},
+		log:      slog.New(slog.DiscardHandler),
+		client:   link,
+		statusCh: make(chan *agentlinkpb.Status, 4),
+		ioSlot:   make(chan struct{}, 1),
+		agent:    ag,
+	}
+	defer c.stopAgent()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.session(ctx, 1, c.cfg.Token.Bearer()) }()
+	<-link.io.opened
+	exits <- AgentExit{Code: 7, Output: uint64(len(final))}
+
+	select {
+	case <-link.attach.exited:
+		t.Fatal("the exit overtook output the harness had not acknowledged")
+	case <-time.After(200 * time.Millisecond):
+	}
+	link.io.frames <- agentio.AckFrame(uint64(len(final)))
+	select {
+	case code := <-link.attach.exited:
+		if code != 7 {
+			t.Errorf("exit %d crossed the link, want 7", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the exit was never reported after the harness acknowledged the output")
 	}
 	cancel()
 	<-done
