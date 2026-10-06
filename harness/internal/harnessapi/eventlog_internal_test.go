@@ -12,6 +12,7 @@ import (
 )
 
 type memEvents struct {
+	sessionstore.Events
 	mu        sync.Mutex
 	rows      []sessionstore.SessionEvent
 	firstRead chan struct{}
