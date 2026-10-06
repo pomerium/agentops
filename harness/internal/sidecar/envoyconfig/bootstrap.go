@@ -70,6 +70,9 @@ func BuildBootstrap(endpoints []Endpoint, adminSocket, runTokenSDSPath, runToken
 		if err != nil {
 			return nil, err
 		}
+		if ep.InjectRunToken && !upstream.tls {
+			return nil, fmt.Errorf("endpoint %q: inject_run_token requires an https upstream URL", ep.Name)
+		}
 		listener, err := buildListener(ep, upstream, runTokenSDSPath)
 		if err != nil {
 			return nil, err

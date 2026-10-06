@@ -67,6 +67,20 @@ func TestBuildBootstrap_InjectRunTokenRequiresSDSPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "SDS path")
 }
 
+func TestBuildBootstrap_InjectRunTokenRequiresHTTPS(t *testing.T) {
+	t.Parallel()
+	_, err := envoyconfig.BuildBootstrap([]envoyconfig.Endpoint{
+		{Name: "x", ListenPort: 9100, UpstreamURL: "http://x", InjectRunToken: true},
+	}, "/tmp/admin.sock", "/run/sds/run_token.yaml", "")
+	require.Error(t, err, "a run token must not be sent without TLS")
+	assert.Contains(t, err.Error(), "https")
+
+	_, err = envoyconfig.BuildBootstrap([]envoyconfig.Endpoint{
+		{Name: "x", ListenPort: 9100, UpstreamURL: "http://x"},
+	}, "/tmp/admin.sock", "/run/sds/run_token.yaml", "")
+	require.NoError(t, err, "a plaintext upstream without a run token stays allowed")
+}
+
 func TestBuildBootstrap_NonInjectEndpointHasNoCredentialInjector(t *testing.T) {
 	t.Parallel()
 	b, err := envoyconfig.BuildBootstrap([]envoyconfig.Endpoint{
