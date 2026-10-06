@@ -131,9 +131,8 @@ type Service struct {
 
 	admission sync.Mutex
 
-	mu        sync.Mutex
-	live      map[string]*binding
-	launching map[string]*launchSlot
+	mu     sync.Mutex
+	owners map[string]*owner
 }
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*Service)(nil)
@@ -150,17 +149,17 @@ func New(st sessionstore.Sessions, ev EventLog, l Launcher, t Templates, runs ag
 	}
 	return &Service{
 		cfg: cfg, store: st, events: ev, launcher: l, templates: t, runs: runs, log: log,
-		tel:       telemetry.New(log, "harnessapi", slog.LevelDebug),
-		rates:     newRateLimiters(),
-		resolved:  newResolvedRequests(),
-		prompts:   newPromptKeys(),
-		live:      map[string]*binding{},
-		launching: map[string]*launchSlot{},
+		tel:      telemetry.New(log, "harnessapi", slog.LevelDebug),
+		rates:    newRateLimiters(),
+		resolved: newResolvedRequests(),
+		prompts:  newPromptKeys(),
+		owners:   map[string]*owner{},
 	}
 }
 
 type binding struct {
 	sessionID string
+	owner     *owner
 	claimName string
 	session   LiveSession
 	sink      *logSink
@@ -239,7 +238,7 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 		ParentSessionID: req.GetParentSessionId(),
 		Status:          api.StatePending,
 	}
-	launchCtx, slot := s.newLaunch(ctx, clientID)
+	launchCtx, o := s.newLaunch(ctx, clientID)
 	if err := s.admit(ctx, clientBinding, clientID, spend{newSession: true}, func() error {
 		if err := s.store.CreateSession(ctx, row); err != nil {
 			if errors.Is(err, sessionstore.ErrConflict) {
@@ -247,10 +246,10 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 			}
 			return api.Errorf(api.ErrUnavailable, "create session: %v", err)
 		}
-		s.reserve(row.ID, slot)
+		s.claim(row.ID, o)
 		return nil
 	}); err != nil {
-		slot.cancel()
+		o.cancel()
 		return nil, err
 	}
 	ctx = telemetry.With(ctx, "session_id", row.ID)
@@ -261,7 +260,7 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 		"session_id", row.ID, "client_id", clientID, "template", tmpl.Name,
 		"live_sessions", live, "launching_sessions", launching)
 
-	go s.launch(launchCtx, slot, row.ID, launchOpts{
+	go s.launch(launchCtx, o, row.ID, launchOpts{
 		approvalPrompt: req.GetApprovalPrompt(),
 		agentPrompt:    req.GetInitialPrompt(),
 	})
@@ -318,20 +317,20 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		if err != nil {
 			return "", err
 		}
-		launchCtx, slot := s.newLaunch(ctx, sess.ClientID)
+		launchCtx, o := s.newLaunch(ctx, sess.ClientID)
 		if err := s.admit(ctx, binding, sess.ClientID, spend{}, func() error {
-			return s.reserveRevive(ctx, sess.ID, slot)
+			return s.claimRevive(ctx, sess.ID, o)
 		}); err != nil {
-			slot.cancel()
+			o.cancel()
 			return "", err
 		}
 		turnID, err := s.nextTurnID(ctx, sess.ID)
 		if err != nil {
-			s.release(sess.ID, slot)
-			slot.cancel()
+			s.release(sess.ID, o)
+			o.cancel()
 			return "", err
 		}
-		go s.launch(launchCtx, slot, sess.ID, launchOpts{
+		go s.launch(launchCtx, o, sess.ID, launchOpts{
 			revive: true,
 
 			approvalPrompt: content + continuationClause,
@@ -346,17 +345,17 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 	}
 }
 
-func (s *Service) reserveRevive(ctx context.Context, sessionID string, slot *launchSlot) error {
-	if !s.reserve(sessionID, slot) {
+func (s *Service) claimRevive(ctx context.Context, sessionID string, o *owner) error {
+	if !s.claim(sessionID, o) {
 		return api.Errorf(api.ErrInvalidState, "session %s is already being continued or stopped", sessionID)
 	}
 	current, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
-		s.release(sessionID, slot)
+		s.release(sessionID, o)
 		return api.Errorf(api.ErrUnavailable, "read session: %v", err)
 	}
 	if current.Status != api.StateSuspended {
-		s.release(sessionID, slot)
+		s.release(sessionID, o)
 		return api.Errorf(api.ErrInvalidState, "session %s is %s; it can no longer be continued", sessionID, current.Status)
 	}
 	return nil
@@ -610,117 +609,6 @@ func viewOf(sess sessionstore.Session) *pb.SessionView {
 		Template:        sess.TemplateName,
 		LastSeq:         sess.EventSeq,
 	}
-}
-
-func (s *Service) lookup(sessionID string) *binding {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.live[sessionID]
-}
-
-func (s *Service) counts() (live, launching int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.live), len(s.launching)
-}
-
-type launchSlot struct {
-	clientID string
-	cancel   context.CancelFunc
-	outcome  *runOutcome
-}
-
-func (s *Service) reserve(sessionID string, slot *launchSlot) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, live := s.live[sessionID]; live {
-		return false
-	}
-	if _, launching := s.launching[sessionID]; launching {
-		return false
-	}
-	s.launching[sessionID] = slot
-	return true
-}
-
-func (s *Service) release(sessionID string, slot *launchSlot) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.launching[sessionID] == slot {
-		delete(s.launching, sessionID)
-	}
-}
-
-func (s *Service) register(b *binding, slot *launchSlot) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if slot.outcome.isStopped() {
-		return false
-	}
-	s.live[b.sessionID] = b
-	delete(s.launching, b.sessionID)
-	return true
-}
-
-func (s *Service) launchesOf(clientID string) map[string]struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := map[string]struct{}{}
-	for id, slot := range s.launching {
-		if slot.cancel != nil && slot.clientID == clientID {
-			out[id] = struct{}{}
-		}
-	}
-	return out
-}
-
-func heldSlot() *launchSlot { return &launchSlot{outcome: &runOutcome{}} }
-
-func (s *Service) detachBinding(b *binding) *launchSlot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.live[b.sessionID] != b {
-		return nil
-	}
-	delete(s.live, b.sessionID)
-	held := heldSlot()
-	s.launching[b.sessionID] = held
-	return held
-}
-
-func (s *Service) detach(sessionID string, spec stopSpec) (*binding, *launchSlot) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	held := heldSlot()
-	if b, ok := s.live[sessionID]; ok {
-		delete(s.live, sessionID)
-		s.launching[sessionID] = held
-		return b, held
-	}
-	if slot, ok := s.launching[sessionID]; ok {
-		switch {
-		case slot.cancel != nil:
-			slot.outcome.stop(spec)
-			slot.cancel()
-		case spec.suspend == pb.Reason_REASON_UNSPECIFIED:
-			slot.outcome.stop(spec)
-		}
-		return nil, nil
-	}
-	s.launching[sessionID] = held
-	return nil, held
-}
-
-func (s *Service) releaseUnlessStopped(sessionID string, slot *launchSlot) (stopSpec, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if spec, stopped := slot.outcome.take(); stopped {
-		return spec, true
-	}
-	if s.launching[sessionID] == slot {
-		delete(s.launching, sessionID)
-	}
-	return stopSpec{}, false
 }
 
 func newID() string {

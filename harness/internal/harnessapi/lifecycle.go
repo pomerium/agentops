@@ -19,33 +19,21 @@ type stopSpec struct {
 }
 
 func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSpec) {
-	b, held := s.detach(sessionID, spec)
-	switch {
-	case b != nil:
-		s.stopLive(ctx, b, spec)
-	case held != nil:
-		s.stopDetached(ctx, sessionID, spec)
-	}
-	if held != nil {
-		s.settle(ctx, sessionID, held)
-	}
+	s.stopOwned(ctx, sessionID, nil, spec)
 }
 
-func (s *Service) stopBinding(ctx context.Context, b *binding, spec stopSpec) {
-	if held := s.detachBinding(b); held != nil {
-		s.stopLive(ctx, b, spec)
-		s.settle(ctx, b.sessionID, held)
+func (s *Service) stopOwned(ctx context.Context, sessionID string, want *owner, spec stopSpec) {
+	ctx = context.WithoutCancel(ctx)
+	b, held := s.detach(sessionID, want, spec)
+	if held == nil {
+		return
 	}
-}
-
-func (s *Service) settle(ctx context.Context, sessionID string, slot *launchSlot) {
-	for {
-		spec, stopped := s.releaseUnlessStopped(sessionID, slot)
-		if !stopped {
-			return
-		}
+	if b != nil {
+		s.stopLive(ctx, b, spec)
+	} else {
 		s.stopDetached(ctx, sessionID, spec)
 	}
+	s.settle(ctx, sessionID, held)
 }
 
 func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
@@ -191,7 +179,11 @@ func (s *Service) sweepIdle(ctx context.Context) {
 
 	s.mu.Lock()
 	var expired, warn []*binding
-	for _, b := range s.live {
+	for _, o := range s.owners {
+		b := o.live
+		if b == nil {
+			continue
+		}
 		switch idle := b.idleFor(now); {
 		case idle >= s.cfg.sessionIdleTTL:
 			expired = append(expired, b)
@@ -238,11 +230,11 @@ func (s *Service) suspendedFor(sess sessionstore.Session) time.Duration {
 }
 
 func (s *Service) releaseSuspended(ctx context.Context, sessionID string) {
-	slot := heldSlot()
-	if !s.reserve(sessionID, slot) {
+	o := &owner{}
+	if !s.claim(sessionID, o) {
 		return
 	}
-	defer s.settle(ctx, sessionID, slot)
+	defer s.settle(ctx, sessionID, o)
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		s.log.WarnContext(ctx, "sweep: could not read a suspended session", "session", sessionID, "err", err)
@@ -290,11 +282,13 @@ func (s *Service) sweepAbsolute(ctx context.Context, sessions []sessionstore.Ses
 
 func (s *Service) Shutdown() {
 	s.mu.Lock()
-	live := make([]*binding, 0, len(s.live))
-	for _, b := range s.live {
-		live = append(live, b)
+	var live []*binding
+	for id, o := range s.owners {
+		if o.live != nil {
+			live = append(live, o.live)
+			delete(s.owners, id)
+		}
 	}
-	s.live = map[string]*binding{}
 	s.mu.Unlock()
 	for _, b := range live {
 		_ = b.session.Close()

@@ -24,7 +24,7 @@ func runningService(t *testing.T, l Launcher) (*Service, sessionstore.Sessions) 
 		t.Fatalf("UpdateSessionSandbox: %v", err)
 	}
 	svc := New(st, NewEventLog(st), l, nil, nil, WithLogger(slog.New(slog.DiscardHandler)))
-	if !svc.register(readyBinding(svc, "s1"), &launchSlot{outcome: &runOutcome{}}) {
+	if !attach(svc, readyBinding(svc, "s1")) {
 		t.Fatal("register the binding")
 	}
 	return svc, st

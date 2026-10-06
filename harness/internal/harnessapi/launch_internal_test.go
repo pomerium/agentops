@@ -44,7 +44,7 @@ func TestACanceledLaunchStillRecordsItsOutcome(t *testing.T) {
 
 			canceled, cancel := context.WithCancel(ctx)
 			cancel()
-			svc.failLaunch(canceled, sess, tc.opts, &runOutcome{}, "", api.EndRevoked, "this session's run was revoked")
+			svc.failLaunch(canceled, sess, tc.opts, &owner{}, "", api.EndRevoked, "this session's run was revoked")
 
 			got, err := st.GetSession(ctx, sess.ID)
 			if err != nil {

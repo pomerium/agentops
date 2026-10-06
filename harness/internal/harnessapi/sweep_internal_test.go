@@ -35,8 +35,8 @@ func TestRetentionSparesASessionThatMovedOn(t *testing.T) {
 			}
 		}},
 		{"reviving", func(t *testing.T, svc *Service, _ sessionstore.Sessions) {
-			_, slot := svc.newLaunch(context.Background(), "client")
-			if !svc.reserve("s1", slot) {
+			_, o := svc.newLaunch(context.Background(), "client")
+			if !svc.claim("s1", o) {
 				t.Fatal("reserve the revive's slot")
 			}
 		}},

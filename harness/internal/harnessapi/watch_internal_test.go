@@ -33,6 +33,11 @@ func (idleSession) Prompt(context.Context, string) (acp.StopReason, error) {
 func (idleSession) Cancel(context.Context) error { return nil }
 func (idleSession) Close() error                 { return nil }
 
+func attach(svc *Service, b *binding) bool {
+	o := &owner{}
+	return svc.claim(b.sessionID, o) && svc.register(o, b)
+}
+
 func readyBinding(svc *Service, sessionID string) *binding {
 	b := &binding{
 		sessionID: sessionID, claimName: "claim", session: idleSession{},
@@ -55,12 +60,12 @@ func TestAnOldRunWatchLeavesARevivedSessionAlone(t *testing.T) {
 	svc.cfg.runWatchInterval = time.Millisecond
 
 	old := readyBinding(svc, "s1")
-	if !svc.register(old, &launchSlot{outcome: &runOutcome{}}) {
+	if !attach(svc, old) {
 		t.Fatal("register the first binding")
 	}
 	svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
 	revived := readyBinding(svc, "s1")
-	if !svc.register(revived, &launchSlot{outcome: &runOutcome{}}) {
+	if !attach(svc, revived) {
 		t.Fatal("register the revived binding")
 	}
 
