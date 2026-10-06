@@ -17,11 +17,11 @@ type binding struct {
 
 	done chan struct{}
 
-	turn sync.Mutex
-
 	mu      sync.Mutex
 	closed  bool
 	settled *sync.Cond
+	issued  uint64
+	serving uint64
 
 	busy atomic.Int32
 
@@ -58,24 +58,39 @@ func (b *binding) idleFor(now time.Time) time.Duration {
 	return now.Sub(time.Unix(0, b.lastActivity.Load()))
 }
 
-func (b *binding) enter() bool {
+func (b *binding) enter() (uint64, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
-		return false
+		return 0, false
 	}
 	b.busy.Add(1)
 	b.touch()
-	return true
+	ticket := b.issued
+	b.issued++
+	return ticket, true
+}
+
+func (b *binding) awaitTurn(ticket uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for b.serving != ticket {
+		b.settled.Wait()
+	}
 }
 
 func (b *binding) leave() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.touch()
-	if b.busy.Add(-1) == 0 {
-		b.settled.Broadcast()
-	}
+	b.serving++
+	b.busy.Add(-1)
+	b.settled.Broadcast()
+}
+
+func (b *binding) forfeit(ticket uint64) {
+	b.awaitTurn(ticket)
+	b.leave()
 }
 
 func (b *binding) close(ifIdleFor time.Duration) bool {

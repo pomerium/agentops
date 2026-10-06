@@ -202,11 +202,23 @@ func (s *Service) activateAndRun(
 	if !prepared.LeaseUntil.IsZero() {
 		b.leaseUntil.Store(prepared.LeaseUntil.UnixNano())
 	}
-	opening := opts.agentPrompt != "" && b.enter()
+	var ticket uint64
+	opening := false
+	openingTurn := opts.turnID
+	if opts.agentPrompt != "" && openingTurn == "" {
+		id, err := s.nextTurnID(ctx, sess.ID)
+		if err != nil {
+			s.log.WarnContext(ctx, "could not allocate the opening turn", "err", err)
+		}
+		openingTurn = id
+	}
+	if openingTurn != "" && opts.agentPrompt != "" {
+		ticket, opening = b.enter()
+	}
 
 	if !s.register(o, b) {
 		if opening {
-			b.leave()
+			b.forfeit(ticket)
 		}
 		_ = liveSess.Close()
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, "")
@@ -220,10 +232,8 @@ func (s *Service) activateAndRun(
 		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
 	}) {
 		if opening {
-			if opts.turnID != "" {
-				s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
-			}
-			b.leave()
+			s.emit(ctx, sess.ID, &pb.Event{TurnId: openingTurn, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
+			b.forfeit(ticket)
 		}
 		spec := stopSpec{end: api.EndLaunchFailed, detail: unrecorded}
 		if opts.revive {
@@ -243,17 +253,7 @@ func (s *Service) activateAndRun(
 	}
 
 	if opening {
-		turnID := opts.turnID
-		if turnID == "" {
-			id, err := s.nextTurnID(ctx, sess.ID)
-			if err != nil {
-				s.log.WarnContext(ctx, "could not allocate the opening turn", "err", err)
-				b.leave()
-				return b
-			}
-			turnID = id
-		}
-		go s.runTurn(context.WithoutCancel(ctx), b, turnID, opts.agentPrompt)
+		go s.runTurn(context.WithoutCancel(ctx), b, ticket, openingTurn, opts.agentPrompt)
 	}
 	return b
 }
@@ -444,7 +444,7 @@ func (s *Service) reportAttachDelayed(ctx context.Context, sessionID, runID stri
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_LaunchStalled{LaunchStalled: &pb.LaunchStalled{Waited: durationpb.New(waited)}}})
 }
 
-func (s *Service) runTurn(ctx context.Context, b *binding, turnID, text string) {
+func (s *Service) runTurn(ctx context.Context, b *binding, ticket uint64, turnID, text string) {
 	defer b.leave()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -462,8 +462,7 @@ func (s *Service) runTurn(ctx context.Context, b *binding, turnID, text string) 
 	ctx, op := s.tel.Start(ctx, "runTurn", "chars", len(text))
 	defer op.Complete()
 
-	b.turn.Lock()
-	defer b.turn.Unlock()
+	b.awaitTurn(ticket)
 	if ctx.Err() != nil {
 		s.emit(ctx, b.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: "the session stopped before this turn ran"}}})
 		return

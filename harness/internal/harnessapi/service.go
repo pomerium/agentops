@@ -266,15 +266,18 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 	switch sess.Status {
 	case api.StateRunning:
 		b := s.lookup(sess.ID)
-		if b == nil || !b.enter() {
+		if b == nil {
 			return "", api.Errorf(api.ErrInvalidState, "session %s is not attached to this process", sess.ID)
 		}
 		turnID, err := s.nextTurnID(ctx, sess.ID)
 		if err != nil {
-			b.leave()
 			return "", err
 		}
-		go s.runTurn(context.WithoutCancel(ctx), b, turnID, content)
+		ticket, ok := b.enter()
+		if !ok {
+			return "", api.Errorf(api.ErrInvalidState, "session %s is not attached to this process", sess.ID)
+		}
+		go s.runTurn(context.WithoutCancel(ctx), b, ticket, turnID, content)
 		return turnID, nil
 
 	case api.StateSuspended:

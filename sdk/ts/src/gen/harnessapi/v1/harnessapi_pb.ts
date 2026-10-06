@@ -1885,7 +1885,8 @@ export const HarnessAPIService: GenService<{
    * events with this turn_id.
    *
    * In SESSION_STATE_RUNNING, the turn starts when the session has no other
-   * turn in progress. A session runs one turn at a time.
+   * turn in progress. A session runs one turn at a time, in the order that
+   * the server accepted them. The turn of initial_prompt runs first.
    * In SESSION_STATE_SUSPENDED, the server revives the session first. A
    * revive needs a new approval, so an ApprovalRequired event comes before
    * the turn starts. If the revive fails, the turn gets TurnFailed and the

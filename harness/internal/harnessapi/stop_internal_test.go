@@ -140,7 +140,7 @@ func TestAStoppedBindingRunsNoMoreTurns(t *testing.T) {
 	b := svc.lookup("s1")
 	svc.stopSession(context.Background(), "s1", stopSpec{end: api.EndEnded})
 
-	if b.enter() {
+	if _, ok := b.enter(); ok {
 		b.leave()
 		t.Error("a stopped binding accepted another turn")
 	}

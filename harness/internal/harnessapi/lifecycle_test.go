@@ -533,3 +533,60 @@ func TestALaunchThatCannotRecordRunningStops(t *testing.T) {
 		t.Errorf("the failed launch kept its workspace: teardowns %v", teardowns)
 	}
 }
+
+type heldRunningWrite struct {
+	sessionstore.Sessions
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s heldRunningWrite) UpdateSessionACP(ctx context.Context, id, acpID string, state api.SessionState) error {
+	if err := s.Sessions.UpdateSessionACP(ctx, id, acpID, state); err != nil {
+		return err
+	}
+	close(s.entered)
+	<-s.release
+	return nil
+}
+
+func TestTheOpeningPromptRunsBeforeALaterOne(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	held := heldRunningWrite{Sessions: h.store, entered: make(chan struct{}), release: make(chan struct{})}
+	h.svc = harnessapi.New(held, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+	seen := make(chan string, 2)
+	h.launcher.session.setScript(func(_ context.Context, _ sandbox.EventSink, text string) (acp.StopReason, error) {
+		seen <- text
+		return acp.StopReasonEndTurn, nil
+	})
+
+	created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+		Template: "deploy", ConversationRef: "stub:conv-1",
+		ApprovalPrompt: "ship the thing", InitialPrompt: "first",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	<-held.entered
+	_, err = h.svc.Prompt(ctx, &pb.PromptRequest{Ref: byID(created.GetSession().GetId()), Content: "second"})
+	if err != nil {
+		close(held.release)
+		t.Fatalf("Prompt: %v", err)
+	}
+	var first string
+	select {
+	case first = <-seen:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(held.release)
+	if first == "" {
+		first = <-seen
+	}
+	if first != "first" {
+		t.Errorf("the agent got %q before the opening prompt", first)
+	}
+	if second := <-seen; second != "second" {
+		t.Errorf("the agent's second prompt was %q, want %q", second, "second")
+	}
+}
