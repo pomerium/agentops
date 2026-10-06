@@ -112,12 +112,12 @@ func (s *Service) endSession(ctx context.Context, sessionID string, from api.Ses
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason, Detail: detail}}})
 }
 
-func (s *Service) closeBySupervision(ctx context.Context, sessionID, cause string) {
-	if s.lookup(sessionID) == nil {
-		return
+func (s *Service) superviseLaunch(ctx context.Context, sessionID string, o *owner) func(string) {
+	ctx = context.WithoutCancel(ctx)
+	return func(cause string) {
+		s.log.WarnContext(ctx, "session closed by supervision", "session", sessionID, "cause", cause)
+		s.stopOwned(ctx, sessionID, o, stopSpec{end: supervisionReason(cause), detail: cause})
 	}
-	s.log.WarnContext(ctx, "session closed by supervision", "session", sessionID, "cause", cause)
-	s.stopSession(ctx, sessionID, stopSpec{end: supervisionReason(cause), detail: cause})
 }
 
 func supervisionReason(cause string) api.EndReason {

@@ -102,9 +102,7 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 	})
 
 	att, err := s.launcher.Expect(res.RunID, prepared,
-		sandbox.WithOnDown(func(cause string) {
-			s.closeBySupervision(context.WithoutCancel(ctx), sess.ID, cause)
-		}),
+		sandbox.WithOnDown(s.superviseLaunch(ctx, sess.ID, o)),
 		sandbox.WithOnDelayed(func(waited time.Duration) {
 			s.reportAttachDelayed(context.WithoutCancel(ctx), sess.ID, res.RunID, outcome, waited)
 		}),

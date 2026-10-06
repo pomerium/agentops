@@ -83,3 +83,37 @@ func TestAnOldRunWatchLeavesARevivedSessionAlone(t *testing.T) {
 		t.Errorf("the old run's watch stopped the revived session")
 	}
 }
+
+func TestAnExitBeforeRegisterStopsTheLaunch(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	svc := New(st, NewEventLog(st), quietLauncher{}, nil, nil, WithLogger(slog.New(slog.DiscardHandler)))
+	_, o := svc.newLaunch(ctx, "client")
+	defer o.cancel()
+	if !svc.claim("s1", o) {
+		t.Fatal("claim the launch")
+	}
+
+	svc.superviseLaunch(ctx, "s1", o)("agent_exited")
+
+	if svc.register(o, readyBinding(svc, "s1")) {
+		t.Error("registered an agent that had already exited")
+	}
+}
+
+func TestAStaleSupervisorLeavesARevivedSessionAlone(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := runningService(t, quietLauncher{})
+	old := svc.lookup("s1").owner
+	svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+	revived := readyBinding(svc, "s1")
+	if !attach(svc, revived) {
+		t.Fatal("attach the revived binding")
+	}
+
+	svc.superviseLaunch(ctx, "s1", old)("tunnel_lost")
+
+	if got := svc.lookup("s1"); got != revived {
+		t.Error("an old supervisor stopped the revived session")
+	}
+}
