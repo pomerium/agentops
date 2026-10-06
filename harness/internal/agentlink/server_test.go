@@ -291,10 +291,10 @@ func TestSecondAttachEvictsSilentFirst(t *testing.T) {
 }
 
 func TestHeartbeatExpiryFiresOnLostOnce(t *testing.T) {
-	const interval = 60 * time.Millisecond
-	g := newTestLink(t, interval, 2)
+	const interval = time.Second
+	g := newTestLink(t, interval, 1)
 	srv, err := agentlink.New(g.idp.Verifier(t),
-		agentlink.WithHeartbeatInterval(interval), agentlink.WithHeartbeatMissLimit(2),
+		agentlink.WithHeartbeatInterval(interval), agentlink.WithHeartbeatMissLimit(1),
 		agentlink.WithLogger(testLogger(t)),
 	)
 	if err != nil {
@@ -327,22 +327,22 @@ func TestHeartbeatExpiryFiresOnLostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if ack.GetHeartbeatSeconds() != 0 || ack.GetHeartbeatMissLimit() != 2 {
-		t.Logf("hello ack: %v", ack)
+	if ack.GetHeartbeatSeconds() != 1 || ack.GetHeartbeatMissLimit() != 1 {
+		t.Errorf("hello ack: %v", ack)
 	}
 	for {
 		if _, err := stream.Recv(); err != nil {
 			break
 		}
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for lost.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if n := lost.Load(); n != 1 {
 		t.Fatalf("OnLost fired %d times, want exactly 1", n)
 	}
-	time.Sleep(4 * interval)
+	time.Sleep(2 * interval)
 	if n := lost.Load(); n != 1 {
 		t.Fatalf("OnLost fired %d times after waiting, want exactly 1", n)
 	}
@@ -834,5 +834,24 @@ func TestAgentIOTakeoverWaitsForThePendingInboundWrite(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatalf("agent stdout stalled after takeover (resumed at %d)", fresh.peer.resumeAt)
+	}
+}
+
+func TestSubSecondHeartbeatIsAdvertisedAsWholeSeconds(t *testing.T) {
+	g := newTestLink(t, 500*time.Millisecond, 3)
+	handle, err := g.srv.Expect("run-short-hb", testSeal, nil)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, ack, err := g.attach(g.ctx(ctx, "run-short-hb", nil), 1, false)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if got := ack.GetHeartbeatSeconds(); got != 1 {
+		t.Fatalf("HelloAck heartbeat = %ds for a 500ms server interval, want 1s", got)
 	}
 }

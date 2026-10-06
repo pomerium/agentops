@@ -75,6 +75,7 @@ func New(verifier *Verifier, opts ...Option) (*Server, error) {
 	if o.heartbeatInterval <= 0 {
 		o.heartbeatInterval = DefaultHeartbeatInterval
 	}
+	o.heartbeatInterval = max(time.Second, o.heartbeatInterval.Round(time.Second))
 	if o.heartbeatMissLimit == 0 {
 		o.heartbeatMissLimit = DefaultHeartbeatMissLimit
 	}
