@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
+	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
 func bind(h *harness, clientID string, templates []string, q *v1alpha1.ClientQuotas) {
@@ -287,5 +289,83 @@ func TestUnofferedPermissionChoiceIsRefused(t *testing.T) {
 	ev, _ := rec.waitFor("agent_message", 0)
 	if got := ev.GetAgentMessage().GetText(); got != "decided: allow" {
 		t.Errorf("the agent got %q, want the offered option", got)
+	}
+}
+
+type listBarrier struct {
+	sessionstore.Sessions
+	mu     sync.Mutex
+	calls  int
+	second chan struct{}
+}
+
+func (b *listBarrier) ListSessionsByClient(ctx context.Context, clientID string, liveOnly bool, since time.Time) ([]sessionstore.Session, error) {
+	rows, err := b.Sessions.ListSessionsByClient(ctx, clientID, liveOnly, since)
+	b.mu.Lock()
+	b.calls++
+	call := b.calls
+	b.mu.Unlock()
+	switch call {
+	case 1:
+		select {
+		case <-b.second:
+		case <-time.After(200 * time.Millisecond):
+		}
+	case 2:
+		close(b.second)
+	}
+	return rows, err
+}
+
+func TestConcurrentCreatesRespectTheLiveCap(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	h.launcher.gate = make(chan struct{})
+	defer h.launcher.openGate()
+	bind(h, stubClient, []string{"deploy"}, &v1alpha1.ClientQuotas{MaxLiveSessions: 1})
+	barrier := &listBarrier{Sessions: h.store, second: make(chan struct{})}
+	svc := harnessapi.New(barrier, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+
+	results := make(chan error, 2)
+	for _, conv := range []string{"stub:conv-1", "stub:conv-2"} {
+		go func() {
+			_, err := svc.CreateSession(ctx, &pb.CreateSessionRequest{
+				Template: "deploy", ConversationRef: conv, ApprovalPrompt: "ship the thing",
+			})
+			results <- err
+		}()
+	}
+	accepted := 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			accepted++
+		case !errors.Is(err, api.ErrQuotaExceeded):
+			t.Errorf("the refused create: got %v, want ErrQuotaExceeded", err)
+		}
+	}
+	if accepted != 1 {
+		t.Fatalf("accepted %d sessions with a cap of 1", accepted)
+	}
+}
+
+func TestLaunchesBeforeApprovalCountAsPending(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	h.launcher.prepareGate = make(chan struct{})
+	defer close(h.launcher.prepareGate)
+	bind(h, stubClient, []string{"deploy"}, &v1alpha1.ClientQuotas{MaxPendingApprovals: 1})
+
+	if _, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+		Template: "deploy", ConversationRef: "stub:conv-1", ApprovalPrompt: "ship the thing",
+	}); err != nil {
+		t.Fatalf("the first session: %v", err)
+	}
+	_, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+		Template: "deploy", ConversationRef: "stub:conv-2", ApprovalPrompt: "ship the thing",
+	})
+	if !errors.Is(err, api.ErrQuotaExceeded) {
+		t.Fatalf("a second launch while the first awaits its approval page: got %v, want ErrQuotaExceeded", err)
 	}
 }

@@ -29,6 +29,15 @@ type spend struct {
 	newSession bool
 }
 
+func (s *Service) admit(ctx context.Context, binding *v1alpha1.ClientBinding, clientID string, sp spend, accept func() error) error {
+	s.admission.Lock()
+	defer s.admission.Unlock()
+	if err := s.checkQuotas(ctx, binding, clientID, sp); err != nil {
+		return err
+	}
+	return accept()
+}
+
 func (s *Service) checkQuotas(ctx context.Context, binding *v1alpha1.ClientBinding, clientID string, sp spend) error {
 	if binding.Spec.Quotas == nil {
 		return nil
@@ -51,16 +60,17 @@ func (s *Service) checkQuotas(ctx context.Context, binding *v1alpha1.ClientBindi
 			"client %q already holds %d live sessions; its cap is %d", clientID, len(live), q.MaxLiveSessions)
 	}
 	if q.MaxPendingApprovals > 0 {
-		var pending int32
+		pending := s.launchesOf(clientID)
 		for _, sess := range live {
-			if sess.Status == api.StateAwaitingApproval {
-				pending++
+			switch sess.Status {
+			case api.StatePending, api.StateLaunching, api.StateAwaitingApproval:
+				pending[sess.ID] = struct{}{}
 			}
 		}
-		if pending >= q.MaxPendingApprovals {
+		if int32(len(pending)) >= q.MaxPendingApprovals {
 			return api.Errorf(api.ErrQuotaExceeded,
 				"client %q already has %d approvals outstanding; its cap is %d",
-				clientID, pending, q.MaxPendingApprovals)
+				clientID, len(pending), q.MaxPendingApprovals)
 		}
 	}
 	return nil

@@ -27,9 +27,9 @@ type launchOpts struct {
 	turnID string
 }
 
-func (s *Service) newLaunch(ctx context.Context) (context.Context, *launchSlot) {
+func (s *Service) newLaunch(ctx context.Context, clientID string) (context.Context, *launchSlot) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	return ctx, &launchSlot{cancel: cancel, outcome: &runOutcome{}}
+	return ctx, &launchSlot{clientID: clientID, cancel: cancel, outcome: &runOutcome{}}
 }
 
 func (s *Service) launch(ctx context.Context, slot *launchSlot, sessionID string, opts launchOpts) {

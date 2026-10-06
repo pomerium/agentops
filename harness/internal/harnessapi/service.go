@@ -129,6 +129,8 @@ type Service struct {
 
 	prompts *promptKeys
 
+	admission sync.Mutex
+
 	mu        sync.Mutex
 	live      map[string]*binding
 	launching map[string]*launchSlot
@@ -212,10 +214,6 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 		return nil, err
 	}
 
-	if err := s.checkQuotas(ctx, clientBinding, clientID, spend{newSession: true}); err != nil {
-		return nil, err
-	}
-
 	tmpl, err := s.allowedTemplate(ctx, clientBinding, clientID, req.GetTemplate())
 	if err != nil {
 		return nil, err
@@ -241,11 +239,19 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 		ParentSessionID: req.GetParentSessionId(),
 		Status:          api.StatePending,
 	}
-	if err := s.store.CreateSession(ctx, row); err != nil {
-		if errors.Is(err, sessionstore.ErrConflict) {
-			return nil, api.Errorf(api.ErrConflict, "conversation %q already has a live session", req.GetConversationRef())
+	launchCtx, slot := s.newLaunch(ctx, clientID)
+	if err := s.admit(ctx, clientBinding, clientID, spend{newSession: true}, func() error {
+		if err := s.store.CreateSession(ctx, row); err != nil {
+			if errors.Is(err, sessionstore.ErrConflict) {
+				return api.Errorf(api.ErrConflict, "conversation %q already has a live session", req.GetConversationRef())
+			}
+			return api.Errorf(api.ErrUnavailable, "create session: %v", err)
 		}
-		return nil, api.Errorf(api.ErrUnavailable, "create session: %v", err)
+		s.reserve(row.ID, slot)
+		return nil
+	}); err != nil {
+		slot.cancel()
+		return nil, err
 	}
 	ctx = telemetry.With(ctx, "session_id", row.ID)
 	s.emit(ctx, row.ID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{New: api.StatePending}}})
@@ -255,8 +261,6 @@ func (s *Service) CreateSession(ctx context.Context, req *pb.CreateSessionReques
 		"session_id", row.ID, "client_id", clientID, "template", tmpl.Name,
 		"live_sessions", live, "launching_sessions", launching)
 
-	launchCtx, slot := s.newLaunch(ctx)
-	s.reserve(row.ID, slot)
 	go s.launch(launchCtx, slot, row.ID, launchOpts{
 		approvalPrompt: req.GetApprovalPrompt(),
 		agentPrompt:    req.GetInitialPrompt(),
@@ -314,11 +318,10 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		if err != nil {
 			return "", err
 		}
-		if err := s.checkQuotas(ctx, binding, sess.ClientID, spend{}); err != nil {
-			return "", err
-		}
-		launchCtx, slot := s.newLaunch(ctx)
-		if err := s.reserveRevive(ctx, sess.ID, slot); err != nil {
+		launchCtx, slot := s.newLaunch(ctx, sess.ClientID)
+		if err := s.admit(ctx, binding, sess.ClientID, spend{}, func() error {
+			return s.reserveRevive(ctx, sess.ID, slot)
+		}); err != nil {
 			slot.cancel()
 			return "", err
 		}
@@ -619,8 +622,9 @@ func (s *Service) counts() (live, launching int) {
 }
 
 type launchSlot struct {
-	cancel  context.CancelFunc
-	outcome *runOutcome
+	clientID string
+	cancel   context.CancelFunc
+	outcome  *runOutcome
 }
 
 func (s *Service) reserve(sessionID string, slot *launchSlot) bool {
@@ -653,6 +657,18 @@ func (s *Service) register(b *binding, slot *launchSlot) bool {
 	s.live[b.sessionID] = b
 	delete(s.launching, b.sessionID)
 	return true
+}
+
+func (s *Service) launchesOf(clientID string) map[string]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]struct{}{}
+	for id, slot := range s.launching {
+		if slot.cancel != nil && slot.clientID == clientID {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 func (s *Service) detachBinding(b *binding) bool {
