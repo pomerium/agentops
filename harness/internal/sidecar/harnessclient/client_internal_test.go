@@ -229,3 +229,45 @@ func TestAgentIOResumesOnlyAfterThePreviousPumpReturns(t *testing.T) {
 		t.Fatalf("Open declared %d consumed bytes, but %d were delivered", declared, got)
 	}
 }
+
+type delayedStart struct {
+	entered chan struct{}
+	release chan struct{}
+	agent   *AgentSession
+}
+
+func (r *delayedStart) Spawn(context.Context) (*AgentSession, error) {
+	close(r.entered)
+	<-r.release
+	return r.agent, nil
+}
+
+func TestAnAgentThatStartsAfterShutdownIsStopped(t *testing.T) {
+	stopped := make(chan struct{}, 1)
+	ag := &AgentSession{IO: agentio.New(), Stop: func() { stopped <- struct{}{} }}
+	defer ag.IO.Close(nil)
+	r := &delayedStart{entered: make(chan struct{}), release: make(chan struct{}), agent: ag}
+	c := &Client{cfg: Config{Runner: r}, log: slog.New(slog.DiscardHandler)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = c.spawnAgent(ctx)
+	}()
+	<-r.entered
+	c.stopAgent()
+	cancel()
+	close(r.release)
+	<-done
+
+	select {
+	case <-stopped:
+	default:
+		t.Error("the agent that started after shutdown was never stopped")
+	}
+	if c.currentAgent() != nil {
+		t.Error("shutdown left the late agent stored")
+	}
+}

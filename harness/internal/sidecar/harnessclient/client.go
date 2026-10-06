@@ -107,6 +107,7 @@ type Client struct {
 	agent    *AgentSession
 	exit     *int32
 	exitSent bool
+	stopped  bool
 }
 
 func New(cfg Config) (*Client, error) {
@@ -449,6 +450,11 @@ func (c *Client) spawnAgent(ctx context.Context) (*AgentSession, error) {
 		return nil, err
 	}
 	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		ag.stop()
+		return nil, errors.New("the agent started after the client stopped")
+	}
 	c.agent, c.exit, c.exitSent = ag, nil, false
 	c.mu.Unlock()
 	c.log.Info("harness: agent spawned", "pid", ag.PID)
@@ -490,11 +496,14 @@ func (c *Client) recordExit(code int32, sent bool) {
 func (c *Client) stopAgent() {
 	c.mu.Lock()
 	ag := c.agent
-	c.agent = nil
+	c.agent, c.stopped = nil, true
 	c.mu.Unlock()
-	if ag == nil {
-		return
+	if ag != nil {
+		ag.stop()
 	}
+}
+
+func (ag *AgentSession) stop() {
 	ag.IO.Close(errors.New("session ended"))
 	if ag.Stop != nil {
 		ag.Stop()
