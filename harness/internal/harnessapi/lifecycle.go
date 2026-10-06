@@ -2,6 +2,7 @@ package harnessapi
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -109,18 +110,22 @@ func (s *Service) endSession(ctx context.Context, sessionID string, from api.Ses
 	if reason == api.EndInterrupted {
 		to = api.StateInterrupted
 	}
-	if !s.write(ctx, sessionID, func(ctx context.Context) error {
-		return s.store.UpdateSessionStatus(ctx, sessionID, to)
-	}) {
+	ctx = context.WithoutCancel(ctx)
+	events := append(preface,
+		&pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: from, New: to}}},
+		&pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason, Detail: detail}}},
+	)
+	defer s.lockEvents(sessionID)()
+	err := s.events.Finish(ctx, sessionID, to, events)
+	switch {
+	case errors.Is(err, sessionstore.ErrConflict):
+		s.tel.Debug(ctx, "the session had already ended", "session", sessionID)
+		return true
+	case err != nil:
 		s.log.ErrorContext(ctx, "the session's end was not recorded; it stays live until an end is retried",
-			"session", sessionID, "reason", reason)
+			"session", sessionID, "reason", reason, "err", err)
 		return false
 	}
-	for _, ev := range preface {
-		s.emit(ctx, sessionID, ev)
-	}
-	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: from, New: to}}})
-	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason, Detail: detail}}})
 	return true
 }
 

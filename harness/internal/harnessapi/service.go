@@ -556,15 +556,11 @@ func storedTemplate(sess sessionstore.Session) (*v1alpha1.AgentTemplate, string,
 func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
 	ev.SessionId = sessionID
 	ctx = context.WithoutCancel(ctx)
-	lock := &s.emitLocks[emitStripe(sessionID)]
-	lock.Lock()
-	defer lock.Unlock()
-	if !endsSession(ev) {
-		current, err := s.store.GetSession(ctx, sessionID)
-		if err == nil && api.Terminal(current.Status) {
-			s.tel.Debug(ctx, "the session has ended; dropping a later event", "session", sessionID, "event", api.Kind(ev))
-			return
-		}
+	defer s.lockEvents(sessionID)()
+	current, err := s.store.GetSession(ctx, sessionID)
+	if err == nil && api.Terminal(current.Status) {
+		s.tel.Debug(ctx, "the session has ended; dropping a later event", "session", sessionID, "event", api.Kind(ev))
+		return
 	}
 	if err := s.events.Append(ctx, ev); err != nil {
 		s.log.ErrorContext(ctx, "could not record a session event; clients will see a gap",
@@ -572,12 +568,10 @@ func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
 	}
 }
 
-func endsSession(ev *pb.Event) bool {
-	if ev.GetSessionEnded() != nil || ev.GetReleased() != nil {
-		return true
-	}
-	sc := ev.GetStateChanged()
-	return sc != nil && api.Terminal(sc.GetNew())
+func (s *Service) lockEvents(sessionID string) func() {
+	lock := &s.emitLocks[emitStripe(sessionID)]
+	lock.Lock()
+	return lock.Unlock
 }
 
 const emitStripes = 64

@@ -115,7 +115,7 @@ func TestRetentionPublishesNoReleaseTheStoreDidNotSave(t *testing.T) {
 	svc, st := runningService(t, quietLauncher{})
 	svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
 	svc.cfg.suspendedTTL = time.Nanosecond
-	svc.store = failingStatusStore{Sessions: st}
+	svc.events = NewEventLog(&flakyEndEvents{Events: st.(sessionstore.Events), refuse: true})
 
 	svc.releaseSuspended(ctx, "s1")
 

@@ -17,6 +17,8 @@ import (
 type EventLog interface {
 	Append(ctx context.Context, ev *pb.Event) error
 
+	Finish(ctx context.Context, sessionID string, status api.SessionState, events []*pb.Event) error
+
 	History(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]*pb.Event, error)
 
 	Subscribe(ctx context.Context, sessionID string, afterSeq int64) (Subscription, error)

@@ -176,16 +176,10 @@ func TestNoEventFollowsSessionEnded(t *testing.T) {
 	}
 }
 
-type failingStatusStore struct{ sessionstore.Sessions }
-
-func (failingStatusStore) UpdateSessionStatus(context.Context, string, api.SessionState) error {
-	return errors.New("the database is unavailable")
-}
-
 func TestAnEndTheStoreRefusedIsNotPublished(t *testing.T) {
 	ctx := context.Background()
 	svc, st := runningService(t, quietLauncher{})
-	svc.store = failingStatusStore{Sessions: st}
+	svc.events = NewEventLog(&flakyEndEvents{Events: st.(sessionstore.Events), refuse: true})
 
 	svc.endSession(ctx, "s1", api.StateRunning, api.EndEnded, "")
 
@@ -273,5 +267,63 @@ func TestReconcileLeavesASessionWhoseWorkspaceRemains(t *testing.T) {
 	}
 	if api.Terminal(row.Status) {
 		t.Errorf("reconcile marked the session %v although its workspace remains", row.Status)
+	}
+}
+
+type flakyEndEvents struct {
+	sessionstore.Events
+	mu     sync.Mutex
+	refuse bool
+}
+
+func (f *flakyEndEvents) refusing() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refuse
+}
+
+func (f *flakyEndEvents) AppendSessionEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte) (int64, error) {
+	if eventType == "session_ended" && f.refusing() {
+		return 0, errors.New("the event could not be saved")
+	}
+	return f.Events.AppendSessionEvent(ctx, sessionID, eventType, turnID, at, payload)
+}
+
+func (f *flakyEndEvents) FinishSession(ctx context.Context, sessionID string, status api.SessionState, events []sessionstore.NewSessionEvent) ([]int64, error) {
+	if f.refusing() {
+		return nil, errors.New("the event could not be saved")
+	}
+	return f.Events.FinishSession(ctx, sessionID, status, events)
+}
+
+func TestAnEndWhoseEventsWereNotSavedCanBeRetried(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	flaky := &flakyEndEvents{Events: st.(sessionstore.Events), refuse: true}
+	svc.events = NewEventLog(flaky)
+
+	if svc.stopSession(ctx, "s1", stopSpec{end: api.EndEnded}) {
+		t.Error("a stop reported success although its SessionEnded was not saved")
+	}
+	if row, err := st.GetSession(ctx, "s1"); err != nil || api.Terminal(row.Status) {
+		t.Fatalf("an end without its events left the session %v (%v)", row.Status, err)
+	}
+
+	flaky.mu.Lock()
+	flaky.refuse = false
+	flaky.mu.Unlock()
+	if !svc.stopSession(ctx, "s1", stopSpec{end: api.EndEnded}) {
+		t.Fatal("the retried stop failed")
+	}
+	events, err := svc.events.History(ctx, "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	var kinds []string
+	for _, ev := range events {
+		kinds = append(kinds, api.Kind(ev))
+	}
+	if n := len(kinds); n < 2 || kinds[n-2] != "state_changed" || kinds[n-1] != "session_ended" {
+		t.Errorf("the retried end recorded %v, want it to close with state_changed and session_ended", kinds)
 	}
 }
