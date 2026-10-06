@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,15 +87,17 @@ func TestServeWorkload_InjectsTokenAndStopsOnSignal(t *testing.T) {
 	done := runWorkload(ctx, s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"})
 
 	bootstrap := filepath.Join(s.configDir, "bootstrap.json")
-	require.Eventually(t, func() bool { _, err := os.Stat(bootstrap); return err == nil }, 5*time.Second, 20*time.Millisecond)
+	var boot []byte
+	require.Eventually(t, func() bool {
+		b, err := os.ReadFile(bootstrap)
+		boot = b
+		return err == nil && strings.Contains(string(b), "credential_injector")
+	}, 5*time.Second, 20*time.Millisecond, "the bootstrap never carried the credential injector")
 	want, err := envoyconfig.RenderRunTokenSecret("Bearer " + jwt)
 	require.NoError(t, err)
 	got, err := os.ReadFile(s.sdsPath)
 	require.NoError(t, err)
 	assert.Equal(t, string(want), string(got))
-	boot, err := os.ReadFile(bootstrap)
-	require.NoError(t, err)
-	assert.Contains(t, string(boot), "credential_injector")
 	assert.Contains(t, string(boot), `"portValue":9999`)
 
 	cancel()
