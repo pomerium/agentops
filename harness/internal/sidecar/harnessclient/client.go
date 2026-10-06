@@ -337,6 +337,7 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 	if ag := c.currentAgent(); ag != nil {
 		go c.pumpAgentIO(ctx, ag, ioLost)
 	}
+	var spawned chan spawnResult
 
 	for {
 		select {
@@ -347,17 +348,32 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 			lastRecv = time.Now()
 			switch {
 			case r.frame.GetSpawn() != nil:
-				if err := c.spawnAgent(ctx, ioLost); err != nil {
-					c.log.Error("harness: spawn failed", "err", err)
-					_ = stream.Send(statusFrame(ReasonRunnerFailure))
-					return &TerminalError{Reason: ReasonRunnerFailure, Err: err}
+				if spawned == nil {
+					spawned = make(chan spawnResult, 1)
+					go func(done chan<- spawnResult) {
+						ag, err := c.spawnAgent(ctx)
+						done <- spawnResult{ag, err}
+					}(spawned)
 				}
-				agentExited = c.agentExitChan()
 			case r.frame.GetShutdown() != nil:
 				c.log.Info("harness: shutdown directive received", "reason", r.frame.GetShutdown().GetReason())
 				c.stopAgent()
 				return nil
 			case r.frame.GetHeartbeat() != nil:
+			}
+		case res := <-spawned:
+			spawned = nil
+			if res.err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				c.log.Error("harness: spawn failed", "err", res.err)
+				_ = stream.Send(statusFrame(ReasonRunnerFailure))
+				return &TerminalError{Reason: ReasonRunnerFailure, Err: res.err}
+			}
+			if res.agent != nil {
+				agentExited = c.agentExitChan()
+				go c.pumpAgentIO(ctx, res.agent, ioLost)
 			}
 		case code := <-agentExited:
 			agentExited = nil
@@ -417,20 +433,24 @@ func (c *Client) configure(cfg *agentlinkpb.SandboxConfig) error {
 	return err
 }
 
-func (c *Client) spawnAgent(ctx context.Context, ioLost chan<- error) error {
+type spawnResult struct {
+	agent *AgentSession
+	err   error
+}
+
+func (c *Client) spawnAgent(ctx context.Context) (*AgentSession, error) {
 	if c.currentAgent() != nil {
-		return nil
+		return nil, nil
 	}
-	ag, err := c.cfg.Runner.Spawn(context.WithoutCancel(ctx))
+	ag, err := c.cfg.Runner.Spawn(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.mu.Lock()
 	c.agent, c.exit, c.exitSent = ag, nil, false
 	c.mu.Unlock()
 	c.log.Info("harness: agent spawned", "pid", ag.PID)
-	go c.pumpAgentIO(ctx, ag, ioLost)
-	return nil
+	return ag, nil
 }
 
 func (c *Client) currentAgent() *AgentSession {

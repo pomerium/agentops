@@ -24,6 +24,7 @@ import (
 	"github.com/pomerium/agentops/harness/internal/agentlink/agentlinktest"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/runner"
+	runnerpb "github.com/pomerium/agentops/harness/internal/runner/pb"
 	"github.com/pomerium/agentops/harness/internal/sidecar/harnessclient"
 )
 
@@ -147,10 +148,10 @@ type serveFunc func(t *testing.T, srv *agentlink.Server, assertion func() string
 
 func newRig(t *testing.T, opts ...agentlink.ExpectOption) *rig {
 	t.Helper()
-	return newRigServed(t, agentlinktest.Serve, opts...)
+	return newRigWith(t, agentlinktest.Serve, nil, opts...)
 }
 
-func newRigServed(t *testing.T, serve serveFunc, opts ...agentlink.ExpectOption) *rig {
+func newRigWith(t *testing.T, serve serveFunc, agentRunner harnessclient.Runner, opts ...agentlink.ExpectOption) *rig {
 	t.Helper()
 	idp := agentlinktest.NewIDP(t)
 	srv, err := agentlink.New(idp.Verifier(t),
@@ -168,12 +169,14 @@ func newRigServed(t *testing.T, serve serveFunc, opts ...agentlink.ExpectOption)
 		t.Fatalf("Expect: %v", err)
 	}
 
-	socket := startRunner(t, stubAgent(t))
-	agentRunner, err := harnessclient.NewUDSRunner(socket, testLogger(t))
-	if err != nil {
-		t.Fatalf("NewUDSRunner: %v", err)
+	if agentRunner == nil {
+		uds, err := harnessclient.NewUDSRunner(startRunner(t, stubAgent(t)), testLogger(t))
+		if err != nil {
+			t.Fatalf("NewUDSRunner: %v", err)
+		}
+		t.Cleanup(uds.Close)
+		agentRunner = uds
 	}
-	t.Cleanup(agentRunner.Close)
 
 	token := &staticToken{bearer: "Bearer pom_art_test"}
 	configured := make(chan *agentlinkpb.SandboxConfig, 1)
@@ -409,7 +412,7 @@ func (r *ioResetter) intercept(srv any, ss grpc.ServerStream, info *grpc.StreamS
 
 func TestAgentIOResetAloneKeepsTheConversationFlowing(t *testing.T) {
 	resetter := &ioResetter{}
-	r := newRigServed(t, resetter.serve)
+	r := newRigWith(t, resetter.serve, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -509,6 +512,120 @@ func TestShutdownEndsCleanly(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("the client did not exit after Shutdown")
+	}
+}
+
+type stalledRunner struct {
+	entered  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+}
+
+func (r *stalledRunner) Spawn(ctx context.Context) (*harnessclient.AgentSession, error) {
+	close(r.entered)
+	select {
+	case <-ctx.Done():
+		close(r.canceled)
+		return nil, ctx.Err()
+	case <-r.release:
+		return nil, errors.New("test released the stalled runner")
+	}
+}
+
+func TestShutdownDuringAStalledSpawnEndsCleanly(t *testing.T) {
+	stalled := &stalledRunner{
+		entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}),
+	}
+	t.Cleanup(func() { close(stalled.release) })
+	r := newRigWith(t, agentlinktest.Serve, stalled)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r.start(ctx)
+
+	if err := r.handle.AwaitAttach(ctx); err != nil {
+		t.Fatalf("AwaitAttach: %v", err)
+	}
+	if err := r.handle.SpawnAgent(ctx); err != nil {
+		t.Fatalf("SpawnAgent: %v", err)
+	}
+	select {
+	case <-stalled.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the runner was never asked to spawn")
+	}
+	r.handle.Shutdown("session_end")
+
+	select {
+	case err := <-r.runErr:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil after Shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled agent start kept the control loop from honoring Shutdown")
+	}
+	select {
+	case <-stalled.canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ending the session never canceled the stalled agent start")
+	}
+}
+
+type silentRunner struct {
+	runnerpb.UnimplementedAgentRunnerServiceServer
+	entered chan struct{}
+}
+
+func (s *silentRunner) Run(stream runnerpb.AgentRunnerService_RunServer) error {
+	s.entered <- struct{}{}
+	<-stream.Context().Done()
+	return nil
+}
+
+func TestUDSRunnerSpawnStopsWaitingWhenCanceled(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rnr")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "r.sock")
+	lis, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen on %s: %v", socket, err)
+	}
+	silent := &silentRunner{entered: make(chan struct{}, 1)}
+	gs := grpc.NewServer()
+	runnerpb.RegisterAgentRunnerServiceServer(gs, silent)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	agentRunner, err := harnessclient.NewUDSRunner(socket, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewUDSRunner: %v", err)
+	}
+	t.Cleanup(agentRunner.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := agentRunner.Spawn(ctx)
+		done <- err
+	}()
+	select {
+	case <-silent.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the spawn never reached the runner")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Spawn returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a canceled spawn still waits for the runner to report Started")
 	}
 }
 

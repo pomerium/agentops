@@ -40,26 +40,34 @@ func (r *UDSRunner) Close() { _ = r.conn.Close() }
 
 func (r *UDSRunner) Spawn(ctx context.Context) (*AgentSession, error) {
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopWatch := context.AfterFunc(ctx, cancel)
+	fail := func(err error) (*AgentSession, error) {
+		stopWatch()
+		cancel()
+		if ctx.Err() != nil {
+			return nil, context.Cause(ctx)
+		}
+		return nil, err
+	}
 	stream, err := runnerpb.NewAgentRunnerServiceClient(r.conn).Run(streamCtx)
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("open runner stream: %w", err)
+		return fail(fmt.Errorf("open runner stream: %w", err))
 	}
 	if err := stream.Send(&runnerpb.RunnerClientFrame{
 		Msg: &runnerpb.RunnerClientFrame_Spawn{Spawn: &runnerpb.Spawn{}},
 	}); err != nil {
-		cancel()
-		return nil, fmt.Errorf("send spawn: %w", err)
+		return fail(fmt.Errorf("send spawn: %w", err))
 	}
 	first, err := stream.Recv()
 	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("await agent start: %w", err)
+		return fail(fmt.Errorf("await agent start: %w", err))
 	}
 	started := first.GetStarted()
 	if started == nil {
-		cancel()
-		return nil, fmt.Errorf("first runner frame was %v, want Started", first)
+		return fail(fmt.Errorf("first runner frame was %v, want Started", first))
+	}
+	if !stopWatch() {
+		return fail(ctx.Err())
 	}
 
 	io := agentio.New()
