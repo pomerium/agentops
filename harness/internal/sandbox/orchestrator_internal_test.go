@@ -525,6 +525,40 @@ func TestGraceWindowExpiryClosesOnce(t *testing.T) {
 	}
 }
 
+func TestForgottenAttachmentNeverReportsDown(t *testing.T) {
+	link := newFakeAgentLink()
+	o := New(newFakeClaims(), testPods(), nil, link,
+		WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
+		WithAttachGrace(10*time.Millisecond),
+	)
+
+	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	downs := make(chan string, 4)
+	att, err := o.Expect("run-1", prepared, WithOnDown(func(cause string) { downs <- cause }))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	h := link.handle("run-1")
+
+	h.opts.OnLost(errors.New("idle timeout"))
+	att.Forget()
+	select {
+	case cause := <-downs:
+		t.Fatalf("a forgotten attachment's grace timer reported down: %s", cause)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	h.opts.OnAgentExit(1)
+	select {
+	case cause := <-downs:
+		t.Fatalf("a forgotten attachment reported down: %s", cause)
+	default:
+	}
+}
+
 func TestReattachWithoutAgentClosesTheSession(t *testing.T) {
 	link := newFakeAgentLink()
 	o := New(newFakeClaims(), testPods(), nil, link, WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"))

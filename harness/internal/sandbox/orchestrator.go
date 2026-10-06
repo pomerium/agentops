@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -251,7 +252,7 @@ type Attachment struct {
 	handle AttachHandle
 	link   AgentLink
 
-	forgotten sync.Once
+	forgotten atomic.Bool
 	down      func(cause string)
 	downOnce  sync.Once
 	onDelayed func(waited time.Duration)
@@ -262,10 +263,13 @@ type Attachment struct {
 func (a *Attachment) RunID() string { return a.runID }
 
 func (a *Attachment) Forget() {
-	if a == nil || a.link == nil {
+	if a == nil || a.forgotten.Swap(true) {
 		return
 	}
-	a.forgotten.Do(func() { a.link.Forget(a.runID) })
+	a.cancelGrace()
+	if a.link != nil {
+		a.link.Forget(a.runID)
+	}
 }
 
 type Supervision struct {
@@ -325,6 +329,9 @@ func (o *Orchestrator) Expect(runID string, prepared *Prepared, opts ...Supervis
 }
 
 func (a *Attachment) fire(cause string) {
+	if a.forgotten.Load() {
+		return
+	}
 	a.downOnce.Do(func() {
 		if a.down != nil {
 			a.down(cause)
