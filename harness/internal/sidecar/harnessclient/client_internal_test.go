@@ -42,6 +42,7 @@ type fakeAttach struct {
 	ctx     context.Context
 	exitErr error
 	exited  chan int32
+	helloed chan struct{}
 
 	mu    sync.Mutex
 	acked bool
@@ -49,7 +50,7 @@ type fakeAttach struct {
 }
 
 func newFakeAttach(exitErr error) *fakeAttach {
-	return &fakeAttach{exitErr: exitErr, exited: make(chan int32, 1)}
+	return &fakeAttach{exitErr: exitErr, exited: make(chan int32, 1), helloed: make(chan struct{}, 1)}
 }
 
 func (s *fakeAttach) Recv() (*agentlinkpb.ManagerFrame, error) {
@@ -72,6 +73,7 @@ func (s *fakeAttach) Send(f *agentlinkpb.SidecarFrame) error {
 		s.mu.Lock()
 		s.hello = f.GetHello()
 		s.mu.Unlock()
+		s.helloed <- struct{}{}
 	case f.GetExited() != nil:
 		s.exited <- f.GetExited().GetExitCode()
 		return s.exitErr
@@ -123,8 +125,24 @@ func TestAnExitTheLinkDroppedIsReportedAfterReattach(t *testing.T) {
 	}
 	cancel2()
 	<-done
-	if second.agentRunning() {
-		t.Error("the reattach Hello reported a running agent after it exited")
+	if !second.agentRunning() {
+		t.Error("the reattach Hello reported no agent while its exit was still unreported")
+	}
+
+	third := newFakeAttach(nil)
+	link.attach = third
+	ctx3, cancel3 := context.WithCancel(ctx)
+	go func() { done <- c.session(ctx3, 3, c.cfg.Token.Bearer()) }()
+	<-third.helloed
+	cancel3()
+	<-done
+	if third.agentRunning() {
+		t.Error("the Hello after the exit was reported still claimed a running agent")
+	}
+	select {
+	case code := <-third.exited:
+		t.Errorf("an exit already reported was sent again (%d)", code)
+	default:
 	}
 }
 

@@ -330,7 +330,9 @@ type SidecarHello struct {
 	// Counts the Attach streams since the pod started. The first is 1. Use it
 	// only for logs and metrics.
 	Attempt uint32 `protobuf:"varint,2,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	// True on a new Attach stream if the agent survived the drop.
+	// True on a new Attach stream if the sidecar has an agent and has not yet
+	// sent AgentExited for it. An agent that stops during a drop stays "running"
+	// until the sidecar sends AgentExited on the new stream.
 	AgentRunning  bool `protobuf:"varint,3,opt,name=agent_running,json=agentRunning,proto3" json:"agent_running,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

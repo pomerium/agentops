@@ -485,7 +485,7 @@ func (c *Client) currentAgent() *AgentSession {
 func (c *Client) agentRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.agent != nil && c.exit == nil
+	return c.agent != nil && !c.exitSent
 }
 
 func (c *Client) agentExitChan() <-chan int32 {
