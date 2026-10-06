@@ -107,6 +107,7 @@ type Client struct {
 
 	mu       sync.Mutex
 	agent    *AgentSession
+	spawn    *pendingSpawn
 	exit     *int32
 	exitSent bool
 	stopped  bool
@@ -301,7 +302,7 @@ func (c *Client) session(parent context.Context, attempt uint32, bearer string) 
 		return err
 	}
 
-	return c.serve(ctx, stream, interval, missLimit)
+	return c.serve(ctx, parent, stream, interval, missLimit)
 }
 
 func (c *Client) heartbeatContract(ack *agentlinkpb.ManagerHelloAck) (time.Duration, uint32) {
@@ -322,7 +323,7 @@ func (c *Client) heartbeatContract(ack *agentlinkpb.ManagerHelloAck) (time.Durat
 	return interval, missLimit
 }
 
-func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_AttachClient,
+func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLinkService_AttachClient,
 	interval time.Duration, missLimit uint32,
 ) error {
 	type recvResult struct {
@@ -350,12 +351,20 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 	lastSent := time.Now()
 	deadline := time.Duration(missLimit) * interval
 
-	agentExited := c.agentExitChan()
+	var agentExited <-chan int32
 	ioLost := make(chan error, 1)
-	if ag := c.currentAgent(); ag != nil {
+	watch := func(ag *AgentSession) {
+		agentExited = c.agentExitChan()
 		go c.pumpAgentIO(ctx, ag, ioLost)
 	}
-	var spawned chan spawnResult
+	var spawned <-chan struct{}
+	ag, pending := c.agentState()
+	switch {
+	case ag != nil:
+		watch(ag)
+	case pending != nil:
+		spawned = pending.done
+	}
 
 	for {
 		select {
@@ -366,12 +375,8 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 			lastRecv = time.Now()
 			switch {
 			case r.frame.GetSpawn() != nil:
-				if spawned == nil {
-					spawned = make(chan spawnResult, 1)
-					go func(done chan<- spawnResult) {
-						ag, err := c.spawnAgent(ctx)
-						done <- spawnResult{ag, err}
-					}(spawned)
+				if p := c.startSpawn(runCtx); p != nil {
+					pending, spawned = p, p.done
 				}
 			case r.frame.GetShutdown() != nil:
 				c.log.Info("harness: shutdown directive received", "reason", r.frame.GetShutdown().GetReason())
@@ -379,19 +384,18 @@ func (c *Client) serve(ctx context.Context, stream agentlinkpb.AgentLinkService_
 				return nil
 			case r.frame.GetHeartbeat() != nil:
 			}
-		case res := <-spawned:
+		case <-spawned:
 			spawned = nil
-			if res.err != nil {
+			if pending.err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				c.log.Error("harness: spawn failed", "err", res.err)
+				c.log.Error("harness: spawn failed", "err", pending.err)
 				_ = stream.Send(statusFrame(ReasonRunnerFailure))
-				return &TerminalError{Reason: ReasonRunnerFailure, Err: res.err}
+				return &TerminalError{Reason: ReasonRunnerFailure, Err: pending.err}
 			}
-			if res.agent != nil {
-				agentExited = c.agentExitChan()
-				go c.pumpAgentIO(ctx, res.agent, ioLost)
+			if ag := c.currentAgent(); ag != nil {
+				watch(ag)
 			}
 		case code := <-agentExited:
 			agentExited = nil
@@ -451,29 +455,54 @@ func (c *Client) configure(cfg *agentlinkpb.SandboxConfig) error {
 	return err
 }
 
-type spawnResult struct {
-	agent *AgentSession
-	err   error
+type pendingSpawn struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	err    error
 }
 
-func (c *Client) spawnAgent(ctx context.Context) (*AgentSession, error) {
-	if c.currentAgent() != nil {
-		return nil, nil
-	}
-	ag, err := c.cfg.Runner.Spawn(ctx)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) startSpawn(ctx context.Context) *pendingSpawn {
 	c.mu.Lock()
-	if c.stopped {
-		c.mu.Unlock()
-		ag.stop()
-		return nil, errors.New("the agent started after the client stopped")
+	defer c.mu.Unlock()
+	if c.agent != nil || c.stopped {
+		return nil
 	}
-	c.agent, c.exit, c.exitSent = ag, nil, false
-	c.mu.Unlock()
-	c.log.Info("harness: agent spawned", "pid", ag.PID)
-	return ag, nil
+	if c.spawn == nil {
+		ctx, cancel := context.WithCancel(ctx)
+		c.spawn = &pendingSpawn{done: make(chan struct{}), cancel: cancel}
+		go c.runSpawn(ctx, c.spawn)
+	}
+	return c.spawn
+}
+
+func (c *Client) runSpawn(ctx context.Context, p *pendingSpawn) {
+	defer p.cancel()
+	defer close(p.done)
+	ag, err := c.cfg.Runner.Spawn(ctx)
+	if err == nil && !c.adopt(ag) {
+		ag.stop()
+		err = errors.New("the agent started after the client stopped")
+	}
+	p.err = err
+	if err == nil {
+		c.log.Info("harness: agent spawned", "pid", ag.PID)
+	}
+}
+
+func (c *Client) adopt(ag *AgentSession) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
+	c.agent, c.spawn, c.exit, c.exitSent = ag, nil, nil, false
+	return true
+}
+
+func (c *Client) agentState() (*AgentSession, *pendingSpawn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.agent, c.spawn
 }
 
 func (c *Client) currentAgent() *AgentSession {
@@ -485,7 +514,7 @@ func (c *Client) currentAgent() *AgentSession {
 func (c *Client) agentRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.agent != nil && !c.exitSent
+	return c.spawn != nil || (c.agent != nil && !c.exitSent)
 }
 
 func (c *Client) agentExitChan() <-chan int32 {
@@ -510,9 +539,12 @@ func (c *Client) recordExit(code int32, sent bool) {
 
 func (c *Client) stopAgent() {
 	c.mu.Lock()
-	ag := c.agent
+	ag, pending := c.agent, c.spawn
 	c.agent, c.stopped = nil, true
 	c.mu.Unlock()
+	if pending != nil {
+		pending.cancel()
+	}
 	if ag != nil {
 		ag.stop()
 	}

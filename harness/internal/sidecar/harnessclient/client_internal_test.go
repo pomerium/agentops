@@ -43,6 +43,7 @@ type fakeAttach struct {
 	exitErr error
 	exited  chan int32
 	helloed chan struct{}
+	frames  chan *agentlinkpb.ManagerFrame
 
 	mu    sync.Mutex
 	acked bool
@@ -50,7 +51,10 @@ type fakeAttach struct {
 }
 
 func newFakeAttach(exitErr error) *fakeAttach {
-	return &fakeAttach{exitErr: exitErr, exited: make(chan int32, 1), helloed: make(chan struct{}, 1)}
+	return &fakeAttach{
+		exitErr: exitErr, exited: make(chan int32, 1), helloed: make(chan struct{}, 1),
+		frames: make(chan *agentlinkpb.ManagerFrame, 4),
+	}
 }
 
 func (s *fakeAttach) Recv() (*agentlinkpb.ManagerFrame, error) {
@@ -63,8 +67,15 @@ func (s *fakeAttach) Recv() (*agentlinkpb.ManagerFrame, error) {
 			HelloAck: &agentlinkpb.ManagerHelloAck{},
 		}}, nil
 	}
-	<-s.ctx.Done()
-	return nil, s.ctx.Err()
+	select {
+	case f := <-s.frames:
+		if f == nil {
+			return nil, status.Error(codes.Unavailable, "link dropped")
+		}
+		return f, nil
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
+	}
 }
 
 func (s *fakeAttach) Send(f *agentlinkpb.SidecarFrame) error {
@@ -267,18 +278,11 @@ func TestAnAgentThatStartsAfterShutdownIsStopped(t *testing.T) {
 	r := &delayedStart{entered: make(chan struct{}), release: make(chan struct{}), agent: ag}
 	c := &Client{cfg: Config{Runner: r}, log: slog.New(slog.DiscardHandler)}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = c.spawnAgent(ctx)
-	}()
+	pending := c.startSpawn(context.Background())
 	<-r.entered
 	c.stopAgent()
-	cancel()
 	close(r.release)
-	<-done
+	<-pending.done
 
 	select {
 	case <-stopped:
@@ -288,4 +292,54 @@ func TestAnAgentThatStartsAfterShutdownIsStopped(t *testing.T) {
 	if c.currentAgent() != nil {
 		t.Error("shutdown left the late agent stored")
 	}
+}
+
+func TestAReattachWatchesAnAgentThatFinishedStartingAfterTheDrop(t *testing.T) {
+	exits := make(chan int32, 1)
+	r := &delayedStart{
+		entered: make(chan struct{}), release: make(chan struct{}),
+		agent: &AgentSession{IO: agentio.New(), Exited: exits},
+	}
+	link := &fakeLink{attach: newFakeAttach(nil)}
+	c := &Client{
+		cfg:      Config{Token: bearer("Bearer pom_art_test"), Runner: r},
+		log:      slog.New(slog.DiscardHandler),
+		client:   link,
+		statusCh: make(chan *agentlinkpb.Status, 4),
+		ioSlot:   make(chan struct{}, 1),
+	}
+	defer c.stopAgent()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first := link.attach
+	first.frames <- &agentlinkpb.ManagerFrame{Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{}}}
+	done := make(chan error, 1)
+	go func() { done <- c.session(ctx, 1, c.cfg.Token.Bearer()) }()
+	<-r.entered
+	first.frames <- nil
+	if err := <-done; status.Code(err) != codes.Unavailable {
+		t.Fatalf("first session ended with %v, want the dropped link", err)
+	}
+
+	second := newFakeAttach(nil)
+	link.attach = second
+	go func() { done <- c.session(ctx, 2, c.cfg.Token.Bearer()) }()
+	<-second.helloed
+	close(r.release)
+	exits <- 7
+
+	select {
+	case code := <-second.exited:
+		if code != 7 {
+			t.Errorf("reattached link saw exit %d, want 7", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the reattached link never watched the agent that finished starting after the drop")
+	}
+	if !second.agentRunning() {
+		t.Error("the reattach Hello reported no agent while its start was still in flight")
+	}
+	cancel()
+	<-done
 }
