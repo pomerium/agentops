@@ -3,8 +3,12 @@ package agentic
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +28,10 @@ func (p *scriptPoller) Poll(context.Context) PollResult {
 	}
 	return r
 }
+
+type pollFunc func(context.Context) PollResult
+
+func (f pollFunc) Poll(ctx context.Context) PollResult { return f(ctx) }
 
 func tok(bearer string, expiresIn time.Duration) *Token {
 	return &Token{Bearer: bearer, RunID: "run-1", ExpiresIn: expiresIn}
@@ -212,6 +220,83 @@ func TestLoop_RetrySleepStopsAtTokenExpiry(t *testing.T) {
 	assert.Equal(t, ReasonASUnreachable, te.Reason)
 	assert.Equal(t, expiresAt, now, "the loop must stop when the token expires, not after it")
 	assert.Equal(t, []time.Duration{time.Second, time.Second, 2 * time.Second, 2 * time.Second}, slept)
+}
+
+func TestLoop_TokenLifetimeCountsFromPollStart(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1000, 0)
+	expiresAt := now.Add(6 * time.Second)
+	polls := 0
+	poll := pollFunc(func(context.Context) PollResult {
+		polls++
+		if polls == 1 {
+			now = now.Add(2 * time.Second)
+			return PollResult{Kind: PollOk, Token: tok("Bearer pom_art_1", 6*time.Second)}
+		}
+		return PollResult{Kind: PollRetryable, Err: errors.New("token exchange unavailable (503)")}
+	})
+	loop := NewLoop(LoopConfig{
+		Poll: poll,
+		Sink: func(*Token) error { return nil },
+		Now:  func() time.Time { return now },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			now = now.Add(d)
+			return ctx.Err()
+		},
+	})
+
+	err := loop.Run(context.Background())
+	var te *TerminalError
+	require.ErrorAs(t, err, &te)
+	assert.Equal(t, ReasonASUnreachable, te.Reason)
+	assert.Equal(t, expiresAt, now, "the lifetime starts when the exchange was sent, not when it answered")
+}
+
+func TestLoop_PollIsBoundedByHeldTokenLifetime(t *testing.T) {
+	t.Parallel()
+	var deadline time.Time
+	var hasDeadline bool
+	polls := 0
+	poll := pollFunc(func(ctx context.Context) PollResult {
+		polls++
+		if polls == 1 {
+			return PollResult{Kind: PollOk, Token: tok("Bearer pom_art_1", time.Hour)}
+		}
+		deadline, hasDeadline = ctx.Deadline()
+		return PollResult{Kind: PollTerminal, Reason: ReasonRevokedOrExpired}
+	})
+	loop, _, _ := newTestLoop(t, LoopConfig{}, poll)
+
+	err := loop.Run(context.Background())
+	var te *TerminalError
+	require.ErrorAs(t, err, &te)
+	require.True(t, hasDeadline, "an exchange must not outlive the token it renews")
+	assert.LessOrEqual(t, time.Until(deadline), time.Hour)
+	assert.Greater(t, time.Until(deadline), 59*time.Minute)
+}
+
+func TestLoop_HangingExchangeEndsAtTokenExpiry(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"access_token":"pom_art_1","token_type":"Bearer","expires_in":1,"run_id":"r"}`)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	loop := NewLoop(LoopConfig{
+		Poll: newTestPoller(t, srv, writeTokenFile(t, "sa")),
+		Sink: func(*Token) error { return nil },
+	})
+
+	started := time.Now()
+	err := loop.Run(context.Background())
+	var te *TerminalError
+	require.ErrorAs(t, err, &te)
+	assert.Equal(t, ReasonASUnreachable, te.Reason)
+	assert.Less(t, time.Since(started), 10*time.Second, "a hung exchange must not keep an expired token in service")
 }
 
 func TestLoop_ContextCancelStops(t *testing.T) {

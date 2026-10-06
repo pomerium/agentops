@@ -158,7 +158,8 @@ func (l *Loop) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		res := l.cfg.Poll.Poll(ctx)
+		polledAt := l.cfg.Now()
+		res := l.poll(ctx, polledAt.Sub(heldAt))
 		switch res.Kind {
 		case PollOk:
 			first := heldAt.IsZero()
@@ -171,7 +172,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			l.mu.Lock()
 			l.held = res.Token
 			l.mu.Unlock()
-			heldAt = l.cfg.Now()
+			heldAt = polledAt
 			l.readyOnce.Do(func() { close(l.ready) })
 			retry.Reset()
 			rotateIn := l.rotationInterval(res.Token)
@@ -237,6 +238,15 @@ func (l *Loop) Run(ctx context.Context) error {
 			return &TerminalError{Reason: res.Reason, Err: res.Err}
 		}
 	}
+}
+
+func (l *Loop) poll(ctx context.Context, heldFor time.Duration) PollResult {
+	if held := l.Current(); held != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, held.ExpiresIn-heldFor)
+		defer cancel()
+	}
+	return l.cfg.Poll.Poll(ctx)
 }
 
 func (l *Loop) rotationInterval(t *Token) time.Duration {
