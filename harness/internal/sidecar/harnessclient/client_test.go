@@ -77,6 +77,12 @@ func (s *staticToken) Bearer() string {
 	return s.bearer
 }
 
+func (s *staticToken) set(bearer string) {
+	s.mu.Lock()
+	s.bearer = bearer
+	s.mu.Unlock()
+}
+
 func (s *staticToken) Refresh() {
 	s.mu.Lock()
 	s.refreshes++
@@ -375,23 +381,25 @@ func (r *ioResetter) reset() {
 	}
 }
 
-func (r *ioResetter) serve(t *testing.T, srv *agentlink.Server, assertion func() string) string {
-	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+func serveIntercepted(intercept grpc.StreamServerInterceptor) serveFunc {
+	return func(t *testing.T, srv *agentlink.Server, assertion func() string) string {
+		t.Helper()
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		stamp := func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+			md, _ := metadata.FromIncomingContext(ss.Context())
+			md = md.Copy()
+			md.Set(agentlink.AssertionMetadataKey, assertion())
+			return handler(srv, ctxStream{ServerStream: ss, ctx: metadata.NewIncomingContext(ss.Context(), md)})
+		}
+		gs := grpc.NewServer(grpc.ChainStreamInterceptor(stamp, intercept))
+		srv.Register(gs)
+		go func() { _ = gs.Serve(lis) }()
+		t.Cleanup(gs.Stop)
+		return lis.Addr().String()
 	}
-	stamp := func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		md, _ := metadata.FromIncomingContext(ss.Context())
-		md = md.Copy()
-		md.Set(agentlink.AssertionMetadataKey, assertion())
-		return handler(srv, ctxStream{ServerStream: ss, ctx: metadata.NewIncomingContext(ss.Context(), md)})
-	}
-	gs := grpc.NewServer(grpc.ChainStreamInterceptor(stamp, r.intercept))
-	srv.Register(gs)
-	go func() { _ = gs.Serve(lis) }()
-	t.Cleanup(gs.Stop)
-	return lis.Addr().String()
 }
 
 func (r *ioResetter) intercept(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
@@ -412,7 +420,7 @@ func (r *ioResetter) intercept(srv any, ss grpc.ServerStream, info *grpc.StreamS
 
 func TestAgentIOResetAloneKeepsTheConversationFlowing(t *testing.T) {
 	resetter := &ioResetter{}
-	r := newRigWith(t, resetter.serve, nil)
+	r := newRigWith(t, serveIntercepted(resetter.intercept), nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -656,7 +664,8 @@ func TestPermissionDeniedRefreshesThenGivesUp(t *testing.T) {
 		URL: "http://" + lis.Addr().String(), Insecure: true,
 		Token: token, Runner: agentRunner,
 		BaseBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond,
-		Logger: testLogger(t),
+		TokenRefreshTimeout: 100 * time.Millisecond,
+		Logger:              testLogger(t),
 	})
 	if err != nil {
 		t.Fatalf("harnessclient.New: %v", err)
@@ -681,6 +690,43 @@ func TestPermissionDeniedRefreshesThenGivesUp(t *testing.T) {
 	defer token.mu.Unlock()
 	if token.refreshes == 0 {
 		t.Error("a denial should have forced a token refresh")
+	}
+}
+
+func TestDeniedAttachWaitsForTheRefreshedToken(t *testing.T) {
+	const stale = "Bearer pom_art_stale"
+	denials := make(chan struct{}, 64)
+	denyStale := func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		md, _ := metadata.FromIncomingContext(ss.Context())
+		if auth := md.Get("authorization"); len(auth) > 0 && auth[0] == stale {
+			select {
+			case denials <- struct{}{}:
+			default:
+			}
+			return status.Error(codes.PermissionDenied, "the run token expired")
+		}
+		return handler(srv, ss)
+	}
+	r := newRigWith(t, serveIntercepted(denyStale), nil)
+	fresh := r.token.Bearer()
+	r.token.set(stale)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r.start(ctx)
+
+	for range 6 {
+		select {
+		case <-denials:
+		case err := <-r.runErr:
+			t.Fatalf("Run gave up while the token refresh was still in flight: %v", err)
+		case <-ctx.Done():
+			t.Fatal("the client stopped retrying the stale token")
+		}
+	}
+	r.token.set(fresh)
+	if err := r.handle.AwaitAttach(ctx); err != nil {
+		t.Fatalf("AwaitAttach with the refreshed token: %v", err)
 	}
 }
 

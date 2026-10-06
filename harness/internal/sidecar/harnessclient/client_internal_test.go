@@ -101,7 +101,7 @@ func TestAnExitTheLinkDroppedIsReportedAfterReattach(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := c.session(ctx, 1); status.Code(err) != codes.Unavailable {
+	if err := c.session(ctx, 1, c.cfg.Token.Bearer()); status.Code(err) != codes.Unavailable {
 		t.Fatalf("first session ended with %v, want the dropped exit send", err)
 	}
 	if code := <-link.attach.exited; code != 7 {
@@ -112,7 +112,7 @@ func TestAnExitTheLinkDroppedIsReportedAfterReattach(t *testing.T) {
 	link.attach = second
 	ctx2, cancel2 := context.WithCancel(ctx)
 	done := make(chan error, 1)
-	go func() { done <- c.session(ctx2, 2) }()
+	go func() { done <- c.session(ctx2, 2, c.cfg.Token.Bearer()) }()
 	select {
 	case code := <-second.exited:
 		if code != 7 {

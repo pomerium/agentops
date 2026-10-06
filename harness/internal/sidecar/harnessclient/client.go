@@ -32,8 +32,9 @@ const (
 )
 
 const (
-	defaultBaseBackoff = 500 * time.Millisecond
-	defaultMaxBackoff  = 30 * time.Second
+	defaultBaseBackoff         = 500 * time.Millisecond
+	defaultMaxBackoff          = 30 * time.Second
+	defaultTokenRefreshTimeout = 30 * time.Second
 )
 
 const deniedRetryLimit = 3
@@ -65,6 +66,7 @@ type Config struct {
 	HeartbeatInterval       time.Duration
 	HeartbeatMissLimit      uint32
 	BaseBackoff, MaxBackoff time.Duration
+	TokenRefreshTimeout     time.Duration
 	Logger                  *slog.Logger
 }
 
@@ -125,6 +127,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = defaultMaxBackoff
+	}
+	if cfg.TokenRefreshTimeout <= 0 {
+		cfg.TokenRefreshTimeout = defaultTokenRefreshTimeout
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -192,11 +197,14 @@ func (c *Client) Run(ctx context.Context) error {
 	policy.MaxInterval = c.cfg.MaxBackoff
 	policy.Multiplier = 2
 	denied := 0
+	var deniedBearer string
+	var deniedAt time.Time
 	var attempt uint32
 
 	_, err := backoff.Retry(ctx, func() (struct{}, error) {
 		attempt++
-		err := c.session(ctx, attempt)
+		bearer := c.cfg.Token.Bearer()
+		err := c.session(ctx, attempt, bearer)
 		if err == nil {
 			return struct{}{}, nil
 		}
@@ -214,7 +222,15 @@ func (c *Client) Run(ctx context.Context) error {
 		case codes.FailedPrecondition:
 			return struct{}{}, backoff.Permanent(&TerminalError{Reason: ReasonRejected, Err: err})
 		case codes.PermissionDenied:
+			if bearer == deniedBearer {
+				if waited := time.Since(deniedAt); waited > c.cfg.TokenRefreshTimeout {
+					return struct{}{}, backoff.Permanent(&TerminalError{Reason: ReasonAttachDenied,
+						Err: fmt.Errorf("no fresh run token %s after the denial: %w", waited.Round(time.Millisecond), err)})
+				}
+				return struct{}{}, backoff.RetryAfter(c.cfg.BaseBackoff, err)
+			}
 			denied++
+			deniedBearer, deniedAt = bearer, time.Now()
 			if denied > deniedRetryLimit {
 				return struct{}{}, backoff.Permanent(&TerminalError{Reason: ReasonAttachDenied, Err: err})
 			}
@@ -223,7 +239,7 @@ func (c *Client) Run(ctx context.Context) error {
 			c.cfg.Token.Refresh()
 			return struct{}{}, backoff.RetryAfter(c.cfg.BaseBackoff, err)
 		default:
-			denied = 0
+			denied, deniedBearer = 0, ""
 			return struct{}{}, err
 		}
 	}, backoff.WithBackOff(policy), backoff.WithMaxElapsedTime(0), backoff.WithNotify(func(err error, next time.Duration) {
@@ -244,8 +260,7 @@ func (c *Client) Run(ctx context.Context) error {
 	return err
 }
 
-func (c *Client) session(parent context.Context, attempt uint32) error {
-	bearer := c.cfg.Token.Bearer()
+func (c *Client) session(parent context.Context, attempt uint32, bearer string) error {
 	if bearer == "" {
 		return errors.New("no run token yet")
 	}
