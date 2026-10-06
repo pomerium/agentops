@@ -1884,7 +1884,8 @@ export const HarnessAPIService: GenService<{
    * The server returns the turn_id immediately. The agent's work arrives as
    * events with this turn_id.
    *
-   * In SESSION_STATE_RUNNING, the turn starts at once.
+   * In SESSION_STATE_RUNNING, the turn starts when the session has no other
+   * turn in progress. A session runs one turn at a time.
    * In SESSION_STATE_SUSPENDED, the server revives the session first. A
    * revive needs a new approval, so an ApprovalRequired event comes before
    * the turn starts. If the revive fails, the turn gets TurnFailed and the
@@ -1895,8 +1896,8 @@ export const HarnessAPIService: GenService<{
    * Errors:
    *   - SENTINEL_NOT_FOUND: no live session matches the ref.
    *   - SENTINEL_INVALID_ARGUMENT: content is empty.
-   *   - SENTINEL_INVALID_STATE: the session is not running or suspended.
-   *     The server does not keep a queue of prompts.
+   *   - SENTINEL_INVALID_STATE: the session is not running or suspended,
+   *     or another Prompt is reviving it already.
    *   - SENTINEL_NOT_REVIVABLE: the session is suspended, but the server
    *     cannot revive it. Start a new session.
    *   - SENTINEL_QUOTA_EXCEEDED: a revive is above the client's quota.
@@ -1916,7 +1917,8 @@ export const HarnessAPIService: GenService<{
    *
    * Errors:
    *   - SENTINEL_NOT_FOUND: no live session matches the ref.
-   *   - SENTINEL_INVALID_ARGUMENT: request_id is empty.
+   *   - SENTINEL_INVALID_ARGUMENT: request_id or option_id is empty, or
+   *     option_id is not an option of the request. The request stays open.
    *   - SENTINEL_UNKNOWN_REQUEST: the request is not open. It does not
    *     exist, or it has a PermissionResolved event already.
    *
