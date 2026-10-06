@@ -40,6 +40,11 @@ UPDATE sessions
 SET status = ?, updated_at = ?
 WHERE id = ?;
 
+-- name: FinishSession :execrows
+UPDATE sessions
+SET status = ?, updated_at = ?
+WHERE id = ? AND status NOT IN ('ended', 'interrupted');
+
 -- name: UpdateSessionRun :exec
 UPDATE sessions
 SET run_id = ?, approval_url = ?, run_expires_at = ?, status = ?, updated_at = ?

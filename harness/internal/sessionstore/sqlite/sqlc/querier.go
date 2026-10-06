@@ -10,6 +10,7 @@ import (
 
 type Querier interface {
 	CreateSession(ctx context.Context, arg CreateSessionParams) error
+	FinishSession(ctx context.Context, arg FinishSessionParams) (int64, error)
 	GetLatestSessionByConversation(ctx context.Context, arg GetLatestSessionByConversationParams) (Session, error)
 	GetLiveSessionByConversation(ctx context.Context, arg GetLiveSessionByConversationParams) (Session, error)
 	GetSession(ctx context.Context, id string) (Session, error)

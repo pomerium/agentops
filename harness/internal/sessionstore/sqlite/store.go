@@ -293,6 +293,54 @@ func (s *Store) AppendSessionEvent(ctx context.Context, sessionID, eventType, tu
 	return seq, nil
 }
 
+func (s *Store) FinishSession(ctx context.Context, sessionID string, status api.SessionState, events []sessionstore.NewSessionEvent) ([]int64, error) {
+	seqs := make([]int64, 0, len(events))
+	err := s.inTx(ctx, func(q *sqlcgen.Queries) error {
+		n, err := q.FinishSession(ctx, sqlcgen.FinishSessionParams{
+			Status:    statusText(status),
+			UpdatedAt: time.Now().Unix(),
+			ID:        sessionID,
+		})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := q.GetSession(ctx, sessionID); errors.Is(err, sql.ErrNoRows) {
+				return sessionstore.ErrNotFound
+			} else if err != nil {
+				return err
+			}
+			return sessionstore.ErrConflict
+		}
+		for _, ev := range events {
+			seq, err := q.NextSessionEventSeq(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			payload := ev.Payload
+			if payload == nil {
+				payload = []byte{}
+			}
+			if err := q.InsertSessionEvent(ctx, sqlcgen.InsertSessionEventParams{
+				SessionID: sessionID,
+				Seq:       seq,
+				EventType: ev.Type,
+				TurnID:    ev.TurnID,
+				At:        ev.At.UnixMilli(),
+				Payload:   payload,
+			}); err != nil {
+				return err
+			}
+			seqs = append(seqs, seq)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return seqs, nil
+}
+
 func (s *Store) ListSessionEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]sessionstore.SessionEvent, error) {
 	if limit <= 0 {
 		limit = sessionstore.DefaultEventPage

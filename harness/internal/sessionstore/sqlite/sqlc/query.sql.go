@@ -49,6 +49,26 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 	return err
 }
 
+const finishSession = `-- name: FinishSession :execrows
+UPDATE sessions
+SET status = ?, updated_at = ?
+WHERE id = ? AND status NOT IN ('ended', 'interrupted')
+`
+
+type FinishSessionParams struct {
+	Status    string `json:"status"`
+	UpdatedAt int64  `json:"updated_at"`
+	ID        string `json:"id"`
+}
+
+func (q *Queries) FinishSession(ctx context.Context, arg FinishSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, finishSession, arg.Status, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getLatestSessionByConversation = `-- name: GetLatestSessionByConversation :one
 SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
 WHERE client_id = ? AND conversation_ref = ?

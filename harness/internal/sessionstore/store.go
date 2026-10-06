@@ -47,6 +47,13 @@ type SessionEvent struct {
 	Payload   []byte
 }
 
+type NewSessionEvent struct {
+	Type    string
+	TurnID  string
+	At      time.Time
+	Payload []byte
+}
+
 type Sessions interface {
 	CreateSession(ctx context.Context, sess Session) error
 	GetSession(ctx context.Context, id string) (Session, error)
@@ -67,6 +74,7 @@ type Sessions interface {
 type Events interface {
 	AppendSessionEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte) (int64, error)
 	ListSessionEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]SessionEvent, error)
+	FinishSession(ctx context.Context, sessionID string, status api.SessionState, events []NewSessionEvent) ([]int64, error)
 }
 
 type Store interface {

@@ -46,6 +46,7 @@ func Run(t *testing.T, newDatabase func(t *testing.T) Opener) {
 		{"ListSessionEventsDefaultLimit", testListSessionEventsDefaultLimit},
 		{"EventPayloadIsOpaqueBytes", testEventPayloadIsOpaqueBytes},
 		{"EventTimestampsKeepMilliseconds", testEventTimestampsKeepMilliseconds},
+		{"FinishSessionSavesTheEndWithItsEvents", testFinishSessionSavesTheEndWithItsEvents},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -878,4 +879,44 @@ func testEventTimestampsKeepMilliseconds(t *testing.T, open Opener) {
 	if len(evs) != 1 || !evs[0].At.Equal(at) {
 		t.Errorf("events = %+v, want one at %v", evs, at)
 	}
+}
+
+func testFinishSessionSavesTheEndWithItsEvents(t *testing.T, open Opener) {
+	ctx := context.Background()
+	s := openStore(t, open)
+	create(t, s, sessionstore.Session{ID: "s1", ClientID: "stub", ConversationRef: "c1"})
+	_, err := s.AppendSessionEvent(ctx, "s1", "state_changed", "", time.Now(), nil)
+	must(t, err)
+
+	at := time.Unix(1700000000, 123*int64(time.Millisecond)).UTC()
+	seqs, err := s.FinishSession(ctx, "s1", api.StateEnded, []sessionstore.NewSessionEvent{
+		{Type: "state_changed", At: at, Payload: []byte{1}},
+		{Type: "session_ended", TurnID: "", At: at, Payload: []byte{2}},
+	})
+	must(t, err)
+	if !slices.Equal(seqs, []int64{2, 3}) {
+		t.Errorf("FinishSession seqs = %v, want [2 3]", seqs)
+	}
+	got := get(t, s, "s1")
+	if got.Status != api.StateEnded || got.EventSeq != 3 {
+		t.Errorf("after FinishSession: status %v, event seq %d; want ended, 3", got.Status, got.EventSeq)
+	}
+	evs, err := s.ListSessionEvents(ctx, "s1", 1, 10)
+	must(t, err)
+	want := []sessionstore.SessionEvent{
+		{SessionID: "s1", Seq: 2, Type: "state_changed", At: at, Payload: []byte{1}},
+		{SessionID: "s1", Seq: 3, Type: "session_ended", At: at, Payload: []byte{2}},
+	}
+	if d := cmp.Diff(want, evs); d != "" {
+		t.Errorf("events (-want +got):\n%s", d)
+	}
+
+	_, err = s.FinishSession(ctx, "s1", api.StateInterrupted, []sessionstore.NewSessionEvent{{Type: "session_ended", At: at}})
+	wantErr(t, "FinishSession on a finished session", err, sessionstore.ErrConflict)
+	if got := get(t, s, "s1"); got.Status != api.StateEnded || got.EventSeq != 3 {
+		t.Errorf("a refused FinishSession changed the session: status %v, event seq %d", got.Status, got.EventSeq)
+	}
+
+	_, err = s.FinishSession(ctx, "missing", api.StateEnded, nil)
+	wantErr(t, "FinishSession on an unknown session", err, sessionstore.ErrNotFound)
 }
