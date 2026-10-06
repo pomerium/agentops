@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -727,6 +728,112 @@ func TestCancelledReviveRestoresSuspension(t *testing.T) {
 	}
 	if got := sandboxes.operatingMode(); got != string(agentsv1.SandboxOperatingModeSuspended) {
 		t.Errorf("a cancelled revive left the sandbox %s", got)
+	}
+}
+
+func TestSupervisionAcrossReattaches(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(h *fakeHandle)
+		want  []string
+	}{
+		{
+			name: "agent io re-attach keeps the session",
+			after: func(h *fakeHandle) {
+				h.opts.OnLost(errors.New("agent io lost"))
+				h.opts.OnAttached(2, true)
+			},
+		},
+		{
+			name: "exit then re-attach reports the exit once",
+			after: func(h *fakeHandle) {
+				h.opts.OnAgentExit(0)
+				h.opts.OnAttached(2, false)
+			},
+			want: []string{"agent_exited"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			link := newFakeAgentLink()
+			o := newTestOrchestrator(t, newFakeClaims(), link)
+			o.cfg.attachGrace = 20 * time.Millisecond
+
+			prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			downs := make(chan string, 4)
+			att, err := o.Expect("run-1", prepared, WithOnDown(func(cause string) { downs <- cause }))
+			if err != nil {
+				t.Fatalf("Expect: %v", err)
+			}
+			h := link.handle("run-1")
+			h.attach(1, false)
+			if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+				t.Fatalf("Activate: %v", err)
+			}
+
+			tc.after(h)
+			time.Sleep(200 * time.Millisecond)
+			close(downs)
+			var got []string
+			for cause := range downs {
+				got = append(got, cause)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("downs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRevivedAttachmentStartsUnspawned(t *testing.T) {
+	link := newFakeAgentLink()
+	o := newTestOrchestrator(t, newFakeClaims(), link)
+
+	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	oldDowns := make(chan string, 4)
+	old, err := o.Expect("run-1", prepared, WithOnDown(func(cause string) { oldDowns <- cause }))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	oldHandle := link.handle("run-1")
+	oldHandle.attach(1, false)
+	if _, err := o.Activate(context.Background(), nil, prepared, old); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	old.Forget()
+
+	prepared.Resumed = true
+	downs := make(chan string, 4)
+	att, err := o.Expect("run-2", prepared, WithOnDown(func(cause string) { downs <- cause }))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	h := link.handle("run-2")
+	h.attach(1, false)
+	oldHandle.opts.OnAttached(2, false)
+	select {
+	case cause := <-downs:
+		t.Fatalf("the revived attachment reported down before its agent ran: %s", cause)
+	case cause := <-oldDowns:
+		t.Fatalf("the forgotten attachment reported down: %s", cause)
+	default:
+	}
+	if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	h.opts.OnAgentExit(1)
+	select {
+	case cause := <-downs:
+		if cause != "agent_exited" {
+			t.Errorf("cause = %q, want agent_exited", cause)
+		}
+	default:
+		t.Fatal("the revived agent's exit was never reported")
 	}
 }
 
