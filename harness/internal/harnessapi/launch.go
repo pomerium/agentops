@@ -404,11 +404,11 @@ func (s *Service) runTurn(ctx context.Context, b *binding, turnID, text string) 
 	defer op.Complete()
 
 	b.busy.Add(1)
+	defer b.busy.Add(-1)
+	b.turn.Lock()
+	defer b.turn.Unlock()
 	b.sink.beginTurn(turnID)
-	defer func() {
-		b.sink.endTurn(ctx)
-		b.busy.Add(-1)
-	}()
+	defer b.sink.endTurn(ctx)
 
 	stop, err := b.session.Prompt(ctx, text)
 	if err != nil {

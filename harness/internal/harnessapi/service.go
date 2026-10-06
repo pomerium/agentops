@@ -161,6 +161,8 @@ type binding struct {
 
 	busy atomic.Int32
 
+	turn sync.Mutex
+
 	lastActivity atomic.Int64
 
 	idleWarned atomic.Bool

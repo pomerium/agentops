@@ -336,3 +336,61 @@ func TestActingVerbsIgnoreIncludeTerminal(t *testing.T) {
 		t.Errorf("GetSession with include_terminal: %q, %v", got.GetSession().GetId(), err)
 	}
 }
+
+func TestOverlappingPromptsKeepTheirReplies(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+
+	firstEntered, secondEntered, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error) {
+		sink.AgentMessage(ctx, text+" reply")
+		if text == "first" {
+			close(firstEntered)
+			<-release
+		} else {
+			close(secondEntered)
+		}
+		return acp.StopReasonEndTurn, nil
+	})
+	sub, err := h.subscribe(ctx, &pb.SubscribeRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	rec := record(t, sub)
+
+	first, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "first"})
+	if err != nil {
+		t.Fatalf("Prompt (first): %v", err)
+	}
+	<-firstEntered
+	second, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "second"})
+	if err != nil {
+		t.Fatalf("Prompt (second): %v", err)
+	}
+	select {
+	case <-secondEntered:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	_, at := rec.waitFor("turn_completed", 0)
+	rec.waitFor("turn_completed", at+1)
+
+	page, err := h.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	replies := map[string]string{}
+	for _, ev := range page.GetEvents() {
+		if msg := ev.GetAgentMessage(); msg != nil {
+			replies[ev.GetTurnId()] += msg.GetText()
+		}
+	}
+	if got := replies[first.GetTurnId()]; got != "first reply" {
+		t.Errorf("the first turn's reply is %q, want %q", got, "first reply")
+	}
+	if got := replies[second.GetTurnId()]; got != "second reply" {
+		t.Errorf("the second turn's reply is %q, want %q", got, "second reply")
+	}
+}
