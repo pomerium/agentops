@@ -384,7 +384,9 @@ func (s *Service) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*p
 		return &pb.EndSessionResponse{}, nil
 	}
 
-	s.stopSession(ctx, sess.ID, stopSpec{end: req.GetReason()})
+	if !s.stopSession(ctx, sess.ID, stopSpec{end: req.GetReason()}) {
+		return nil, api.Errorf(api.ErrUnavailable, "the end of session %s could not be recorded; send EndSession again", sess.ID)
+	}
 	return &pb.EndSessionResponse{}, nil
 }
 
@@ -598,7 +600,8 @@ func (s *Service) write(ctx context.Context, sessionID string, update func(conte
 		return false
 	}
 	if err := update(ctx); err != nil {
-		s.log.WarnContext(ctx, "update session state failed", "session", sessionID, "err", err)
+		s.log.ErrorContext(ctx, "update session state failed", "session", sessionID, "err", err)
+		return false
 	}
 	return true
 }

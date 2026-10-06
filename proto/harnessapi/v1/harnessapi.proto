@@ -110,6 +110,9 @@ service HarnessAPIService {
   //
   // Errors:
   //   - SENTINEL_NOT_FOUND: no live session matches the ref.
+  //   - SENTINEL_UNAVAILABLE: the server could not record the end. The
+  //     session stays live and has no SessionEnded event. Send EndSession
+  //     again.
   rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
 
   // GetSession returns the current view of one session.

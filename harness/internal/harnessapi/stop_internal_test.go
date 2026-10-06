@@ -2,6 +2,7 @@ package harnessapi
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"sync"
@@ -172,5 +173,29 @@ func TestNoEventFollowsSessionEnded(t *testing.T) {
 	}
 	if kinds[len(kinds)-1] != "session_ended" {
 		t.Errorf("events followed session_ended: %v", kinds)
+	}
+}
+
+type failingStatusStore struct{ sessionstore.Sessions }
+
+func (failingStatusStore) UpdateSessionStatus(context.Context, string, api.SessionState) error {
+	return errors.New("the database is unavailable")
+}
+
+func TestAnEndTheStoreRefusedIsNotPublished(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	svc.store = failingStatusStore{Sessions: st}
+
+	svc.endSession(ctx, "s1", api.StateRunning, api.EndEnded, "")
+
+	events, err := svc.events.History(ctx, "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	for _, ev := range events {
+		if ev.GetSessionEnded() != nil || ev.GetStateChanged() != nil {
+			t.Errorf("published %s although the store kept the session live", api.Kind(ev))
+		}
 	}
 }

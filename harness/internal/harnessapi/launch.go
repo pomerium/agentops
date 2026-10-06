@@ -58,7 +58,10 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.endSession(ctx, sess.ID, from, api.EndLaunchFailed, "the session's agent template snapshot could not be read")
 		return
 	}
-	s.setState(ctx, sess.ID, from, api.StateLaunching, launchReason(opts.revive))
+	if !s.setState(ctx, sess.ID, from, api.StateLaunching, launchReason(opts.revive)) {
+		s.failLaunch(ctx, sess, opts, o, "", api.EndLaunchFailed, unrecorded)
+		return
+	}
 
 	spec := sandbox.LaunchSpec{
 		SessionID:    sess.ID,
@@ -79,9 +82,12 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		return
 	}
 
-	s.write(ctx, sess.ID, func(ctx context.Context) error {
+	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		return s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching)
-	})
+	}) {
+		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, unrecorded)
+		return
+	}
 
 	res, err := s.runs.CreateRun(ctx, agenticrun.CreateRunRequest{
 		Prompt:          opts.approvalPrompt,
@@ -97,9 +103,12 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndRunCreateFailed, "a run could not be created for this session")
 		return
 	}
-	s.write(ctx, sess.ID, func(ctx context.Context) error {
+	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		return s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
-	})
+	}) {
+		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, unrecorded)
+		return
+	}
 
 	att, err := s.launcher.Expect(res.RunID, prepared,
 		sandbox.WithOnDown(s.superviseLaunch(ctx, sess.ID, o)),
@@ -135,6 +144,8 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		go s.watchRun(context.WithoutCancel(ctx), b, res.RunID)
 	}
 }
+
+const unrecorded = "the session's state could not be recorded"
 
 func launchReason(revive bool) api.Reason {
 	if revive {
@@ -202,12 +213,22 @@ func (s *Service) activateAndRun(
 		return nil
 	}
 	ctx = context.WithoutCancel(ctx)
-	s.write(ctx, sess.ID, func(ctx context.Context) error {
+	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching); err != nil {
 			return err
 		}
 		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
-	})
+	}) {
+		if opening {
+			b.leave()
+		}
+		spec := stopSpec{end: api.EndLaunchFailed, detail: unrecorded}
+		if opts.revive {
+			spec.suspend = api.ReasonReviveFailed
+		}
+		go s.stopOwned(ctx, sess.ID, o, spec)
+		return b
+	}
 
 	s.recordApproverFromRun(ctx, sess.ID, runID)
 
@@ -264,13 +285,13 @@ func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opt
 				"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
 		}
 	}
+	if opts.turnID != "" {
+		s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: detail}}})
+	}
 	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		return s.store.UpdateSessionSuspended(ctx, sess.ID, api.StateSuspended, suspendedAtOf(sess))
 	}) {
 		return
-	}
-	if opts.turnID != "" {
-		s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: detail}}})
 	}
 	s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
 		Old: api.StateLaunching, New: api.StateSuspended, Reason: reason,

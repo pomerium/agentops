@@ -161,6 +161,9 @@ type HarnessAPIServiceClient interface {
 	//
 	// Errors:
 	//   - SENTINEL_NOT_FOUND: no live session matches the ref.
+	//   - SENTINEL_UNAVAILABLE: the server could not record the end. The
+	//     session stays live and has no SessionEnded event. Send EndSession
+	//     again.
 	EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error)
 	// GetSession returns the current view of one session.
 	//
@@ -433,6 +436,9 @@ type HarnessAPIServiceHandler interface {
 	//
 	// Errors:
 	//   - SENTINEL_NOT_FOUND: no live session matches the ref.
+	//   - SENTINEL_UNAVAILABLE: the server could not record the end. The
+	//     session stays live and has no SessionEnded event. Send EndSession
+	//     again.
 	EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error)
 	// GetSession returns the current view of one session.
 	//

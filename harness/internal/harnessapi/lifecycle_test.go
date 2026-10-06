@@ -13,6 +13,7 @@ import (
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
+	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
 func TestStubClientDrivesFullLifecycle(t *testing.T) {
@@ -506,5 +507,29 @@ func TestTurnsFinishBeforeTheSessionEnds(t *testing.T) {
 	}
 	if kinds[len(kinds)-1] != "session_ended" {
 		t.Errorf("events followed session_ended: %v", kinds)
+	}
+}
+
+type failingACPStore struct{ sessionstore.Sessions }
+
+func (failingACPStore) UpdateSessionACP(context.Context, string, string, api.SessionState) error {
+	return errors.New("the database is unavailable")
+}
+
+func TestALaunchThatCannotRecordRunningStops(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	h.svc = harnessapi.New(failingACPStore{Sessions: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+
+	created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+		Template: "deploy", ConversationRef: "stub:conv-1", ApprovalPrompt: "ship the thing",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	waitForStoredState(t, h, byID(created.GetSession().GetId()), api.StateEnded)
+	if _, _, teardowns, _, _ := h.launcher.snapshot(); !slices.Contains(teardowns, "claim-1") {
+		t.Errorf("the failed launch kept its workspace: teardowns %v", teardowns)
 	}
 }

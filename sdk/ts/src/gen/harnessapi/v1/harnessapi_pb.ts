@@ -1943,6 +1943,9 @@ export const HarnessAPIService: GenService<{
    *
    * Errors:
    *   - SENTINEL_NOT_FOUND: no live session matches the ref.
+   *   - SENTINEL_UNAVAILABLE: the server could not record the end. The
+   *     session stays live and has no SessionEnded event. Send EndSession
+   *     again.
    *
    * @generated from rpc harnessapi.v1.HarnessAPIService.EndSession
    */

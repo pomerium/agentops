@@ -20,25 +20,24 @@ type stopSpec struct {
 	ifIdleFor time.Duration
 }
 
-func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSpec) {
-	s.stopOwned(ctx, sessionID, nil, spec)
+func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSpec) bool {
+	return s.stopOwned(ctx, sessionID, nil, spec)
 }
 
-func (s *Service) stopOwned(ctx context.Context, sessionID string, want *owner, spec stopSpec) {
+func (s *Service) stopOwned(ctx context.Context, sessionID string, want *owner, spec stopSpec) bool {
 	ctx = context.WithoutCancel(ctx)
 	b, held := s.detach(sessionID, want, spec)
 	if held == nil {
-		return
+		return true
 	}
+	defer s.settle(ctx, sessionID, held)
 	if b != nil {
-		s.stopLive(ctx, b, spec)
-	} else {
-		s.stopDetached(ctx, sessionID, spec)
+		return s.stopLive(ctx, b, spec)
 	}
-	s.settle(ctx, sessionID, held)
+	return s.stopDetached(ctx, sessionID, spec)
 }
 
-func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
+func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool {
 	ctx = context.WithoutCancel(ctx)
 	sessionID := b.sessionID
 	_ = b.session.Close()
@@ -67,7 +66,7 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
 		if !s.write(ctx, sessionID, func(ctx context.Context) error {
 			return s.store.UpdateSessionSuspended(ctx, sessionID, api.StateSuspended, now)
 		}) {
-			return
+			return false
 		}
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
 			Old: api.StateRunning, New: api.StateSuspended, Reason: spec.suspend,
@@ -75,32 +74,32 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) {
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_Suspended{Suspended: &pb.Suspended{
 			Reason: spec.suspend, RetainedFor: durationpb.New(s.cfg.suspendedTTL),
 		}}})
-		return
+		return true
 	}
-	s.endSession(ctx, sessionID, api.StateRunning, spec.end, spec.detail)
+	return s.endSession(ctx, sessionID, api.StateRunning, spec.end, spec.detail)
 }
 
-func (s *Service) stopDetached(ctx context.Context, sessionID string, spec stopSpec) {
+func (s *Service) stopDetached(ctx context.Context, sessionID string, spec stopSpec) bool {
 	ctx = context.WithoutCancel(ctx)
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		s.log.WarnContext(ctx, "stop: could not read the session", "session", sessionID, "err", err)
-		return
+		return false
 	}
 	if api.Terminal(sess.Status) {
-		return
+		return true
 	}
 	if sess.SandboxClaimName != "" {
 		if err := s.launcher.Teardown(ctx, sess.SandboxClaimName); err != nil {
 			s.log.WarnContext(ctx, "stop: releasing a workspace failed",
 				"session", sessionID, "claim", sess.SandboxClaimName, "err", err)
-			return
+			return false
 		}
 	}
-	s.endSession(ctx, sessionID, sess.Status, spec.end, spec.detail)
+	return s.endSession(ctx, sessionID, sess.Status, spec.end, spec.detail)
 }
 
-func (s *Service) endSession(ctx context.Context, sessionID string, from api.SessionState, reason api.EndReason, detail string) {
+func (s *Service) endSession(ctx context.Context, sessionID string, from api.SessionState, reason api.EndReason, detail string) bool {
 	if reason == pb.EndReason_END_REASON_UNSPECIFIED {
 		reason = api.EndEnded
 	}
@@ -109,9 +108,12 @@ func (s *Service) endSession(ctx context.Context, sessionID string, from api.Ses
 		to = api.StateInterrupted
 	}
 	if !s.setState(ctx, sessionID, from, to, pb.Reason_REASON_UNSPECIFIED) {
-		return
+		s.log.ErrorContext(ctx, "the session's end was not recorded; it stays live until an end is retried",
+			"session", sessionID, "reason", reason)
+		return false
 	}
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{Reason: reason, Detail: detail}}})
+	return true
 }
 
 func (s *Service) superviseLaunch(ctx context.Context, sessionID string, o *owner) func(string) {
