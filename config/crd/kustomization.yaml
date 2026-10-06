@@ -6,3 +6,4 @@ kind: Kustomization
 resources:
   - bases/agents.pomerium.com_agenttemplates.yaml
   - bases/agents.pomerium.com_channelconfigs.yaml
+  - bases/agents.pomerium.com_clientbindings.yaml
