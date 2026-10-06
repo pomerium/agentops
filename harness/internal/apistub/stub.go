@@ -73,6 +73,7 @@ type session struct {
 	finished bool
 
 	pending string
+	offered []*pb.PermissionOption
 
 	turn string
 
@@ -195,8 +196,12 @@ func (s *Stub) RespondPermission(ctx context.Context, req *pb.RespondPermissionR
 	if sess.pending != requestID {
 		return nil, api.Errorf(api.ErrUnknownRequest, "no outstanding request %q", requestID)
 	}
+	if !slices.ContainsFunc(sess.offered, func(o *pb.PermissionOption) bool { return o.GetId() == req.GetOptionId() }) {
+		return nil, api.Errorf(api.ErrInvalidArgument, "option %q was not offered", req.GetOptionId())
+	}
 	turn := sess.turn
 	sess.pending = ""
+	sess.offered = nil
 	s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
 		RequestId: requestID, Resolution: &pb.PermissionResolved_OptionId{OptionId: req.GetOptionId()},
 	}}})
@@ -448,13 +453,14 @@ func (s *Stub) runTurn(sess *session, content string) string {
 		}}})
 		sess.pending = "req-1"
 		sess.turn = turn
+		sess.offered = []*pb.PermissionOption{
+			{Id: "allow", Name: "Allow", Kind: "allow_once"},
+			{Id: "deny", Name: "Deny", Kind: "reject_once"},
+		}
 		s.emit(sess, &pb.Event{TurnId: turn, Payload: &pb.Event_PermissionRequest{PermissionRequest: &pb.PermissionRequest{
-			RequestId: "req-1",
-			Summary:   "Deploy to production?",
-			Options: []*pb.PermissionOption{
-				{Id: "allow", Name: "Allow", Kind: "allow_once"},
-				{Id: "deny", Name: "Deny", Kind: "reject_once"},
-			},
+			RequestId:  "req-1",
+			Summary:    "Deploy to production?",
+			Options:    sess.offered,
 			Deadline:   timestamppb.New(s.peek().Add(5 * time.Minute)),
 			ToolCallId: "call-1",
 		}}})
