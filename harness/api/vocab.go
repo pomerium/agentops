@@ -31,10 +31,11 @@ func Terminal(s SessionState) bool { return !Live(s) }
 type Reason = pb.Reason
 
 const (
-	ReasonLaunch       = pb.Reason_REASON_LAUNCH
-	ReasonRevive       = pb.Reason_REASON_REVIVE
-	ReasonIdle         = pb.Reason_REASON_IDLE
-	ReasonReviveFailed = pb.Reason_REASON_REVIVE_FAILED
+	ReasonLaunch            = pb.Reason_REASON_LAUNCH
+	ReasonRevive            = pb.Reason_REASON_REVIVE
+	ReasonIdle              = pb.Reason_REASON_IDLE
+	ReasonReviveFailed      = pb.Reason_REASON_REVIVE_FAILED
+	ReasonResumeUnavailable = pb.Reason_REASON_RESUME_UNAVAILABLE
 )
 
 type EndReason = pb.EndReason
