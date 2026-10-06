@@ -122,12 +122,29 @@ func (l *durableLog) Subscribe(ctx context.Context, sessionID string, afterSeq i
 	l.mu.Unlock()
 
 	batch, err := l.History(ctx, sessionID, afterSeq, sessionstore.DefaultEventPage)
+	ended := false
+	if err == nil && len(batch) == 0 && afterSeq > 0 {
+		ended, err = l.endsAt(ctx, sessionID, afterSeq)
+	}
 	if err != nil {
 		l.unsubscribe(s)
 		return nil, err
 	}
+	if ended {
+		l.unsubscribe(s)
+		close(s.out)
+		return s, nil
+	}
 	go s.pump(ctx, afterSeq, batch)
 	return s, nil
+}
+
+func (l *durableLog) endsAt(ctx context.Context, sessionID string, seq int64) (bool, error) {
+	last, err := l.History(ctx, sessionID, seq-1, 1)
+	if err != nil {
+		return false, err
+	}
+	return len(last) == 1 && last[0].GetSessionEnded() != nil, nil
 }
 
 func (l *durableLog) unsubscribe(s *subscription) {

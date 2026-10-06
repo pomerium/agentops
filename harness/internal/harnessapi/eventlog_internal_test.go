@@ -161,3 +161,34 @@ func TestSubscribeReportsAFailedLaterRead(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscribeAtTheEndedCursorFinishes(t *testing.T) {
+	ctx := context.Background()
+	log := NewEventLog(newMemEvents())
+	for _, ev := range []*pb.Event{
+		{SessionId: "s"},
+		{SessionId: "s", Payload: &pb.Event_SessionEnded{SessionEnded: &pb.SessionEnded{}}},
+	} {
+		if err := log.Append(ctx, ev); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	sub, err := log.Subscribe(ctx, "s", 2)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	select {
+	case ev, ok := <-sub.Events():
+		if ok {
+			t.Fatalf("the subscription replayed seq %d at or before the cursor", ev.GetSeq())
+		}
+		if err := sub.Err(); err != nil {
+			t.Fatalf("Err: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the subscription to an ended log is still waiting for events")
+	}
+}
