@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -708,5 +710,45 @@ func TestAgentExitReachesOnAgentExit(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("OnAgentExit never fired")
+	}
+}
+
+func TestAttachDuringJWKSOutageIsRetryable(t *testing.T) {
+	idp := agentlinktest.NewIDP(t)
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(jwks.Close)
+	v, err := agentlink.NewVerifier(idp.Issuer(),
+		agentlink.WithAudience(agentlinktest.Audience),
+		agentlink.WithJWKSURL(jwks.URL),
+		agentlink.WithHTTPClient(jwks.Client()))
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	srv, err := agentlink.New(v, agentlink.WithLogger(testLogger(t)))
+	if err != nil {
+		t.Fatalf("agentlink.New: %v", err)
+	}
+	handle, err := srv.Expect("run-outage", testSeal, nil)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer srv.Forget(handle.RunID())
+	addr := agentlinktest.Serve(t, srv, func() string { return idp.SignFor(t, "run-outage", testSeal) })
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	g := &testLink{t: t, srv: srv, client: agentlinkpb.NewAgentLinkServiceClient(conn), idp: idp}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for attempt := range uint32(2) {
+		_, _, err := g.attach(ctx, attempt+1, false)
+		if codeOf(err) != codes.Unavailable {
+			t.Fatalf("attempt %d: err = %v (code %s), want Unavailable", attempt+1, err, codeOf(err))
+		}
 	}
 }

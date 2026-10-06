@@ -50,6 +50,8 @@ type Assertion struct {
 
 var ErrMissingRunClaims = errors.New("assertion carries no run_id — check pomerium jwt_claims_headers")
 
+var ErrKeysUnavailable = errors.New("assertion signing keys are unavailable")
+
 type VerifierOption func(*verifierOptions)
 
 type verifierOptions struct {
@@ -91,11 +93,14 @@ type Verifier struct {
 	keys      map[string]jose.JSONWebKey
 	fetchedAt time.Time
 	lastFetch time.Time
+	fetchErr  error
+	fetching  chan struct{}
 }
 
 const (
 	jwksRefetchInterval = 30 * time.Second
 	jwksMaxAge          = 5 * time.Minute
+	jwksFetchTimeout    = 15 * time.Second
 )
 
 func NewVerifier(issuer string, opts ...VerifierOption) (*Verifier, error) {
@@ -149,7 +154,7 @@ func newJWKSClient(dialAddr, caFile string) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Timeout: 15 * time.Second, Transport: transport}, nil
+	return &http.Client{Timeout: jwksFetchTimeout, Transport: transport}, nil
 }
 
 func (v *Verifier) Verify(ctx context.Context, raw string) (*Assertion, error) {
@@ -221,32 +226,62 @@ func (v *Verifier) checkAudience(aud jwt.Audience) error {
 }
 
 func (v *Verifier) key(ctx context.Context, kid string) (*jose.JSONWebKey, error) {
-	v.mu.Lock()
+	waited := false
+	for {
+		v.mu.Lock()
+		wait := v.fetching
+		if wait == nil {
+			k, refetch, err := v.cachedKey(kid, waited)
+			if !refetch {
+				v.mu.Unlock()
+				return k, err
+			}
+			wait = make(chan struct{})
+			v.fetching = wait
+			go v.refresh(context.WithoutCancel(ctx), wait)
+		}
+		v.mu.Unlock()
+		select {
+		case <-wait:
+			waited = true
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (v *Verifier) cachedKey(kid string, waited bool) (*jose.JSONWebKey, bool, error) {
 	now := v.now()
 	if k, ok := v.keys[kid]; ok && now.Sub(v.fetchedAt) < jwksMaxAge {
-		v.mu.Unlock()
-		return &k, nil
+		return &k, false, nil
 	}
-	if !v.lastFetch.IsZero() && now.Sub(v.lastFetch) < jwksRefetchInterval {
-		v.mu.Unlock()
-		return nil, fmt.Errorf("no assertion signing key with kid %q (refetch throttled)", kid)
+	if v.lastFetch.IsZero() || now.Sub(v.lastFetch) >= jwksRefetchInterval {
+		return nil, true, nil
 	}
-	v.lastFetch = now
-	v.mu.Unlock()
+	if v.fetchErr != nil {
+		return nil, false, fmt.Errorf("%w: %w", ErrKeysUnavailable, v.fetchErr)
+	}
+	if !waited {
+		return nil, false, fmt.Errorf("%w: kid %q is not cached and the refetch is throttled", ErrKeysUnavailable, kid)
+	}
+	return nil, false, fmt.Errorf("no assertion signing key with kid %q at %s", kid, v.jwksURL)
+}
 
+func (v *Verifier) refresh(ctx context.Context, done chan struct{}) {
+	ctx, cancel := context.WithTimeout(ctx, jwksFetchTimeout)
+	defer cancel()
 	keys, err := v.fetchJWKS(ctx)
 	if err != nil {
-		return nil, err
+		v.log.Warn("harness: assertion JWKS refresh failed", "url", v.jwksURL, "err", err)
 	}
 	v.mu.Lock()
-	v.keys = keys
-	v.fetchedAt = now
-	k, ok := v.keys[kid]
-	v.mu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("no assertion signing key with kid %q at %s", kid, v.jwksURL)
+	defer v.mu.Unlock()
+	now := v.now()
+	v.lastFetch, v.fetchErr, v.fetching = now, err, nil
+	if err == nil {
+		v.keys, v.fetchedAt = keys, now
 	}
-	return &k, nil
+	close(done)
 }
 
 func (v *Verifier) fetchJWKS(ctx context.Context) (map[string]jose.JSONWebKey, error) {

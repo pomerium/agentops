@@ -3,6 +3,8 @@ package agentlink_test
 import (
 	"context"
 	"errors"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,5 +130,52 @@ func TestBindAdvisory(t *testing.T) {
 	}
 	if got := agentlink.BindAdvisory("10.0.0.5:8090"); got != "" {
 		t.Errorf("private bind should be quiet, got %q", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestConcurrentFirstVerificationsShareOneFetch(t *testing.T) {
+	idp := agentlinktest.NewIDP(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var fetches atomic.Int32
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if fetches.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return idp.HTTPClient().Transport.RoundTrip(r)
+	})}
+	v, err := agentlink.NewVerifier(idp.Issuer(),
+		agentlink.WithAudience(agentlinktest.Audience), agentlink.WithHTTPClient(hc))
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	raw := sign(t, idp, nil)
+
+	results := make(chan error, 2)
+	verify := func() {
+		_, err := v.Verify(context.Background(), raw)
+		results <- err
+	}
+	go verify()
+	<-entered
+	go verify()
+	select {
+	case err := <-results:
+		close(release)
+		t.Fatalf("a verification finished while the first JWKS fetch was still in flight: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Errorf("valid assertion rejected: %v", err)
+		}
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("JWKS fetched %d times, want 1", n)
 	}
 }

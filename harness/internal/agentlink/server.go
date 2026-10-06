@@ -191,6 +191,10 @@ func (s *Server) verify(ctx context.Context) (*Assertion, error) {
 		return nil, status.Error(codes.FailedPrecondition, "missing identity assertion")
 	}
 	a, err := s.verifier.Verify(ctx, values[0])
+	if errors.Is(err, ErrKeysUnavailable) {
+		s.log.Warn("harness: identity assertion not checked", "err", err)
+		return nil, status.Errorf(codes.Unavailable, "identity assertion not checked: %v", err)
+	}
 	if err != nil {
 		s.log.Error("harness: identity assertion rejected", "err", err)
 		return nil, status.Errorf(codes.FailedPrecondition, "identity assertion rejected: %v", err)

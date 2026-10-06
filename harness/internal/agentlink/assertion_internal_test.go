@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -20,6 +21,7 @@ type jwksServer struct {
 
 	mu   sync.Mutex
 	keys []jose.JSONWebKey
+	down bool
 	hits int
 }
 
@@ -29,8 +31,12 @@ func newJWKSServer(t *testing.T) *jwksServer {
 	j.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		j.mu.Lock()
 		j.hits++
-		set := jose.JSONWebKeySet{Keys: j.keys}
+		set, down := jose.JSONWebKeySet{Keys: j.keys}, j.down
 		j.mu.Unlock()
+		if down {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(set)
 	}))
 	t.Cleanup(j.srv.Close)
@@ -49,6 +55,12 @@ func (j *jwksServer) publish(t *testing.T, kids ...string) {
 	}
 	j.mu.Lock()
 	j.keys = keys
+	j.mu.Unlock()
+}
+
+func (j *jwksServer) setDown(down bool) {
+	j.mu.Lock()
+	j.down = down
 	j.mu.Unlock()
 }
 
@@ -95,8 +107,8 @@ func TestVerifierDropsWithdrawnKeys(t *testing.T) {
 	if _, err := v.key(ctx, "k1"); err != nil {
 		t.Fatalf("k1: %v", err)
 	}
-	if _, err := v.key(ctx, "unknown"); err == nil {
-		t.Fatal("an unknown kid was accepted")
+	if _, err := v.key(ctx, "unknown"); !errors.Is(err, ErrKeysUnavailable) {
+		t.Fatalf("unknown kid inside the refetch interval: err = %v, want the retryable ErrKeysUnavailable", err)
 	}
 	if n := j.fetches(); n != 1 {
 		t.Fatalf("JWKS fetched %d times, want 1: an unknown kid must not refetch inside the interval", n)
@@ -110,10 +122,37 @@ func TestVerifierDropsWithdrawnKeys(t *testing.T) {
 	if _, err := v.key(ctx, "k1"); err == nil {
 		t.Fatal("k1 is still trusted after a refresh that no longer publishes it")
 	}
+	clk.advance(jwksRefetchInterval)
+	if _, err := v.key(ctx, "k1"); err == nil || errors.Is(err, ErrKeysUnavailable) {
+		t.Fatalf("k1 after a fresh fetch without it: err = %v, want a definitive rejection", err)
+	}
 
 	j.publish(t, "k3")
 	clk.advance(jwksMaxAge)
 	if _, err := v.key(ctx, "k2"); err == nil {
 		t.Fatal("a cached key is still trusted after the JWKS withdrew it and the cache aged out")
+	}
+}
+
+func TestVerifierReportsAndThrottlesJWKSOutage(t *testing.T) {
+	j := newJWKSServer(t)
+	v, clk := newTestVerifier(t, j)
+	ctx := context.Background()
+
+	j.publish(t, "k1")
+	j.setDown(true)
+	for range 3 {
+		if _, err := v.key(ctx, "k1"); !errors.Is(err, ErrKeysUnavailable) {
+			t.Fatalf("err = %v, want ErrKeysUnavailable", err)
+		}
+	}
+	if n := j.fetches(); n != 1 {
+		t.Fatalf("JWKS fetched %d times during an outage, want 1 per refetch interval", n)
+	}
+
+	j.setDown(false)
+	clk.advance(jwksRefetchInterval)
+	if _, err := v.key(ctx, "k1"); err != nil {
+		t.Fatalf("k1 after the outage: %v", err)
 	}
 }
