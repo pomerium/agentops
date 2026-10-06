@@ -208,36 +208,52 @@ func (s *Service) sweepSuspended(ctx context.Context, sessions []sessionstore.Se
 		return
 	}
 	for _, sess := range sessions {
-		if sess.Status != api.StateSuspended {
-			continue
+		if sess.Status == api.StateSuspended && s.suspendedFor(sess) >= s.cfg.suspendedTTL {
+			s.releaseSuspended(ctx, sess.ID)
 		}
-
-		since := sess.SuspendedAt
-		if since.IsZero() {
-			since = sess.UpdatedAt
-		}
-		held := time.Since(since)
-		if held < s.cfg.suspendedTTL {
-			continue
-		}
-		s.log.InfoContext(ctx, "releasing a suspended session's workspace",
-			"session", sess.ID, "claim", sess.SandboxClaimName,
-			"suspended_for", held.Round(time.Second).String(),
-			"suspended_ttl", s.cfg.suspendedTTL.String())
-		if sess.SandboxClaimName != "" {
-			if err := s.launcher.Teardown(ctx, sess.SandboxClaimName); err != nil {
-				s.log.WarnContext(ctx, "sweep: releasing a suspended workspace failed",
-					"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
-				continue
-			}
-		}
-
-		s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_Released{Released: &pb.Released{
-			RetainedFor: durationpb.New(s.cfg.suspendedTTL),
-		}}})
-		s.endSession(ctx, sess.ID, api.StateSuspended, api.EndExpired,
-			"the workspace retention window lapsed")
 	}
+}
+
+func (s *Service) suspendedFor(sess sessionstore.Session) time.Duration {
+	since := sess.SuspendedAt
+	if since.IsZero() {
+		since = sess.UpdatedAt
+	}
+	return time.Since(since)
+}
+
+func (s *Service) releaseSuspended(ctx context.Context, sessionID string) {
+	slot := &launchSlot{}
+	if !s.reserve(sessionID, slot) {
+		return
+	}
+	defer s.release(sessionID, slot)
+	sess, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		s.log.WarnContext(ctx, "sweep: could not read a suspended session", "session", sessionID, "err", err)
+		return
+	}
+	held := s.suspendedFor(sess)
+	if sess.Status != api.StateSuspended || held < s.cfg.suspendedTTL {
+		return
+	}
+	s.log.InfoContext(ctx, "releasing a suspended session's workspace",
+		"session", sess.ID, "claim", sess.SandboxClaimName,
+		"suspended_for", held.Round(time.Second).String(),
+		"suspended_ttl", s.cfg.suspendedTTL.String())
+	if sess.SandboxClaimName != "" {
+		if err := s.launcher.Teardown(ctx, sess.SandboxClaimName); err != nil {
+			s.log.WarnContext(ctx, "sweep: releasing a suspended workspace failed",
+				"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
+			return
+		}
+	}
+
+	s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_Released{Released: &pb.Released{
+		RetainedFor: durationpb.New(s.cfg.suspendedTTL),
+	}}})
+	s.endSession(ctx, sess.ID, api.StateSuspended, api.EndExpired,
+		"the workspace retention window lapsed")
 }
 
 func (s *Service) sweepAbsolute(ctx context.Context, sessions []sessionstore.Session) {
