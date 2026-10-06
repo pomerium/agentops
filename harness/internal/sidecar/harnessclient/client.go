@@ -100,6 +100,7 @@ type Client struct {
 	client agentlinkpb.AgentLinkServiceClient
 
 	statusCh   chan *agentlinkpb.Status
+	ioSlot     chan struct{}
 	configured sync.Once
 
 	mu       sync.Mutex
@@ -168,6 +169,7 @@ func New(cfg Config) (*Client, error) {
 		cfg: cfg, log: log, conn: conn,
 		client:   agentlinkpb.NewAgentLinkServiceClient(conn),
 		statusCh: make(chan *agentlinkpb.Status, 4),
+		ioSlot:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -500,6 +502,12 @@ func (c *Client) stopAgent() {
 }
 
 func (c *Client) pumpAgentIO(ctx context.Context, ag *AgentSession, lost chan<- error) {
+	select {
+	case c.ioSlot <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-c.ioSlot }()
 	if err := c.agentIO(ctx, ag); err != nil && ctx.Err() == nil {
 		select {
 		case lost <- err:
