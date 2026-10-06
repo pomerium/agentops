@@ -899,3 +899,70 @@ func TestSidecarThatStopsReadingIsLost(t *testing.T) {
 		}
 	}
 }
+
+func TestReadyWaitsForTheAttachCallback(t *testing.T) {
+	g := newTestLink(t, time.Hour, 3)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	handle, err := g.srv.Expect("run-callback-order", testSeal, nil,
+		agentlink.WithOnAttached(func(uint32, bool) {
+			close(entered)
+			<-release
+		}))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, _, err := g.attach(g.ctx(ctx, "run-callback-order", nil), 1, false)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("OnAttached never started")
+	}
+	if err := stream.Send(&agentlinkpb.SidecarFrame{
+		Msg: &agentlinkpb.SidecarFrame_Status{Status: &agentlinkpb.Status{State: agentlinkpb.Status_STATE_READY}},
+	}); err != nil {
+		t.Fatalf("send ready: %v", err)
+	}
+	ready := make(chan error, 1)
+	go func() { ready <- handle.AwaitReady(ctx) }()
+	select {
+	case err := <-ready:
+		t.Fatalf("READY was exposed before OnAttached returned: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := handle.SpawnAgent(ctx); err != nil {
+		t.Fatalf("SpawnAgent: %v", err)
+	}
+	frames := make(chan *agentlinkpb.ManagerFrame, 1)
+	go func() {
+		if f, err := stream.Recv(); err == nil {
+			frames <- f
+		}
+	}()
+	select {
+	case f := <-frames:
+		t.Fatalf("%v was sent before OnAttached returned", f)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unblock()
+	if err := <-ready; err != nil {
+		t.Fatalf("AwaitReady after OnAttached returned: %v", err)
+	}
+	select {
+	case f := <-frames:
+		if f.GetSpawn() == nil {
+			t.Fatalf("first frame after OnAttached = %v, want Spawn", f)
+		}
+	case <-ctx.Done():
+		t.Fatal("Spawn never arrived after OnAttached returned")
+	}
+}

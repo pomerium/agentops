@@ -328,19 +328,21 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 		pending, pendingSince = f, s.now()
 		sendCh <- f
 	}
-	directives := func() <-chan *agentlinkpb.ManagerFrame {
-		if pending != nil {
-			return nil
-		}
-		return live.send
-	}
-
 	var notified chan struct{}
+	var awaitNotified <-chan struct{}
+	settled := false
+	var held []*agentlinkpb.SidecarFrame
 	defer func() {
 		if notified != nil {
 			<-notified
 		}
 	}()
+	directives := func() <-chan *agentlinkpb.ManagerFrame {
+		if pending != nil || !settled {
+			return nil
+		}
+		return live.send
+	}
 
 	ticker := time.NewTicker(run.hbInterval)
 	defer ticker.Stop()
@@ -363,9 +365,21 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 				return fmt.Errorf("attach stream ended: %w", r.err)
 			}
 			live.touch(s.now())
+			if !settled {
+				held = append(held, r.frame)
+				continue
+			}
 			if err := s.handleSidecarFrame(ctx, run, r.frame); err != nil {
 				return err
 			}
+		case <-awaitNotified:
+			awaitNotified, settled = nil, true
+			for _, f := range held {
+				if err := s.handleSidecarFrame(ctx, run, f); err != nil {
+					return err
+				}
+			}
+			held = nil
 		case err := <-sentCh:
 			f := pending
 			pending = nil
@@ -377,6 +391,7 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 			case f.GetHelloAck() != nil:
 				run.markAttached()
 				notified = make(chan struct{})
+				awaitNotified = notified
 				go func(done chan struct{}) {
 					defer close(done)
 					run.notifyAttached(hello.GetAttempt(), hello.GetAgentRunning())
