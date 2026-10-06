@@ -52,9 +52,17 @@ func (f *fakeRuns) GetRun(context.Context, string) (*RunStatus, error) {
 
 func testClient(t *testing.T, srv *httptest.Server, tokenFile string, opts ...Option) *HTTPRunClient {
 	t.Helper()
+	opts = append([]Option{WithCAFile(writeCA(t, srv))}, opts...)
 	c, err := NewHTTPRunClient(srv.URL, srv.Listener.Addr().String(), tokenFile, opts...)
 	require.NoError(t, err)
 	return c
+}
+
+func writeCA(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
+	return p
 }
 
 func writeToken(t *testing.T, val string) string {
@@ -76,7 +84,7 @@ func minimalCreate() CreateRunRequest {
 func TestCreateRun_SendsRequestAndParsesResponse(t *testing.T) {
 	t.Parallel()
 	var gotAuth, gotPath, gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		b, _ := io.ReadAll(r.Body)
@@ -103,7 +111,7 @@ func TestCreateRun_SendsRequestAndParsesResponse(t *testing.T) {
 func TestCreateRun_ReReadsTokenFileEachCall(t *testing.T) {
 	t.Parallel()
 	var seen []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Header.Get("Authorization"))
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"run_id":"r","approval_url":"","expires_at":""}`)
@@ -133,7 +141,7 @@ func TestCreateRun_ErrorMapping(t *testing.T) {
 		{http.StatusInternalServerError, false},
 	}
 	for _, tc := range cases {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(tc.status)
 			_, _ = io.WriteString(w, "boom")
 		}))
@@ -148,7 +156,7 @@ func TestCreateRun_ErrorMapping(t *testing.T) {
 func TestGetRun_ParsesFields(t *testing.T) {
 	t.Parallel()
 	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
 		_, _ = io.WriteString(w, `{"run_id":"run 1","state":"approved","bound":true,"revoked":false,"expires_at":"2026-07-20T13:00:00Z"}`)
 	}))
@@ -165,7 +173,7 @@ func TestGetRun_ParsesFields(t *testing.T) {
 
 func TestGetRun_RetryableOn503(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
@@ -181,14 +189,12 @@ func TestTLSVerification(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := testClient(t, srv, writeToken(t, "t")).GetRun(context.Background(), "run-1")
+	untrusted, err := NewHTTPRunClient(srv.URL, srv.Listener.Addr().String(), writeToken(t, "t"))
+	require.NoError(t, err)
+	_, err = untrusted.GetRun(context.Background(), "run-1")
 	require.Error(t, err, "an unknown CA must be rejected (no InsecureSkipVerify)")
 
-	caFile := filepath.Join(t.TempDir(), "ca.pem")
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	require.NoError(t, os.WriteFile(caFile, pemBytes, 0o600))
-
-	st, err := testClient(t, srv, writeToken(t, "t"), WithCAFile(caFile)).GetRun(context.Background(), "run-1")
+	st, err := testClient(t, srv, writeToken(t, "t")).GetRun(context.Background(), "run-1")
 	require.NoError(t, err)
 	assert.Equal(t, "approved", st.State)
 }
@@ -221,4 +227,36 @@ func TestClampPrompt(t *testing.T) {
 	assert.True(t, strings.HasSuffix(gotMulti, marker))
 	assert.LessOrEqual(t, len(gotMulti), 4096)
 	assert.Equal(t, strings.Repeat("a", 4080)+marker, gotMulti)
+}
+
+func TestNewHTTPRunClient_RejectsPlaintext(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{"http://as.example", "as.example", "https://", "://bad"} {
+		_, err := NewHTTPRunClient(raw, "", writeToken(t, "workload-secret"))
+		assert.Errorf(t, err, "%q must be rejected", raw)
+	}
+}
+
+func TestRunClient_DoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+	leaked := make(chan string, 1)
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked <- r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{"state":"approved"}`)
+	}))
+	defer plain.Close()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	c, err := NewHTTPRunClient(srv.URL, "", writeToken(t, "workload-secret"), WithCAFile(writeCA(t, srv)))
+	require.NoError(t, err)
+	_, err = c.GetRun(context.Background(), "run-1")
+	require.Error(t, err)
+	select {
+	case got := <-leaked:
+		t.Fatalf("redirect was followed to %s with Authorization %q", plain.URL, got)
+	default:
+	}
 }

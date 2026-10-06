@@ -106,6 +106,10 @@ func NewHTTPRunClient(baseURL, dialAddr, tokenFile string, opts ...Option) (*HTT
 		opt(&o)
 	}
 
+	if u, err := url.Parse(baseURL); err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("agentic AS URL %q: must be an https URL", baseURL)
+	}
+
 	transport, err := pomeriumtls.Transport(dialAddr, o.caFile)
 	if err != nil {
 		return nil, err
@@ -114,7 +118,13 @@ func NewHTTPRunClient(baseURL, dialAddr, tokenFile string, opts ...Option) (*HTT
 	return &HTTPRunClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		tokenFile: tokenFile,
-		hc:        &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		hc: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 
