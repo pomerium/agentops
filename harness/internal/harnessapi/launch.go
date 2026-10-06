@@ -224,12 +224,13 @@ func (s *Service) activateAndRun(
 }
 
 func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opts launchOpts, claimName string, reason api.EndReason, detail string) {
+	ctx = context.WithoutCancel(ctx)
 	if opts.revive {
 		s.failRevive(ctx, sess, opts, api.ReasonReviveFailed, detail)
 		return
 	}
 	if claimName != "" {
-		if err := s.launcher.Teardown(context.WithoutCancel(ctx), claimName); err != nil {
+		if err := s.launcher.Teardown(ctx, claimName); err != nil {
 			s.log.WarnContext(ctx, "failed launch: teardown failed", "claim", claimName, "err", err)
 		}
 	}
@@ -237,8 +238,9 @@ func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opt
 }
 
 func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opts launchOpts, reason api.Reason, detail string) {
+	ctx = context.WithoutCancel(ctx)
 	if sess.SandboxClaimName != "" {
-		if err := s.launcher.Suspend(context.WithoutCancel(ctx), sess.SandboxClaimName); err != nil {
+		if err := s.launcher.Suspend(ctx, sess.SandboxClaimName); err != nil {
 			s.log.WarnContext(ctx, "could not put a revived sandbox back down; it may run until its lease lapses",
 				"session", sess.ID, "claim", sess.SandboxClaimName, "err", err)
 		}
