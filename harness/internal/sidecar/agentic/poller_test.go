@@ -205,3 +205,17 @@ func TestHTTPPoller_DoesNotFollowRedirects(t *testing.T) {
 	default:
 	}
 }
+
+func TestHTTPPoller_TruncatedResponseIsRetryable(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"access_token":`)
+	}))
+	defer srv.Close()
+
+	res := newTestPoller(t, srv, writeTokenFile(t, "sa")).Poll(context.Background())
+	assert.Equal(t, PollRetryable, res.Kind, res.Err)
+	assert.ErrorIs(t, res.Err, io.ErrUnexpectedEOF)
+}

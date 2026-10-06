@@ -83,7 +83,10 @@ func (p *HTTPPoller) Poll(ctx context.Context) PollResult {
 		return PollResult{Kind: PollRetryable, Err: err}
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return PollResult{Kind: PollRetryable, Err: fmt.Errorf("read token exchange response (%d): %w", resp.StatusCode, err)}
+	}
 	p.log.Debug("run token: exchange answered",
 		"status", resp.StatusCode, "duration", time.Since(started).Round(time.Millisecond))
 
