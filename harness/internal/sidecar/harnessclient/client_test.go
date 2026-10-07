@@ -765,3 +765,19 @@ func TestStderrNeverEntersACP(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestAnIdleLinkWaitsForTheManagersAdvertisedHeartbeat(t *testing.T) {
+	lost := make(chan error, 16)
+	r := newRig(t, agentlink.WithOnLost(func(err error) { lost <- err }))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r.start(ctx)
+	if err := r.handle.AwaitReady(ctx); err != nil {
+		t.Fatalf("AwaitReady: %v", err)
+	}
+	select {
+	case err := <-lost:
+		t.Fatalf("a healthy idle link was dropped: %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+}

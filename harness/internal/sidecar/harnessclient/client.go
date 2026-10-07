@@ -299,7 +299,7 @@ func (c *Client) session(parent context.Context, attempt uint32, bearer string) 
 	if ack == nil {
 		return status.Error(codes.FailedPrecondition, "the first manager frame must be HelloAck")
 	}
-	interval, missLimit := c.heartbeatContract(ack)
+	interval, missLimit, deadline := c.heartbeatContract(ack)
 	c.log.Info("harness attached", "attempt", attempt, "heartbeat", interval.String(), "miss_limit", missLimit,
 		"endpoints", len(ack.GetConfig().GetEndpoints()))
 
@@ -312,16 +312,17 @@ func (c *Client) session(parent context.Context, attempt uint32, bearer string) 
 		return err
 	}
 
-	return c.serve(ctx, parent, stream, interval, missLimit)
+	return c.serve(ctx, parent, stream, interval, deadline)
 }
 
-func (c *Client) heartbeatContract(ack *agentlinkpb.ManagerHelloAck) (time.Duration, uint32) {
-	interval := c.cfg.HeartbeatInterval
-	if interval <= 0 {
-		interval = time.Duration(ack.GetHeartbeatSeconds()) * time.Second
+func (c *Client) heartbeatContract(ack *agentlinkpb.ManagerHelloAck) (time.Duration, uint32, time.Duration) {
+	advertised := time.Duration(ack.GetHeartbeatSeconds()) * time.Second
+	if advertised <= 0 {
+		advertised = 20 * time.Second
 	}
-	if interval <= 0 {
-		interval = 20 * time.Second
+	interval := advertised
+	if c.cfg.HeartbeatInterval > 0 {
+		interval = min(c.cfg.HeartbeatInterval, advertised)
 	}
 	missLimit := c.cfg.HeartbeatMissLimit
 	if missLimit == 0 {
@@ -330,11 +331,11 @@ func (c *Client) heartbeatContract(ack *agentlinkpb.ManagerHelloAck) (time.Durat
 	if missLimit == 0 {
 		missLimit = 3
 	}
-	return interval, missLimit
+	return interval, missLimit, time.Duration(missLimit) * advertised
 }
 
 func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLinkService_AttachClient,
-	interval time.Duration, missLimit uint32,
+	interval, deadline time.Duration,
 ) error {
 	type recvResult struct {
 		frame *agentlinkpb.ManagerFrame
@@ -359,7 +360,6 @@ func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLink
 	defer ticker.Stop()
 	lastRecv := time.Now()
 	lastSent := time.Now()
-	deadline := time.Duration(missLimit) * interval
 
 	var agentExited, exitAcked <-chan AgentExit
 	var watched *AgentSession
