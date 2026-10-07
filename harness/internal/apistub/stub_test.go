@@ -401,6 +401,38 @@ func TestZeroValuedEvent(t *testing.T) {
 	}
 }
 
+func TestPermissionRefusesAnOptionItDidNotOffer(t *testing.T) {
+	ctx := context.Background()
+	c := serve(t)(nil)
+
+	view := create(ctx, t, c, &pb.CreateSessionRequest{
+		ConversationRef: "conv-1", InitialPrompt: apistub.PromptPermission,
+	})
+	ref := byID(view.GetId())
+
+	var req *pb.PermissionRequest
+	for _, ev := range listEvents(ctx, t, c, ref) {
+		if p := ev.GetPermissionRequest(); p != nil {
+			req = p
+		}
+	}
+	if req.GetRequestId() == "" {
+		t.Fatal("no permission_request on the log")
+	}
+
+	for _, option := range []string{"", "not-offered"} {
+		answer := &pb.RespondPermissionRequest{Ref: ref, RequestId: req.GetRequestId(), OptionId: option}
+		if _, err := c.RespondPermission(ctx, answer); !errors.Is(err, api.ErrInvalidArgument) {
+			t.Errorf("answering with option %q: %v, want ErrInvalidArgument", option, err)
+		}
+	}
+
+	answer := &pb.RespondPermissionRequest{Ref: ref, RequestId: req.GetRequestId(), OptionId: "allow"}
+	if _, err := c.RespondPermission(ctx, answer); err != nil {
+		t.Fatalf("the request did not stay open after a refused answer: %v", err)
+	}
+}
+
 func TestPermissionRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	c := serve(t)(nil)
