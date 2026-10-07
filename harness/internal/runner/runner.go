@@ -36,6 +36,7 @@ type Option func(*options)
 type options struct {
 	command   []string
 	start     StartFunc
+	pipe      func() (*os.File, *os.File, error)
 	killDelay time.Duration
 	logger    *slog.Logger
 }
@@ -67,6 +68,9 @@ func New(opts ...Option) *Service {
 	}
 	if o.start == nil {
 		o.start = startAndWait
+	}
+	if o.pipe == nil {
+		o.pipe = os.Pipe
 	}
 	if o.killDelay <= 0 {
 		o.killDelay = defaultKillDelay
@@ -314,15 +318,27 @@ func (p *agentProc) pid() int {
 }
 
 func (s *Service) spawn() (*agentProc, error) {
-	inR, inW, err := os.Pipe()
+	var opened []*os.File
+	pipe := func() (*os.File, *os.File, error) {
+		r, w, err := s.cfg.pipe()
+		if err != nil {
+			for _, f := range opened {
+				_ = f.Close()
+			}
+			return nil, nil, err
+		}
+		opened = append(opened, r, w)
+		return r, w, nil
+	}
+	inR, inW, err := pipe()
 	if err != nil {
 		return nil, err
 	}
-	outR, outW, err := os.Pipe()
+	outR, outW, err := pipe()
 	if err != nil {
 		return nil, err
 	}
-	errR, errW, err := os.Pipe()
+	errR, errW, err := pipe()
 	if err != nil {
 		return nil, err
 	}
