@@ -38,6 +38,9 @@ func (i *identityInterceptor) admit(ctx context.Context, h http.Header, procedur
 	if err != nil {
 		i.log.WarnContext(ctx, "refusing an unidentified client API request",
 			"procedure", procedure, "err", err)
+		if ce := new(connect.Error); errors.As(err, &ce) {
+			return nil, ce
+		}
 		return nil, connect.NewError(connect.CodeUnauthenticated, err)
 	}
 	if i.seen.first(clientID) {

@@ -8,6 +8,7 @@ require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-logr/logr v1.4.4
 	github.com/google/go-cmp v0.7.0
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/prometheus/client_golang v1.24.1
@@ -70,7 +71,6 @@ require (
 	github.com/fatih/structtag v1.2.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.1 // indirect
-	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v1.0.0 // indirect
 	github.com/go-openapi/jsonreference v1.0.0 // indirect

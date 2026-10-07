@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+
+WORKDIR /src
+
+COPY harness/go.mod harness/go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    GOWORK=off go mod download
+
+ARG TARGETOS TARGETARCH
+
+COPY harness/ ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOWORK=off GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/harness ./cmd/harness
+
+RUN install -d -o 65532 -g 65532 -m 0755 /out/data
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build /out/harness /usr/local/bin/harness
+
+USER 65532:65532
+
+EXPOSE 8090 8081 9090
+
+ENTRYPOINT ["/usr/local/bin/harness"]
