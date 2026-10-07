@@ -1042,3 +1042,43 @@ func TestSpawnAgentNamesTheRunsStream(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentIOFromAnEarlierIncarnationOfTheRunIsRejected(t *testing.T) {
+	g := newTestLink(t, time.Hour, 3)
+	first, err := g.srv.Expect("run-again", testSeal, nil)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	stale := agentlink.StreamID(g.srv, "run-again")
+	g.srv.Forget(first.RunID())
+
+	handle, err := g.srv.Expect("run-again", testSeal, nil)
+	if err != nil {
+		t.Fatalf("Expect again: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+	if bytes.Equal(agentlink.StreamID(g.srv, "run-again"), stale) {
+		t.Fatal("the run kept its stream ID across incarnations")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, err := g.attach(g.ctx(ctx, "run-again", nil), 1, false); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if err := handle.AwaitAttach(ctx); err != nil {
+		t.Fatalf("AwaitAttach: %v", err)
+	}
+	stream, err := g.client.AgentIO(g.ctx(ctx, "run-again", nil))
+	if err != nil {
+		t.Fatalf("AgentIO: %v", err)
+	}
+	if err := stream.Send(&agentlinkpb.AgentIOFrame{
+		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{StreamId: stale}},
+	}); err != nil {
+		t.Fatalf("send open: %v", err)
+	}
+	if _, err := stream.Recv(); codeOf(err) != codes.FailedPrecondition {
+		t.Fatalf("an Open at offset 0 for the earlier incarnation got %v (code %s), want FailedPrecondition", err, codeOf(err))
+	}
+}
