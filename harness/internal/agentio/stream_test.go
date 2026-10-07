@@ -1,6 +1,7 @@
 package agentio
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 	"time"
@@ -182,4 +183,19 @@ func collect(frames []*agentlinkpb.AgentIOFrame) string {
 		out = append(out, f.GetData().GetPayload()...)
 	}
 	return string(out)
+}
+
+func TestCheckStreamID(t *testing.T) {
+	open := func(id string) *agentlinkpb.AgentIOOpen { return &agentlinkpb.AgentIOOpen{StreamId: []byte(id)} }
+	if err := CheckStreamID(open("a"), []byte("a")); err != nil {
+		t.Errorf("matching IDs: %v", err)
+	}
+	for _, tc := range []struct{ got, want string }{{"b", "a"}, {"", "a"}, {"", ""}, {"a", ""}} {
+		if err := CheckStreamID(open(tc.got), []byte(tc.want)); !errors.Is(err, ErrStreamMismatch) {
+			t.Errorf("CheckStreamID(%q, %q) = %v, want ErrStreamMismatch", tc.got, tc.want, err)
+		}
+	}
+	if a, b := NewStreamID(), NewStreamID(); len(a) == 0 || bytes.Equal(a, b) {
+		t.Errorf("NewStreamID gave %q then %q, want two distinct non-empty IDs", a, b)
+	}
 }

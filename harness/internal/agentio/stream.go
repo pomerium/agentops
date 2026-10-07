@@ -1,7 +1,9 @@
 package agentio
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +21,8 @@ const (
 )
 
 var ErrClosed = errors.New("agent io closed")
+
+var ErrStreamMismatch = errors.New("agentio stream mismatch")
 
 var errStopped = errors.New("agentio delivery stopped")
 
@@ -266,8 +270,19 @@ func AckFrame(offset uint64) *agentlinkpb.AgentIOFrame {
 	}
 }
 
-func OpenFrame(offset uint64) *agentlinkpb.AgentIOFrame {
+func OpenFrame(offset uint64, streamID []byte) *agentlinkpb.AgentIOFrame {
 	return &agentlinkpb.AgentIOFrame{
-		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{Consumed: offset}},
+		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{Consumed: offset, StreamId: streamID}},
 	}
+}
+
+func NewStreamID() []byte {
+	return []byte(rand.Text())
+}
+
+func CheckStreamID(open *agentlinkpb.AgentIOOpen, want []byte) error {
+	if len(want) == 0 || !bytes.Equal(open.GetStreamId(), want) {
+		return fmt.Errorf("%w: agentio open names stream %q, want %q", ErrStreamMismatch, open.GetStreamId(), want)
+	}
+	return nil
 }
