@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
@@ -105,15 +106,69 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 		}
 	}()
 
+	type chunk struct {
+		seq     uint64
+		payload []byte
+	}
+	var (
+		qmu    sync.Mutex
+		queue  []chunk
+		queued int
+	)
+	queuedWake := make(chan struct{}, 1)
+	delivered := make(chan struct{}, 1)
+	deliverStop := make(chan struct{})
+	deliverDone := make(chan struct{})
+	signal := func(c chan struct{}) {
+		select {
+		case c <- struct{}{}:
+		default:
+		}
+	}
+	defer func() {
+		close(deliverStop)
+		<-deliverDone
+	}()
+	go func() {
+		defer close(deliverDone)
+		for {
+			qmu.Lock()
+			if len(queue) == 0 {
+				qmu.Unlock()
+				select {
+				case <-queuedWake:
+					continue
+				case <-deliverStop:
+					return
+				}
+			}
+			c := queue[0]
+			qmu.Unlock()
+			if err := s.deliver(ctx, deliverStop, c.seq, c.payload); err != nil {
+				if !errors.Is(err, errStopped) {
+					report(err)
+				}
+				return
+			}
+			qmu.Lock()
+			queue = queue[1:]
+			queued -= len(c.payload)
+			qmu.Unlock()
+			signal(delivered)
+		}
+	}()
+
 	ticker := time.NewTicker(AckInterval)
 	defer ticker.Stop()
-	var unacked uint64
+	received := s.Consumed()
+	lastAck := received
 	flushAck := func() bool {
-		if unacked == 0 {
+		c := s.Consumed()
+		if c == lastAck {
 			return true
 		}
-		unacked = 0
-		return push(AckFrame(s.Consumed()))
+		lastAck = c
+		return push(AckFrame(c))
 	}
 
 	for {
@@ -125,26 +180,34 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 			switch {
 			case r.frame.GetData() != nil:
 				d := r.frame.GetData()
-				if len(d.GetPayload()) > FrameMax {
+				n := len(d.GetPayload())
+				if n > FrameMax {
 					return fmt.Errorf("%w: data frame of %d bytes exceeds the %d limit",
-						ErrProtocol, len(d.GetPayload()), FrameMax)
+						ErrProtocol, n, FrameMax)
 				}
-				if err := s.deliver(ctx, o.stop, d.GetSeq(), d.GetPayload()); err != nil {
-					if errors.Is(err, errStopped) {
-						return nil
-					}
-					return err
+				if want := received + uint64(n); d.GetSeq() != want {
+					return fmt.Errorf("%w: agentio data seq %d is not contiguous (expected %d)", ErrProtocol, d.GetSeq(), want)
 				}
-				unacked += uint64(len(d.GetPayload()))
-				if unacked >= AckBytes && !flushAck() {
-					return nil
+				qmu.Lock()
+				if queued+n > ReplayMax+FrameMax {
+					qmu.Unlock()
+					return fmt.Errorf("%w: the peer sent more than %d unacknowledged bytes", ErrProtocol, ReplayMax+FrameMax)
 				}
+				queue = append(queue, chunk{seq: d.GetSeq(), payload: d.GetPayload()})
+				queued += n
+				qmu.Unlock()
+				received = d.GetSeq()
+				signal(queuedWake)
 			case r.frame.GetAck() != nil:
 				if err := s.Ack(r.frame.GetAck().GetConsumed()); err != nil {
 					return fmt.Errorf("%w: %w", ErrProtocol, err)
 				}
 			case r.frame.GetOpen() != nil:
 				return fmt.Errorf("%w: a second Open on one AgentIO stream", ErrProtocol)
+			}
+		case <-delivered:
+			if s.Consumed()-lastAck >= AckBytes && !flushAck() {
+				return nil
 			}
 		case <-ticker.C:
 			if !flushAck() {

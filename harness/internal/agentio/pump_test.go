@@ -112,3 +112,40 @@ func pumpGoroutines() int {
 	buf := make([]byte, 1<<20)
 	return strings.Count(string(buf[:runtime.Stack(buf, true)]), "created by github.com/pomerium/agentops/harness/internal/agentio.(*Stream).Pump")
 }
+
+func TestAcksAreHandledWhileTheAgentIsNotReadingStdin(t *testing.T) {
+	s := New()
+	defer s.Close(nil)
+	s.Record([]byte("stdout"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stdin := []byte("stdin the agent never reads")
+	frames := append(DataFrames(stdin, uint64(len(stdin))), AckFrame(6))
+	go func() { _ = s.Pump(ctx, newScriptedTransport(ctx, frames...), 0) }()
+
+	for {
+		s.mu.Lock()
+		acked := s.outAcked
+		s.mu.Unlock()
+		if acked == 6 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("an ack waited behind stdin the agent was not reading; the agent's stdout would block once the replay buffer filled")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestAPeerPastItsReplayCapIsAProtocolViolation(t *testing.T) {
+	s := New()
+	defer s.Close(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	flood := make([]byte, ReplayMax+2*FrameMax)
+	err := s.Pump(ctx, newScriptedTransport(ctx, DataFrames(flood, uint64(len(flood)))...), 0)
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Pump = %v, want ErrProtocol", err)
+	}
+}
