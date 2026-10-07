@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package agentlink.v1;
+
+option go_package = "github.com/pomerium/agentops/harness/internal/agentlink/pb;agentlinkpb";
+
+// AgentLinkService connects the manager to the sidecar in a sandbox pod.
+//
+// The manager serves this service. The sidecar dials it through a Pomerium
+// route and uses the agentic run token as its bearer token. The sidecar is the
+// gRPC client of each RPC. The manager sends its directives on the streams that
+// the sidecar opens.
+//
+// The manager gets the run ID and the pod identity only from the
+// X-Pomerium-Jwt-Assertion header. Messages do not carry identity. If the
+// asserted pod is not the pod of the run, the manager refuses the stream.
+service AgentLinkService {
+  // Attach is the control stream of a run. A run has one live Attach stream.
+  // The manager refuses a second one. Attach carries heartbeats, status and
+  // directives. After a drop, the sidecar opens a new Attach stream with
+  // backoff.
+  rpc Attach(stream SidecarFrame) returns (stream ManagerFrame);
+
+  // AgentIO carries the ACP bytes between the manager and the stdio of the
+  // agent. The sidecar opens it after SpawnAgent. After a drop, the sidecar
+  // opens it again and both sides resume. A run has one live AgentIO stream. A
+  // new stream replaces the old one.
+  rpc AgentIO(stream AgentIOFrame) returns (stream AgentIOFrame);
+}
+
+message SidecarFrame {
+  oneof msg {
+    SidecarHello hello = 1; // first frame of each stream, sent once
+    Status status = 2; // state changes and heartbeats
+    AgentExited exited = 3; // the agent process stopped
+  }
+}
+
+message ManagerFrame {
+  oneof msg {
+    ManagerHelloAck hello_ack = 1; // first frame of each stream, sent once
+    SpawnAgent spawn = 2; // start the agent
+    // Ends the session. The sidecar stops the agent and envoy. Then it waits
+    // until the pod is deleted. It does not exit, because the kubelet restarts
+    // a container that exits. The manager deletes the pod.
+    Shutdown shutdown = 3;
+    Heartbeat heartbeat = 4; // the manager is alive
+  }
+}
+
+message Heartbeat {}
+
+message SidecarHello {
+  uint32 protocol_version = 1; // 1 is the only version
+  // Counts the Attach streams since the pod started. The first is 1. Use it
+  // only for logs and metrics.
+  uint32 attempt = 2;
+  // True on a new Attach stream if the agent survived the drop.
+  bool agent_running = 3;
+}
+
+message ManagerHelloAck {
+  uint32 protocol_version = 1;
+  // The sidecar sends Status at least once in each interval. The manager
+  // declares the link dead after heartbeat_miss_limit intervals without a
+  // frame.
+  uint32 heartbeat_seconds = 2; // default 20
+  uint32 heartbeat_miss_limit = 3; // default 3
+  SandboxConfig config = 4;
+}
+
+// SandboxConfig is the configuration for one session. A warm-pool pod starts
+// before its session exists, so it gets this configuration from the manager.
+// The sidecar applies it once. A new Attach stream sends it again. The sidecar
+// ignores it, because envoy is already running.
+//
+// Endpoints that are the same for each session stay in the env of the pod.
+// The sidecar uses both sets. If one name is in both sets, the sidecar refuses
+// the configuration.
+message SandboxConfig {
+  repeated ProxiedEndpoint endpoints = 1;
+}
+
+// ProxiedEndpoint is a loopback listener that envoy serves to the agent. Envoy
+// sends each request to upstream_url and adds the agentic run token. The agent
+// does not see a credential.
+message ProxiedEndpoint {
+  string name = 1;
+  uint32 listen_port = 2;
+  string upstream_url = 3;
+  // The host:port that envoy dials instead of the host of upstream_url. SNI
+  // and Host still come from upstream_url. Use it when the public host name
+  // does not resolve in the cluster.
+  string dial_address = 4;
+}
+
+message Status {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_STARTING = 1; // envoy is starting
+    STATE_READY = 2; // envoy serves; this is also the heartbeat
+    STATE_ERROR = 3; // the sidecar failed; it does not recover
+  }
+  State state = 1;
+  // Set on STATE_ERROR. Examples: envoy_exited, runner_unreachable,
+  // token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch.
+  string reason = 2;
+}
+
+// AgentExited tells the manager that the agent process stopped. The sidecar
+// sends it after the manager acks all output of the agent.
+message AgentExited {
+  int32 exit_code = 1;
+}
+
+// SpawnAgent starts the agent through the runner. The sidecar starts one agent
+// at most.
+message SpawnAgent {
+  // The ID of the AgentIO byte stream. The manager makes a new random ID for
+  // each run. Each AgentIOOpen must contain it.
+  bytes stream_id = 1;
+}
+
+message Shutdown {
+  string reason = 1;
+}
+
+// AgentIOFrame carries the ACP bytes. Both directions use the same rules.
+//
+// Each side counts the bytes that it sends. The first byte is 1. Each side
+// acks the bytes that it gets from its peer. A sender keeps the bytes that the
+// peer did not ack. It keeps at most 8 MiB plus one frame. When it has that
+// many, it stops until the peer acks. If a receiver gets more, it ends the
+// stream with a protocol error.
+//
+// On each open, each side sends Open with the last byte that it consumed. The
+// peer then sends again all bytes after that byte. If the peer no longer has
+// them, the stream ends with an error. A frame carries at most 64 KiB.
+message AgentIOFrame {
+  oneof msg {
+    AgentIOOpen open = 1; // first frame of each side, sent once
+    AgentIOData data = 2;
+    AgentIOAck ack = 3;
+  }
+}
+
+message AgentIOOpen {
+  // The last byte of the peer that this side consumed. The peer sends again
+  // from the byte after it.
+  uint64 consumed = 1;
+  // Must be equal to SpawnAgent.stream_id. If it is different, the offsets are
+  // for a different stream, and the stream ends with an error.
+  bytes stream_id = 2;
+}
+
+message AgentIOData {
+  uint64 seq = 1; // the number of the last byte in payload
+  bytes payload = 2;
+}
+
+message AgentIOAck {
+  // The last byte that this side consumed. It is cumulative. Each side acks
+  // after each 512 KiB of new bytes, and at least every 500 ms while new bytes
+  // arrive.
+  uint64 consumed = 1;
+}
