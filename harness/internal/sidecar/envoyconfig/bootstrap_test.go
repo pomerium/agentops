@@ -1,0 +1,354 @@
+package envoyconfig_test
+
+import (
+	"testing"
+
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcmv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	"github.com/pomerium/agentops/harness/internal/sidecar/envoyconfig"
+)
+
+func mustBuild(t *testing.T, eps []envoyconfig.Endpoint) ( //nolint:unparam
+	listeners []*listenerv3.Listener, clusters []*clusterv3.Cluster,
+) {
+	t.Helper()
+	b, err := envoyconfig.BuildBootstrap(eps, "/tmp/sidecar-admin.sock", "", "")
+	if err != nil {
+		t.Fatalf("BuildBootstrap: %v", err)
+	}
+	return b.StaticResources.Listeners, b.StaticResources.Clusters
+}
+
+func unpackHCM(t *testing.T, l *listenerv3.Listener) *hcmv3.HttpConnectionManager {
+	t.Helper()
+	if len(l.FilterChains) != 1 || len(l.FilterChains[0].Filters) != 1 {
+		t.Fatalf("listener %s: expected exactly one filter chain with one filter", l.Name)
+	}
+	var hcm hcmv3.HttpConnectionManager
+	if err := l.FilterChains[0].Filters[0].GetTypedConfig().UnmarshalTo(&hcm); err != nil {
+		t.Fatalf("unpack HCM: %v", err)
+	}
+	return &hcm
+}
+
+func soleRoute(t *testing.T, hcm *hcmv3.HttpConnectionManager) *routev3.Route {
+	t.Helper()
+	rc := hcm.GetRouteConfig()
+	if rc == nil {
+		t.Fatal("HCM has no inline route config")
+	}
+	if len(rc.VirtualHosts) != 1 {
+		t.Fatalf("expected 1 virtual host, got %d", len(rc.VirtualHosts))
+	}
+	vh := rc.VirtualHosts[0]
+	if len(vh.Domains) != 1 || vh.Domains[0] != "*" {
+		t.Errorf("vhost domains = %v, want [*]", vh.Domains)
+	}
+	if len(vh.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(vh.Routes))
+	}
+	return vh.Routes[0]
+}
+
+func TestBuildBootstrapHTTPSUpstream(t *testing.T) {
+	t.Parallel()
+	listeners, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name:        "anthropic",
+		ListenPort:  9999,
+		UpstreamURL: "https://api.anthropic.com",
+		Headers:     map[string]string{"x-api-key": "sk-secret", "anthropic-beta": "b"},
+	}})
+
+	if len(listeners) != 1 || len(clusters) != 1 {
+		t.Fatalf("got %d listeners, %d clusters; want 1 each", len(listeners), len(clusters))
+	}
+
+	addr := listeners[0].Address.GetSocketAddress()
+	if addr.GetAddress() != "127.0.0.1" {
+		t.Errorf("listener address = %q, want 127.0.0.1", addr.GetAddress())
+	}
+	if addr.GetPortValue() != 9999 {
+		t.Errorf("listener port = %d, want 9999", addr.GetPortValue())
+	}
+
+	hcm := unpackHCM(t, listeners[0])
+	if n := len(hcm.HttpFilters); n != 1 {
+		t.Fatalf("got %d http filters, want 1 (router)", n)
+	}
+	if hcm.HttpFilters[0].Name != "envoy.filters.http.router" {
+		t.Errorf("http filter = %q, want envoy.filters.http.router", hcm.HttpFilters[0].Name)
+	}
+	if hcm.HttpFilters[0].GetTypedConfig() == nil {
+		t.Error("router filter missing typed config")
+	}
+
+	route := soleRoute(t, hcm)
+	if route.Match.GetPrefix() != "/" {
+		t.Errorf("route match prefix = %q, want /", route.Match.GetPrefix())
+	}
+	action := route.GetRoute()
+	if action.GetCluster() != clusters[0].Name {
+		t.Errorf("route cluster = %q, want %q", action.GetCluster(), clusters[0].Name)
+	}
+	if action.GetHostRewriteLiteral() != "api.anthropic.com" {
+		t.Errorf("host rewrite = %q, want api.anthropic.com", action.GetHostRewriteLiteral())
+	}
+	if action.Timeout == nil || action.Timeout.AsDuration() != 0 {
+		t.Errorf("route timeout = %v, want explicit 0s", action.Timeout)
+	}
+	if action.IdleTimeout == nil || action.IdleTimeout.AsDuration() != 0 {
+		t.Errorf("route idle timeout = %v, want explicit 0s", action.IdleTimeout)
+	}
+
+	hdrs := route.RequestHeadersToAdd
+	if len(hdrs) != 2 {
+		t.Fatalf("got %d injected headers, want 2", len(hdrs))
+	}
+	if hdrs[0].Header.Key != "anthropic-beta" || hdrs[1].Header.Key != "x-api-key" {
+		t.Errorf("header order = [%s %s], want sorted [anthropic-beta x-api-key]", hdrs[0].Header.Key, hdrs[1].Header.Key)
+	}
+	if hdrs[1].Header.Value != "sk-secret" {
+		t.Errorf("x-api-key value = %q, want sk-secret", hdrs[1].Header.Value)
+	}
+	for _, h := range hdrs {
+		if h.AppendAction != corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD {
+			t.Errorf("header %s append action = %v, want OVERWRITE_IF_EXISTS_OR_ADD", h.Header.Key, h.AppendAction)
+		}
+	}
+
+	c := clusters[0]
+	if c.GetType() != clusterv3.Cluster_LOGICAL_DNS {
+		t.Errorf("cluster type = %v, want LOGICAL_DNS", c.GetType())
+	}
+	ep := c.LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetAddress() != "api.anthropic.com" || ep.GetPortValue() != 443 {
+		t.Errorf("upstream = %s:%d, want api.anthropic.com:443", ep.GetAddress(), ep.GetPortValue())
+	}
+	ts := c.TransportSocket
+	if ts == nil {
+		t.Fatal("https upstream must have a TLS transport socket")
+	}
+	var tlsCtx tlsv3.UpstreamTlsContext
+	if err := ts.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+		t.Fatalf("unpack tls context: %v", err)
+	}
+	if tlsCtx.Sni != "api.anthropic.com" {
+		t.Errorf("SNI = %q, want api.anthropic.com", tlsCtx.Sni)
+	}
+	if tlsCtx.GetCommonTlsContext().GetValidationContext() == nil {
+		t.Error("upstream TLS must validate the server certificate")
+	}
+}
+
+func TestBuildBootstrapHTTPUpstreamWithPort(t *testing.T) {
+	t.Parallel()
+	listeners, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name:        "echo",
+		ListenPort:  9100,
+		UpstreamURL: "http://echo.test.svc:8080",
+	}})
+
+	c := clusters[0]
+	if c.TransportSocket != nil {
+		t.Error("plain http upstream must not have a TLS transport socket")
+	}
+	ep := c.LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetAddress() != "echo.test.svc" || ep.GetPortValue() != 8080 {
+		t.Errorf("upstream = %s:%d, want echo.test.svc:8080", ep.GetAddress(), ep.GetPortValue())
+	}
+	if got := listeners[0].Address.GetSocketAddress().GetPortValue(); got != 9100 {
+		t.Errorf("listener port = %d, want 9100", got)
+	}
+}
+
+func TestBuildBootstrapHTTPDefaultPort(t *testing.T) {
+	t.Parallel()
+	_, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name: "plain", ListenPort: 9101, UpstreamURL: "http://example.com",
+	}})
+	ep := clusters[0].LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetPortValue() != 80 {
+		t.Errorf("default http port = %d, want 80", ep.GetPortValue())
+	}
+}
+
+func TestBuildBootstrapDialAddressOverride(t *testing.T) {
+	t.Parallel()
+	listeners, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name:        "zero-admin",
+		ListenPort:  9200,
+		UpstreamURL: "https://admin-mcp.example.com",
+		DialAddress: "gateway.gateway.svc.cluster.local:443",
+	}})
+
+	ep := clusters[0].LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetAddress() != "gateway.gateway.svc.cluster.local" || ep.GetPortValue() != 443 {
+		t.Errorf("dial = %s:%d, want gateway.gateway.svc.cluster.local:443", ep.GetAddress(), ep.GetPortValue())
+	}
+
+	var tlsCtx tlsv3.UpstreamTlsContext
+	if err := clusters[0].TransportSocket.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+		t.Fatalf("unpack tls context: %v", err)
+	}
+	if tlsCtx.Sni != "admin-mcp.example.com" {
+		t.Errorf("SNI = %q, want admin-mcp.example.com (public hostname, not dial target)", tlsCtx.Sni)
+	}
+
+	action := soleRoute(t, unpackHCM(t, listeners[0])).GetRoute()
+	if action.GetHostRewriteLiteral() != "admin-mcp.example.com" {
+		t.Errorf("host rewrite = %q, want admin-mcp.example.com", action.GetHostRewriteLiteral())
+	}
+}
+
+func TestBuildBootstrapDialAddressInheritsURLPort(t *testing.T) {
+	t.Parallel()
+	_, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name:        "svc",
+		ListenPort:  9201,
+		UpstreamURL: "https://api.example.com:8443",
+		DialAddress: "internal.svc.cluster.local",
+	}})
+	ep := clusters[0].LoadAssignment.Endpoints[0].LbEndpoints[0].GetEndpoint().Address.GetSocketAddress()
+	if ep.GetAddress() != "internal.svc.cluster.local" || ep.GetPortValue() != 8443 {
+		t.Errorf("dial = %s:%d, want internal.svc.cluster.local:8443 (port inherited from URL)", ep.GetAddress(), ep.GetPortValue())
+	}
+}
+
+func TestBuildBootstrapAdminAndMarshal(t *testing.T) {
+	t.Parallel()
+	b, err := envoyconfig.BuildBootstrap([]envoyconfig.Endpoint{
+		{Name: "a", ListenPort: 9100, UpstreamURL: "https://a.example.com"},
+		{Name: "b", ListenPort: 9101, UpstreamURL: "http://b.example.com:8080"},
+	}, "/run/sidecar/admin.sock", "", "")
+	if err != nil {
+		t.Fatalf("BuildBootstrap: %v", err)
+	}
+	if b.Admin.Address.GetSocketAddress() != nil {
+		t.Error("admin bound a TCP socket; want a unix-domain pipe unreachable over the pod network")
+	}
+	if got := b.Admin.Address.GetPipe().GetPath(); got != "/run/sidecar/admin.sock" {
+		t.Errorf("admin pipe path = %q, want /run/sidecar/admin.sock", got)
+	}
+	data, err := protojson.Marshal(b)
+	if err != nil {
+		t.Fatalf("protojson.Marshal: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("empty bootstrap JSON")
+	}
+}
+
+func TestBuildBootstrapErrors(t *testing.T) {
+	t.Parallel()
+	for name, eps := range map[string][]envoyconfig.Endpoint{
+		"bad scheme":     {{Name: "a", ListenPort: 9100, UpstreamURL: "ftp://x"}},
+		"no host":        {{Name: "a", ListenPort: 9100, UpstreamURL: "https://"}},
+		"zero port":      {{Name: "a", ListenPort: 0, UpstreamURL: "https://x"}},
+		"empty name":     {{Name: "", ListenPort: 9100, UpstreamURL: "https://x"}},
+		"duplicate name": {{Name: "a", ListenPort: 9100, UpstreamURL: "https://x"}, {Name: "a", ListenPort: 9101, UpstreamURL: "https://y"}},
+		"duplicate port": {{Name: "a", ListenPort: 9100, UpstreamURL: "https://x"}, {Name: "b", ListenPort: 9100, UpstreamURL: "https://y"}},
+	} {
+		if _, err := envoyconfig.BuildBootstrap(eps, "/tmp/admin.sock", "", ""); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestBuildBootstrapHTTPSUpstreamVerifiesCert(t *testing.T) {
+	t.Parallel()
+	_, clusters := mustBuild(t, []envoyconfig.Endpoint{{
+		Name: "a", ListenPort: 9100, UpstreamURL: "https://api.anthropic.com",
+		Headers: map[string]string{"x-api-key": "sk-secret"},
+	}})
+	ts := clusters[0].TransportSocket
+	if ts == nil {
+		t.Fatal("https upstream must have a TLS transport socket")
+	}
+	var tlsCtx tlsv3.UpstreamTlsContext
+	if err := ts.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+		t.Fatalf("unpack tls context: %v", err)
+	}
+	vc := tlsCtx.GetCommonTlsContext().GetValidationContext()
+	if vc == nil {
+		t.Fatal("upstream TLS must have a validation context")
+	}
+	if vc.GetTrustedCa() == nil && vc.GetSystemRootCerts() == nil {
+		t.Error("validation context verifies no CA: set trusted_ca or system_root_certs")
+	}
+}
+
+func TestBuildBootstrapHostRewriteKeepsNonDefaultPort(t *testing.T) {
+	t.Parallel()
+	listeners, _ := mustBuild(t, []envoyconfig.Endpoint{{
+		Name: "a", ListenPort: 9100, UpstreamURL: "https://mcp.internal:8443/sse",
+	}})
+	hcm := unpackHCM(t, listeners[0])
+	got := soleRoute(t, hcm).GetRoute().GetHostRewriteLiteral()
+	if got != "mcp.internal:8443" {
+		t.Errorf("host rewrite = %q, want mcp.internal:8443 (port preserved)", got)
+	}
+}
+
+func TestBuildBootstrapHostRewriteOmitsDefaultPort(t *testing.T) {
+	t.Parallel()
+	listeners, _ := mustBuild(t, []envoyconfig.Endpoint{{
+		Name: "a", ListenPort: 9100, UpstreamURL: "https://api.anthropic.com:443",
+	}})
+	hcm := unpackHCM(t, listeners[0])
+	got := soleRoute(t, hcm).GetRoute().GetHostRewriteLiteral()
+	if got != "api.anthropic.com" {
+		t.Errorf("host rewrite = %q, want api.anthropic.com (default port omitted)", got)
+	}
+}
+
+func TestBuildBootstrapHTTPSUpstreamVerifiesHostname(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		ep      envoyconfig.Endpoint
+		sanType tlsv3.SubjectAltNameMatcher_SanType
+		want    string
+	}{
+		"url host": {
+			ep:      envoyconfig.Endpoint{Name: "a", ListenPort: 9100, UpstreamURL: "https://api.example.com"},
+			sanType: tlsv3.SubjectAltNameMatcher_DNS, want: "api.example.com",
+		},
+		"dial address override": {
+			ep: envoyconfig.Endpoint{
+				Name: "a", ListenPort: 9100, UpstreamURL: "https://admin-mcp.example.com",
+				DialAddress: "gateway.gateway.svc.cluster.local:443",
+			},
+			sanType: tlsv3.SubjectAltNameMatcher_DNS, want: "admin-mcp.example.com",
+		},
+		"mixed case host": {
+			ep:      envoyconfig.Endpoint{Name: "a", ListenPort: 9100, UpstreamURL: "https://API.Example.com"},
+			sanType: tlsv3.SubjectAltNameMatcher_DNS, want: "api.example.com",
+		},
+		"ip host": {
+			ep:      envoyconfig.Endpoint{Name: "a", ListenPort: 9100, UpstreamURL: "https://10.0.0.7:8443"},
+			sanType: tlsv3.SubjectAltNameMatcher_IP_ADDRESS, want: "10.0.0.7",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, clusters := mustBuild(t, []envoyconfig.Endpoint{tc.ep})
+			var tlsCtx tlsv3.UpstreamTlsContext
+			if err := clusters[0].TransportSocket.GetTypedConfig().UnmarshalTo(&tlsCtx); err != nil {
+				t.Fatalf("unpack tls context: %v", err)
+			}
+			matchers := tlsCtx.GetCommonTlsContext().GetValidationContext().GetMatchTypedSubjectAltNames()
+			if len(matchers) != 1 {
+				t.Fatalf("got %d SAN matchers, want 1 for %s", len(matchers), tc.want)
+			}
+			m := matchers[0]
+			if m.GetSanType() != tc.sanType || m.GetMatcher().GetExact() != tc.want {
+				t.Errorf("SAN matcher = %v %q, want %v %q", m.GetSanType(), m.GetMatcher().GetExact(), tc.sanType, tc.want)
+			}
+		})
+	}
+}
