@@ -26,12 +26,18 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// AgentRunnerService is served by the agent-runner process (PID 1 of the agent
-// container) on a pod-local unix socket. It spawns and supervises exactly one
-// ACP agent process at a time and bridges its stdio. The sidecar is the only
-// client; the kernel guarantees ordered lossless delivery on a live socket, so
-// this hop carries no seq/ack.
+// AgentRunnerService starts the agent process and connects its stdio.
+//
+// The agent-runner serves this service. It is PID 1 of the agent container.
+// It listens on a unix socket in the pod. The sidecar is its only client. The
+// kernel delivers the bytes on the socket in order and without loss, so frames
+// have no sequence numbers or acks.
 type AgentRunnerServiceClient interface {
+	// Run starts one agent and connects its stdio to the stream. The runner runs
+	// one agent at a time. While an agent runs, it refuses a second Run.
+	//
+	// When the stream closes, the runner sends TERM to the agent. After 10
+	// seconds, it sends KILL.
 	Run(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunnerClientFrame, RunnerServerFrame], error)
 }
 
@@ -60,12 +66,18 @@ type AgentRunnerService_RunClient = grpc.BidiStreamingClient[RunnerClientFrame, 
 // All implementations must embed UnimplementedAgentRunnerServiceServer
 // for forward compatibility.
 //
-// AgentRunnerService is served by the agent-runner process (PID 1 of the agent
-// container) on a pod-local unix socket. It spawns and supervises exactly one
-// ACP agent process at a time and bridges its stdio. The sidecar is the only
-// client; the kernel guarantees ordered lossless delivery on a live socket, so
-// this hop carries no seq/ack.
+// AgentRunnerService starts the agent process and connects its stdio.
+//
+// The agent-runner serves this service. It is PID 1 of the agent container.
+// It listens on a unix socket in the pod. The sidecar is its only client. The
+// kernel delivers the bytes on the socket in order and without loss, so frames
+// have no sequence numbers or acks.
 type AgentRunnerServiceServer interface {
+	// Run starts one agent and connects its stdio to the stream. The runner runs
+	// one agent at a time. While an agent runs, it refuses a second Run.
+	//
+	// When the stream closes, the runner sends TERM to the agent. After 10
+	// seconds, it sends KILL.
 	Run(grpc.BidiStreamingServer[RunnerClientFrame, RunnerServerFrame]) error
 	mustEmbedUnimplementedAgentRunnerServiceServer()
 }

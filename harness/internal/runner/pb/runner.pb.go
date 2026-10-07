@@ -102,7 +102,7 @@ type isRunnerClientFrame_Msg interface {
 }
 
 type RunnerClientFrame_Spawn struct {
-	// Spawn is the first frame; it runs
+	// The first frame. The runner then runs
 	// `/bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'`.
 	Spawn *Spawn `protobuf:"bytes,1,opt,name=spawn,proto3,oneof"`
 }
@@ -112,8 +112,7 @@ type RunnerClientFrame_Stdin struct {
 }
 
 type RunnerClientFrame_Signal struct {
-	// Signal delivers a signal to the agent process. TERM-then-KILL escalation
-	// on stream close is the runner's job.
+	// Sends a signal to the process group of the agent.
 	Signal *Signal `protobuf:"bytes,3,opt,name=signal,proto3,oneof"`
 }
 
@@ -214,7 +213,7 @@ type isRunnerServerFrame_Msg interface {
 }
 
 type RunnerServerFrame_Started struct {
-	Started *Started `protobuf:"bytes,1,opt,name=started,proto3,oneof"` // pid
+	Started *Started `protobuf:"bytes,1,opt,name=started,proto3,oneof"`
 }
 
 type RunnerServerFrame_Stdout struct {
@@ -222,13 +221,13 @@ type RunnerServerFrame_Stdout struct {
 }
 
 type RunnerServerFrame_Stderr struct {
-	// stderr is forwarded verbatim; the sidecar logs it line-buffered and
-	// never mixes it into ACP.
+	// The sidecar writes stderr to its log. It does not mix stderr into ACP.
 	Stderr []byte `protobuf:"bytes,3,opt,name=stderr,proto3,oneof"`
 }
 
 type RunnerServerFrame_Exited struct {
-	Exited *Exited `protobuf:"bytes,4,opt,name=exited,proto3,oneof"` // terminal
+	// The last frame. The runner sends all output of the agent before it.
+	Exited *Exited `protobuf:"bytes,4,opt,name=exited,proto3,oneof"`
 }
 
 func (*RunnerServerFrame_Started) isRunnerServerFrame_Msg() {}

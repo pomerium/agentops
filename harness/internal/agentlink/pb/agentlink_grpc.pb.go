@@ -27,22 +27,26 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// AgentLinkService is served by the agentops manager and dialed BY the
-// sandbox sidecar through a Pomerium route (bearer: agentic run token). The
-// sidecar is the gRPC client for every RPC; the manager drives the sandbox by
-// sending directives on streams the sidecar opened (role inversion — the
-// GitLab agentk pattern). Identity is NEVER taken from message fields: the
-// manager derives run_id and the pod identity from the
-// X-Pomerium-Jwt-Assertion header and treats any mismatching Hello as an
-// attack.
+// AgentLinkService connects the manager to the sidecar in a sandbox pod.
+//
+// The manager serves this service. The sidecar dials it through a Pomerium
+// route and uses the agentic run token as its bearer token. The sidecar is the
+// gRPC client of each RPC. The manager sends its directives on the streams that
+// the sidecar opens.
+//
+// The manager gets the run ID and the pod identity only from the
+// X-Pomerium-Jwt-Assertion header. Messages do not carry identity. If the
+// asserted pod is not the pod of the run, the manager refuses the stream.
 type AgentLinkServiceClient interface {
-	// Attach is the control stream: exactly one live Attach per run. Carries
-	// liveness (heartbeats, status) and lifecycle directives. Reopened by the
-	// sidecar with backoff after any drop.
+	// Attach is the control stream of a run. A run has one live Attach stream.
+	// The manager refuses a second one. Attach carries heartbeats, status and
+	// directives. After a drop, the sidecar opens a new Attach stream with
+	// backoff.
 	Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SidecarFrame, ManagerFrame], error)
-	// AgentIO carries the ACP byte stream between the manager and the agent
-	// process's stdio. Opened by the sidecar after SpawnAgent, reopened after a
-	// drop with resume. At most one live AgentIO per run.
+	// AgentIO carries the ACP bytes between the manager and the stdio of the
+	// agent. The sidecar opens it after SpawnAgent. After a drop, the sidecar
+	// opens it again and both sides resume. A run has one live AgentIO stream. A
+	// new stream replaces the old one.
 	AgentIO(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentIOFrame, AgentIOFrame], error)
 }
 
@@ -84,22 +88,26 @@ type AgentLinkService_AgentIOClient = grpc.BidiStreamingClient[AgentIOFrame, Age
 // All implementations must embed UnimplementedAgentLinkServiceServer
 // for forward compatibility.
 //
-// AgentLinkService is served by the agentops manager and dialed BY the
-// sandbox sidecar through a Pomerium route (bearer: agentic run token). The
-// sidecar is the gRPC client for every RPC; the manager drives the sandbox by
-// sending directives on streams the sidecar opened (role inversion — the
-// GitLab agentk pattern). Identity is NEVER taken from message fields: the
-// manager derives run_id and the pod identity from the
-// X-Pomerium-Jwt-Assertion header and treats any mismatching Hello as an
-// attack.
+// AgentLinkService connects the manager to the sidecar in a sandbox pod.
+//
+// The manager serves this service. The sidecar dials it through a Pomerium
+// route and uses the agentic run token as its bearer token. The sidecar is the
+// gRPC client of each RPC. The manager sends its directives on the streams that
+// the sidecar opens.
+//
+// The manager gets the run ID and the pod identity only from the
+// X-Pomerium-Jwt-Assertion header. Messages do not carry identity. If the
+// asserted pod is not the pod of the run, the manager refuses the stream.
 type AgentLinkServiceServer interface {
-	// Attach is the control stream: exactly one live Attach per run. Carries
-	// liveness (heartbeats, status) and lifecycle directives. Reopened by the
-	// sidecar with backoff after any drop.
+	// Attach is the control stream of a run. A run has one live Attach stream.
+	// The manager refuses a second one. Attach carries heartbeats, status and
+	// directives. After a drop, the sidecar opens a new Attach stream with
+	// backoff.
 	Attach(grpc.BidiStreamingServer[SidecarFrame, ManagerFrame]) error
-	// AgentIO carries the ACP byte stream between the manager and the agent
-	// process's stdio. Opened by the sidecar after SpawnAgent, reopened after a
-	// drop with resume. At most one live AgentIO per run.
+	// AgentIO carries the ACP bytes between the manager and the stdio of the
+	// agent. The sidecar opens it after SpawnAgent. After a drop, the sidecar
+	// opens it again and both sides resume. A run has one live AgentIO stream. A
+	// new stream replaces the old one.
 	AgentIO(grpc.BidiStreamingServer[AgentIOFrame, AgentIOFrame]) error
 	mustEmbedUnimplementedAgentLinkServiceServer()
 }

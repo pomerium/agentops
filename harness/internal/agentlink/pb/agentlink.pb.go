@@ -25,9 +25,9 @@ type Status_State int32
 
 const (
 	Status_STATE_UNSPECIFIED Status_State = 0
-	Status_STATE_STARTING    Status_State = 1 // envoy launching
-	Status_STATE_READY       Status_State = 2 // envoy listeners serving; also the heartbeat state
-	Status_STATE_ERROR       Status_State = 3 // terminal on the sidecar side; reason is set
+	Status_STATE_STARTING    Status_State = 1 // envoy is starting
+	Status_STATE_READY       Status_State = 2 // envoy serves; this is also the heartbeat
+	Status_STATE_ERROR       Status_State = 3 // the sidecar failed; it does not recover
 )
 
 // Enum value maps for Status_State.
@@ -154,15 +154,15 @@ type isSidecarFrame_Msg interface {
 }
 
 type SidecarFrame_Hello struct {
-	Hello *SidecarHello `protobuf:"bytes,1,opt,name=hello,proto3,oneof"` // first frame, exactly once per stream
+	Hello *SidecarHello `protobuf:"bytes,1,opt,name=hello,proto3,oneof"` // first frame of each stream, sent once
 }
 
 type SidecarFrame_Status struct {
-	Status *Status `protobuf:"bytes,2,opt,name=status,proto3,oneof"` // state transitions + periodic heartbeat
+	Status *Status `protobuf:"bytes,2,opt,name=status,proto3,oneof"` // state changes and heartbeats
 }
 
 type SidecarFrame_Exited struct {
-	Exited *AgentExited `protobuf:"bytes,3,opt,name=exited,proto3,oneof"` // the runner reported the agent process exit
+	Exited *AgentExited `protobuf:"bytes,3,opt,name=exited,proto3,oneof"` // the agent process stopped
 }
 
 func (*SidecarFrame_Hello) isSidecarFrame_Msg() {}
@@ -262,22 +262,22 @@ type isManagerFrame_Msg interface {
 }
 
 type ManagerFrame_HelloAck struct {
-	HelloAck *ManagerHelloAck `protobuf:"bytes,1,opt,name=hello_ack,json=helloAck,proto3,oneof"` // first frame, exactly once per stream
+	HelloAck *ManagerHelloAck `protobuf:"bytes,1,opt,name=hello_ack,json=helloAck,proto3,oneof"` // first frame of each stream, sent once
 }
 
 type ManagerFrame_Spawn struct {
-	Spawn *SpawnAgent `protobuf:"bytes,2,opt,name=spawn,proto3,oneof"` // start $ACP_AGENT_CMD via the runner
+	Spawn *SpawnAgent `protobuf:"bytes,2,opt,name=spawn,proto3,oneof"` // start the agent
 }
 
 type ManagerFrame_Shutdown struct {
-	// Terminal: the sidecar stops the agent and envoy, then idles until the pod
-	// is deleted. The sidecar does not exit, because the kubelet restarts an
-	// exited container. The manager owns the pod and deletes it.
+	// Ends the session. The sidecar stops the agent and envoy. Then it waits
+	// until the pod is deleted. It does not exit, because the kubelet restarts
+	// a container that exits. The manager deletes the pod.
 	Shutdown *Shutdown `protobuf:"bytes,3,opt,name=shutdown,proto3,oneof"`
 }
 
 type ManagerFrame_Heartbeat struct {
-	Heartbeat *Heartbeat `protobuf:"bytes,4,opt,name=heartbeat,proto3,oneof"` // manager liveness (see heartbeat rules)
+	Heartbeat *Heartbeat `protobuf:"bytes,4,opt,name=heartbeat,proto3,oneof"` // the manager is alive
 }
 
 func (*ManagerFrame_HelloAck) isManagerFrame_Msg() {}
@@ -326,12 +326,12 @@ func (*Heartbeat) Descriptor() ([]byte, []int) {
 
 type SidecarHello struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // version 1 is the only one defined
-	// Attempt counts attaches for this pod boot (1 = first). Logging/metrics
-	// only. run_id/pod identity are deliberately ABSENT: the assertion is the
-	// sole identity source.
-	Attempt       uint32 `protobuf:"varint,2,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	AgentRunning  bool   `protobuf:"varint,3,opt,name=agent_running,json=agentRunning,proto3" json:"agent_running,omitempty"` // true on re-attach if the agent survived the drop
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // 1 is the only version
+	// Counts the Attach streams since the pod started. The first is 1. Use it
+	// only for logs and metrics.
+	Attempt uint32 `protobuf:"varint,2,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// True on a new Attach stream if the agent survived the drop.
+	AgentRunning  bool `protobuf:"varint,3,opt,name=agent_running,json=agentRunning,proto3" json:"agent_running,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -390,17 +390,14 @@ func (x *SidecarHello) GetAgentRunning() bool {
 type ManagerHelloAck struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
-	// Heartbeat contract: the sidecar sends Status at least every interval; the
-	// manager declares the link dead after miss_limit consecutive missed
-	// intervals.
-	HeartbeatSeconds   uint32 `protobuf:"varint,2,opt,name=heartbeat_seconds,json=heartbeatSeconds,proto3" json:"heartbeat_seconds,omitempty"`         // default 20
-	HeartbeatMissLimit uint32 `protobuf:"varint,3,opt,name=heartbeat_miss_limit,json=heartbeatMissLimit,proto3" json:"heartbeat_miss_limit,omitempty"` // default 3
-	// The per-session configuration the sidecar cannot be born with. A warm-pool
-	// pod is created before any claim exists, so anything that varies per session
-	// has to arrive here; see SandboxConfig.
-	Config        *SandboxConfig `protobuf:"bytes,4,opt,name=config,proto3" json:"config,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// The sidecar sends Status at least once in each interval. The manager
+	// declares the link dead after heartbeat_miss_limit intervals without a
+	// frame.
+	HeartbeatSeconds   uint32         `protobuf:"varint,2,opt,name=heartbeat_seconds,json=heartbeatSeconds,proto3" json:"heartbeat_seconds,omitempty"`         // default 20
+	HeartbeatMissLimit uint32         `protobuf:"varint,3,opt,name=heartbeat_miss_limit,json=heartbeatMissLimit,proto3" json:"heartbeat_miss_limit,omitempty"` // default 3
+	Config             *SandboxConfig `protobuf:"bytes,4,opt,name=config,proto3" json:"config,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ManagerHelloAck) Reset() {
@@ -461,15 +458,14 @@ func (x *ManagerHelloAck) GetConfig() *SandboxConfig {
 	return nil
 }
 
-// SandboxConfig is what the manager knows and the pod does not: the endpoints
-// this session's agent reaches its upstreams through. It rides HelloAck because
-// the sidecar needs it before envoy can serve anything, and the sidecar applies
-// it exactly once — a re-attach re-sends it, and envoy is already running by
-// then.
+// SandboxConfig is the configuration for one session. A warm-pool pod starts
+// before its session exists, so it gets this configuration from the manager.
+// The sidecar applies it once. A new Attach stream sends it again. The sidecar
+// ignores it, because envoy is already running.
 //
-// Endpoints the pod IS born with (the LLM route, say) stay in the pod's own env:
-// they are the same for every session the SandboxTemplate serves. The two sets
-// are unioned, and a name in both is a configuration error the sidecar refuses.
+// Endpoints that are the same for each session stay in the env of the pod.
+// The sidecar uses both sets. If one name is in both sets, the sidecar refuses
+// the configuration.
 type SandboxConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Endpoints     []*ProxiedEndpoint     `protobuf:"bytes,1,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
@@ -514,16 +510,17 @@ func (x *SandboxConfig) GetEndpoints() []*ProxiedEndpoint {
 	return nil
 }
 
-// ProxiedEndpoint is one loopback listener that the sidecar's envoy serves to
-// the agent. Envoy forwards each request to upstream_url and injects the
-// agentic run token. The agent never sees a credential.
+// ProxiedEndpoint is a loopback listener that envoy serves to the agent. Envoy
+// sends each request to upstream_url and adds the agentic run token. The agent
+// does not see a credential.
 type ProxiedEndpoint struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Name        string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	ListenPort  uint32                 `protobuf:"varint,2,opt,name=listen_port,json=listenPort,proto3" json:"listen_port,omitempty"`
 	UpstreamUrl string                 `protobuf:"bytes,3,opt,name=upstream_url,json=upstreamUrl,proto3" json:"upstream_url,omitempty"`
-	// Overrides the host:port envoy dials while SNI and Host stay derived from
-	// upstream_url. For a public hostname that does not resolve in-cluster.
+	// The host:port that envoy dials instead of the host of upstream_url. SNI
+	// and Host still come from upstream_url. Use it when the public host name
+	// does not resolve in the cluster.
 	DialAddress   string `protobuf:"bytes,4,opt,name=dial_address,json=dialAddress,proto3" json:"dial_address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -590,9 +587,8 @@ func (x *ProxiedEndpoint) GetDialAddress() string {
 type Status struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State Status_State           `protobuf:"varint,1,opt,name=state,proto3,enum=agentlink.v1.Status_State" json:"state,omitempty"`
-	// Machine-readable on STATE_ERROR (envoy_exited, runner_unreachable,
-	// token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch,
-	// …).
+	// Set on STATE_ERROR. Examples: envoy_exited, runner_unreachable,
+	// token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch.
 	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -642,6 +638,8 @@ func (x *Status) GetReason() string {
 	return ""
 }
 
+// AgentExited tells the manager that the agent process stopped. The sidecar
+// sends it after the manager acks all output of the agent.
 type AgentExited struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
@@ -686,10 +684,12 @@ func (x *AgentExited) GetExitCode() int32 {
 	return 0
 }
 
+// SpawnAgent starts the agent through the runner. The sidecar starts one agent
+// at most.
 type SpawnAgent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Names the AgentIO byte stream of this agent. The manager sets a new random
-	// value for each run. Each AgentIOOpen must contain it.
+	// The ID of the AgentIO byte stream. The manager makes a new random ID for
+	// each run. Each AgentIOOpen must contain it.
 	StreamId      []byte `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -776,14 +776,17 @@ func (x *Shutdown) GetReason() string {
 	return ""
 }
 
-// AgentIOFrame framing is symmetric in both directions: byte-exact and
-// resumable. Each side numbers the payload bytes it sends with a cumulative
-// offset ("seq" = offset of the LAST byte in this frame, 1-based) and
-// acknowledges the peer's offsets. Senders keep a replay buffer of unacked
-// bytes (bounded). A full buffer stops the sender until the peer acks. A resume
-// point that is no longer in the buffer is terminal. On (re)open, each side's
-// Open frame declares the highest peer offset it has durably consumed; the peer
-// replays everything after that. Frames carry at most 64 KiB of payload.
+// AgentIOFrame carries the ACP bytes. Both directions use the same rules.
+//
+// Each side counts the bytes that it sends. The first byte is 1. Each side
+// acks the bytes that it gets from its peer. A sender keeps the bytes that the
+// peer did not ack. It keeps at most 8 MiB plus one frame. When it has that
+// many, it stops until the peer acks. If a receiver gets more, it ends the
+// stream with a protocol error.
+//
+// On each open, each side sends Open with the last byte that it consumed. The
+// peer then sends again all bytes after that byte. If the peer no longer has
+// them, the stream ends with an error. A frame carries at most 64 KiB.
 type AgentIOFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -865,7 +868,7 @@ type isAgentIOFrame_Msg interface {
 }
 
 type AgentIOFrame_Open struct {
-	Open *AgentIOOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"` // first frame from each side, exactly once
+	Open *AgentIOOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"` // first frame of each side, sent once
 }
 
 type AgentIOFrame_Data struct {
@@ -883,10 +886,12 @@ func (*AgentIOFrame_Data) isAgentIOFrame_Msg() {}
 func (*AgentIOFrame_Ack) isAgentIOFrame_Msg() {}
 
 type AgentIOOpen struct {
-	state    protoimpl.MessageState `protogen:"open.v1"`
-	Consumed uint64                 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"` // resume point: replay my peer's bytes from consumed+1
-	// Must equal SpawnAgent.stream_id. A different value is terminal: the offsets
-	// then refer to a different byte stream.
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The last byte of the peer that this side consumed. The peer sends again
+	// from the byte after it.
+	Consumed uint64 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"`
+	// Must be equal to SpawnAgent.stream_id. If it is different, the offsets are
+	// for a different stream, and the stream ends with an error.
 	StreamId      []byte `protobuf:"bytes,2,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -938,7 +943,7 @@ func (x *AgentIOOpen) GetStreamId() []byte {
 
 type AgentIOData struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"` // offset of the last payload byte
+	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"` // the number of the last byte in payload
 	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -989,8 +994,11 @@ func (x *AgentIOData) GetPayload() []byte {
 }
 
 type AgentIOAck struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Consumed      uint64                 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"` // cumulative; sent at least every 512 KiB or 500 ms
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The last byte that this side consumed. It is cumulative. Each side acks
+	// after each 512 KiB of new bytes, and at least every 500 ms while new bytes
+	// arrive.
+	Consumed      uint64 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
