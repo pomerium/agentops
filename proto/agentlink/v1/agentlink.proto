@@ -36,7 +36,10 @@ message ManagerFrame {
   oneof msg {
     ManagerHelloAck hello_ack = 1; // first frame, exactly once per stream
     SpawnAgent spawn = 2; // start $ACP_AGENT_CMD via the runner
-    Shutdown shutdown = 3; // terminal: kill agent, stop envoy, exit 0
+    // Terminal: the sidecar stops the agent and envoy, then idles until the pod
+    // is deleted. The sidecar does not exit, because the kubelet restarts an
+    // exited container. The manager owns the pod and deletes it.
+    Shutdown shutdown = 3;
     Heartbeat heartbeat = 4; // manager liveness (see heartbeat rules)
   }
 }
@@ -99,7 +102,8 @@ message Status {
   }
   State state = 1;
   // Machine-readable on STATE_ERROR (envoy_exited, runner_unreachable,
-  // token_terminal:<reason>, agentio_buffer_overflow, …).
+  // token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch,
+  // …).
   string reason = 2;
 }
 
@@ -107,7 +111,11 @@ message AgentExited {
   int32 exit_code = 1;
 }
 
-message SpawnAgent {}
+message SpawnAgent {
+  // Names the AgentIO byte stream of this agent. The manager sets a new random
+  // value for each run. Each AgentIOOpen must contain it.
+  bytes stream_id = 1;
+}
 
 message Shutdown {
   string reason = 1;
@@ -117,9 +125,10 @@ message Shutdown {
 // resumable. Each side numbers the payload bytes it sends with a cumulative
 // offset ("seq" = offset of the LAST byte in this frame, 1-based) and
 // acknowledges the peer's offsets. Senders keep a replay buffer of unacked
-// bytes (bounded; overflow is terminal). On (re)open, each side's Open frame
-// declares the highest peer offset it has durably consumed; the peer replays
-// everything after that. Frames carry at most 64 KiB of payload.
+// bytes (bounded). A full buffer stops the sender until the peer acks. A resume
+// point that is no longer in the buffer is terminal. On (re)open, each side's
+// Open frame declares the highest peer offset it has durably consumed; the peer
+// replays everything after that. Frames carry at most 64 KiB of payload.
 message AgentIOFrame {
   oneof msg {
     AgentIOOpen open = 1; // first frame from each side, exactly once
@@ -130,6 +139,9 @@ message AgentIOFrame {
 
 message AgentIOOpen {
   uint64 consumed = 1; // resume point: replay my peer's bytes from consumed+1
+  // Must equal SpawnAgent.stream_id. A different value is terminal: the offsets
+  // then refer to a different byte stream.
+  bytes stream_id = 2;
 }
 
 message AgentIOData {

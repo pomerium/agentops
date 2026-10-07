@@ -270,7 +270,10 @@ type ManagerFrame_Spawn struct {
 }
 
 type ManagerFrame_Shutdown struct {
-	Shutdown *Shutdown `protobuf:"bytes,3,opt,name=shutdown,proto3,oneof"` // terminal: kill agent, stop envoy, exit 0
+	// Terminal: the sidecar stops the agent and envoy, then idles until the pod
+	// is deleted. The sidecar does not exit, because the kubelet restarts an
+	// exited container. The manager owns the pod and deletes it.
+	Shutdown *Shutdown `protobuf:"bytes,3,opt,name=shutdown,proto3,oneof"`
 }
 
 type ManagerFrame_Heartbeat struct {
@@ -588,7 +591,8 @@ type Status struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State Status_State           `protobuf:"varint,1,opt,name=state,proto3,enum=agentlink.v1.Status_State" json:"state,omitempty"`
 	// Machine-readable on STATE_ERROR (envoy_exited, runner_unreachable,
-	// token_terminal:<reason>, agentio_buffer_overflow, …).
+	// token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch,
+	// …).
 	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -683,7 +687,10 @@ func (x *AgentExited) GetExitCode() int32 {
 }
 
 type SpawnAgent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Names the AgentIO byte stream of this agent. The manager sets a new random
+	// value for each run. Each AgentIOOpen must contain it.
+	StreamId      []byte `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -716,6 +723,13 @@ func (x *SpawnAgent) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SpawnAgent.ProtoReflect.Descriptor instead.
 func (*SpawnAgent) Descriptor() ([]byte, []int) {
 	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SpawnAgent) GetStreamId() []byte {
+	if x != nil {
+		return x.StreamId
+	}
+	return nil
 }
 
 type Shutdown struct {
@@ -766,9 +780,10 @@ func (x *Shutdown) GetReason() string {
 // resumable. Each side numbers the payload bytes it sends with a cumulative
 // offset ("seq" = offset of the LAST byte in this frame, 1-based) and
 // acknowledges the peer's offsets. Senders keep a replay buffer of unacked
-// bytes (bounded; overflow is terminal). On (re)open, each side's Open frame
-// declares the highest peer offset it has durably consumed; the peer replays
-// everything after that. Frames carry at most 64 KiB of payload.
+// bytes (bounded). A full buffer stops the sender until the peer acks. A resume
+// point that is no longer in the buffer is terminal. On (re)open, each side's
+// Open frame declares the highest peer offset it has durably consumed; the peer
+// replays everything after that. Frames carry at most 64 KiB of payload.
 type AgentIOFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -868,8 +883,11 @@ func (*AgentIOFrame_Data) isAgentIOFrame_Msg() {}
 func (*AgentIOFrame_Ack) isAgentIOFrame_Msg() {}
 
 type AgentIOOpen struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Consumed      uint64                 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"` // resume point: replay my peer's bytes from consumed+1
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Consumed uint64                 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"` // resume point: replay my peer's bytes from consumed+1
+	// Must equal SpawnAgent.stream_id. A different value is terminal: the offsets
+	// then refer to a different byte stream.
+	StreamId      []byte `protobuf:"bytes,2,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -909,6 +927,13 @@ func (x *AgentIOOpen) GetConsumed() uint64 {
 		return x.Consumed
 	}
 	return 0
+}
+
+func (x *AgentIOOpen) GetStreamId() []byte {
+	if x != nil {
+		return x.StreamId
+	}
+	return nil
 }
 
 type AgentIOData struct {
@@ -1050,18 +1075,20 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\vSTATE_READY\x10\x02\x12\x0f\n" +
 	"\vSTATE_ERROR\x10\x03\"*\n" +
 	"\vAgentExited\x12\x1b\n" +
-	"\texit_code\x18\x01 \x01(\x05R\bexitCode\"\f\n" +
+	"\texit_code\x18\x01 \x01(\x05R\bexitCode\")\n" +
 	"\n" +
-	"SpawnAgent\"\"\n" +
+	"SpawnAgent\x12\x1b\n" +
+	"\tstream_id\x18\x01 \x01(\fR\bstreamId\"\"\n" +
 	"\bShutdown\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xa5\x01\n" +
 	"\fAgentIOFrame\x12/\n" +
 	"\x04open\x18\x01 \x01(\v2\x19.agentlink.v1.AgentIOOpenH\x00R\x04open\x12/\n" +
 	"\x04data\x18\x02 \x01(\v2\x19.agentlink.v1.AgentIODataH\x00R\x04data\x12,\n" +
 	"\x03ack\x18\x03 \x01(\v2\x18.agentlink.v1.AgentIOAckH\x00R\x03ackB\x05\n" +
-	"\x03msg\")\n" +
+	"\x03msg\"F\n" +
 	"\vAgentIOOpen\x12\x1a\n" +
-	"\bconsumed\x18\x01 \x01(\x04R\bconsumed\"9\n" +
+	"\bconsumed\x18\x01 \x01(\x04R\bconsumed\x12\x1b\n" +
+	"\tstream_id\x18\x02 \x01(\fR\bstreamId\"9\n" +
 	"\vAgentIOData\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\"(\n" +
