@@ -67,6 +67,7 @@ generate: generate-harness-api
 generate-harness-api:
 	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
 	$(HARNESS_GO) tool buf generate
+	cd $(HARNESS_DIR)/internal/sessionstore/sqlite && GOWORK=off go tool sqlc generate
 
 APISTUB_BIN ?= $(CURDIR)/bin/apistub
 apistub:
