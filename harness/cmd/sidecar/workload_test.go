@@ -1,0 +1,235 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/pomerium/agentops/harness/internal/sidecar/agentic"
+	"github.com/pomerium/agentops/harness/internal/sidecar/envoyconfig"
+)
+
+func workloadJWT(t *testing.T, ttl time.Duration) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"aud": "pomerium-egress", "exp": time.Now().Add(ttl).Unix()})
+	require.NoError(t, err)
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"RS256"}`)) + "." + enc(payload) + ".sig"
+}
+
+func newWorkloadSidecar(t *testing.T, envoyScript string) *sidecar {
+	t.Helper()
+	return newGatedWorkloadSidecar(t, envoyScript, func() bool { return true })
+}
+
+func newGatedWorkloadSidecar(t *testing.T, envoyScript string, ready func() bool) *sidecar {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "scw")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	lis, err := net.Listen("unix", filepath.Join(dir, "admin.sock"))
+	require.NoError(t, err)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ready" && ready() {
+			fmt.Fprintln(w, "LIVE")
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	_ = srv.Listener.Close()
+	srv.Listener = lis
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	envoy := filepath.Join(dir, "fake-envoy")
+	require.NoError(t, os.WriteFile(envoy, []byte("#!/bin/sh\n"+envoyScript), 0o755))
+	s, err := newSidecar(slog.New(slog.DiscardHandler),
+		[]envoyconfig.Endpoint{{Name: "llm", ListenPort: 9999, UpstreamURL: "https://llm.example.com", InjectRunToken: true}},
+		envoy, dir)
+	require.NoError(t, err)
+	return s
+}
+
+func runWorkload(ctx context.Context, s *sidecar, cfg workloadConfig) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- s.serve(ctx, config{Identity: workloadIdentity, Workload: cfg}) }()
+	return done
+}
+
+func await(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not return")
+		return nil
+	}
+}
+
+func TestServeWorkload_InjectsTokenAndStopsOnSignal(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 30\n")
+	jwt := workloadJWT(t, time.Hour)
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte(jwt), 0o600))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runWorkload(ctx, s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"})
+
+	bootstrap := filepath.Join(s.configDir, "bootstrap.json")
+	var boot []byte
+	require.Eventually(t, func() bool {
+		b, err := os.ReadFile(bootstrap)
+		boot = b
+		return err == nil && strings.Contains(string(b), "credential_injector")
+	}, 5*time.Second, 20*time.Millisecond, "the bootstrap never carried the credential injector")
+	want, err := envoyconfig.RenderRunTokenSecret("Bearer " + jwt)
+	require.NoError(t, err)
+	got, err := os.ReadFile(s.sdsPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(want), string(got))
+	assert.Contains(t, string(boot), `"portValue":9999`)
+
+	cancel()
+	assert.NoError(t, await(t, done))
+}
+
+func TestServeWorkload_EnvoyExitEndsTheProcess(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 0.3; exit 3\n")
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte(workloadJWT(t, time.Hour)), 0o600))
+
+	err := await(t, runWorkload(context.Background(), s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"}))
+	assert.ErrorContains(t, err, "proxy exited")
+}
+
+func TestServeWorkload_TerminalTokenEndsTheProcess(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 30\n")
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte(workloadJWT(t, 7*time.Second)), 0o600))
+
+	done := runWorkload(context.Background(), s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"})
+	require.Eventually(t, func() bool { _, err := os.Stat(s.sdsPath); return err == nil }, 5*time.Second, 20*time.Millisecond)
+	require.NoError(t, os.Remove(tokenFile))
+
+	err := await(t, done)
+	var te *agentic.TerminalError
+	require.ErrorAs(t, err, &te)
+	assert.Equal(t, agentic.ReasonConfigError, te.Reason)
+}
+
+func TestServeWorkload_BadTokenNeverStartsEnvoy(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 30\n")
+	err := await(t, runWorkload(context.Background(), s, workloadConfig{TokenFile: filepath.Join(t.TempDir(), "absent"), Audience: "pomerium-egress"}))
+	assert.ErrorContains(t, err, "read projected token")
+	_, statErr := os.Stat(filepath.Join(s.configDir, "bootstrap.json"))
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestServeWorkload_NeedsEndpoints(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 30\n")
+	s.bakedIn = nil
+	err := await(t, runWorkload(context.Background(), s, workloadConfig{TokenFile: "/x", Audience: "pomerium-egress"}))
+	assert.ErrorContains(t, err, "workload-identity needs at least one SIDECAR_HTTP_* endpoint")
+}
+
+type cancelOnReady struct {
+	slog.Handler
+	cancel context.CancelFunc
+}
+
+func (h cancelOnReady) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "sidecar: proxy ready" {
+		h.cancel()
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func TestServeWorkload_ShutdownAlwaysStopsAReadyEnvoy(t *testing.T) {
+	t.Parallel()
+	for i := range 20 {
+		pidFile := filepath.Join(t.TempDir(), "pid")
+		s := newGatedWorkloadSidecar(t, fmt.Sprintf("echo $$ > %q.tmp; mv %q.tmp %q; exec sleep 30\n", pidFile, pidFile, pidFile),
+			func() bool { _, err := os.Stat(pidFile); return err == nil })
+		tokenFile := filepath.Join(t.TempDir(), "token")
+		require.NoError(t, os.WriteFile(tokenFile, []byte(workloadJWT(t, time.Hour)), 0o600))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		s.log = slog.New(cancelOnReady{Handler: slog.NewTextHandler(io.Discard, nil), cancel: cancel})
+		require.NoError(t, await(t, runWorkload(ctx, s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"})))
+
+		var pid int
+		require.Eventually(t, func() bool {
+			b, err := os.ReadFile(pidFile)
+			if err != nil {
+				return false
+			}
+			pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+			return err == nil
+		}, 5*time.Second, 5*time.Millisecond)
+		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+		require.Eventually(t, func() bool { return syscall.Kill(pid, 0) == syscall.ESRCH },
+			5*time.Second, 5*time.Millisecond, "run %d: serve returned but envoy is still running", i)
+	}
+}
+
+type loopWatch struct {
+	slog.Handler
+	returned *atomic.Bool
+	polled   chan string
+}
+
+func (h loopWatch) Handle(ctx context.Context, r slog.Record) error {
+	if h.returned.Load() && strings.HasPrefix(r.Message, "workload token:") {
+		select {
+		case h.polled <- r.Message:
+		default:
+		}
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func TestServeWorkload_ReturningStopsTheTokenLoop(t *testing.T) {
+	t.Parallel()
+	s := newWorkloadSidecar(t, "sleep 0.3; exit 3\n")
+	watch := loopWatch{Handler: slog.NewTextHandler(io.Discard, nil), returned: &atomic.Bool{}, polled: make(chan string, 1)}
+	s.log = slog.New(watch)
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte(workloadJWT(t, 6*time.Second)), 0o600))
+
+	err := await(t, runWorkload(context.Background(), s, workloadConfig{TokenFile: tokenFile, Audience: "pomerium-egress"}))
+	require.ErrorContains(t, err, "proxy exited")
+	watch.returned.Store(true)
+	require.NoError(t, os.Remove(tokenFile))
+
+	select {
+	case msg := <-watch.polled:
+		t.Fatalf("the token loop kept running after serve returned: %q", msg)
+	case <-time.After(2 * time.Second):
+	}
+}
