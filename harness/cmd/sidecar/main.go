@@ -149,7 +149,28 @@ func serve(log *slog.Logger, id identity) error {
 	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		return nil
 	}
-	return err
+	return awaitDeletion(ctx, log, err)
+}
+
+type sessionEnd struct{ cause error }
+
+func (e *sessionEnd) Error() string {
+	if e.cause == nil {
+		return "session ended"
+	}
+	return "session ended: " + e.cause.Error()
+}
+
+func (e *sessionEnd) Unwrap() error { return e.cause }
+
+func awaitDeletion(ctx context.Context, log *slog.Logger, err error) error {
+	var end *sessionEnd
+	if !errors.As(err, &end) {
+		return err
+	}
+	log.Info("sidecar: session over; idling until the pod is deleted", "cause", end.cause)
+	<-ctx.Done()
+	return nil
 }
 
 func (s *sidecar) serve(ctx context.Context, cfg config) error {
@@ -245,6 +266,12 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 		return err
 	}
 
+	ended := func(err error) error {
+		if client == nil {
+			return err
+		}
+		return &sessionEnd{cause: err}
+	}
 	fail := func(reason string) {
 		if client != nil {
 			client.Fail(reason)
@@ -260,20 +287,19 @@ func (s *sidecar) serve(ctx context.Context, cfg config) error {
 		case exitErr := <-proxyExited:
 			log.Error("sidecar: envoy exited", "err", exitErr)
 			fail("envoy_exited")
-			return fmt.Errorf("proxy exited: %w", exitErr)
+			return ended(fmt.Errorf("proxy exited: %w", exitErr))
 		case err := <-loopErr:
 			if ctx.Err() != nil {
 				return nil
 			}
 			log.Error("sidecar: token terminal", "err", err)
 			fail("token_terminal:" + reasonOf(err))
-			return err
+			return ended(err)
 		case err := <-attachErr:
 			if err == nil {
 				log.Info("sidecar: session ended cleanly")
-				return nil
 			}
-			return err
+			return ended(err)
 		case <-ctx.Done():
 			log.Info("sidecar: signal received; shutting down")
 			return nil
