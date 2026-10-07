@@ -1,6 +1,7 @@
 package agentlink_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -363,7 +364,7 @@ func TestAgentIORequiresLiveAttach(t *testing.T) {
 		t.Fatalf("AgentIO: %v", err)
 	}
 	if err := stream.Send(&agentlinkpb.AgentIOFrame{
-		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{}},
+		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{StreamId: agentlink.StreamID(g.srv, "run-noattach")}},
 	}); err != nil {
 		t.Fatalf("send open: %v", err)
 	}
@@ -390,7 +391,9 @@ func (g *testLink) openAgentIO(parent context.Context, runID string, consumed ui
 		return nil, err
 	}
 	if err := stream.Send(&agentlinkpb.AgentIOFrame{
-		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{Consumed: consumed}},
+		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{
+			Consumed: consumed, StreamId: agentlink.StreamID(g.srv, runID),
+		}},
 	}); err != nil {
 		cancel()
 		return nil, err
@@ -964,5 +967,78 @@ func TestReadyWaitsForTheAttachCallback(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("Spawn never arrived after OnAttached returned")
+	}
+}
+
+func TestAgentIOForAnotherStreamIsTerminal(t *testing.T) {
+	g := newTestLink(t, time.Hour, 3)
+	var reasons []string
+	var mu sync.Mutex
+	handle, err := g.srv.Expect("run-stale", testSeal, nil, agentlink.WithOnError(func(reason string, _ error) { mu.Lock(); reasons = append(reasons, reason); mu.Unlock() }))
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, err := g.attach(g.ctx(ctx, "run-stale", nil), 1, false); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if err := handle.AwaitAttach(ctx); err != nil {
+		t.Fatalf("AwaitAttach: %v", err)
+	}
+
+	stream, err := g.client.AgentIO(g.ctx(ctx, "run-stale", nil))
+	if err != nil {
+		t.Fatalf("AgentIO: %v", err)
+	}
+	if err := stream.Send(&agentlinkpb.AgentIOFrame{
+		Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{StreamId: []byte("an earlier stream")}},
+	}); err != nil {
+		t.Fatalf("send open: %v", err)
+	}
+	if _, err := stream.Recv(); codeOf(err) != codes.FailedPrecondition {
+		t.Fatalf("err = %v (code %s), want FailedPrecondition", err, codeOf(err))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reasons) != 1 || reasons[0] != "agentio_stream_mismatch" {
+		t.Errorf("OnError reasons = %v", reasons)
+	}
+}
+
+func TestSpawnAgentNamesTheRunsStream(t *testing.T) {
+	g := newTestLink(t, time.Hour, 3)
+	handle, err := g.srv.Expect("run-spawnid", testSeal, nil)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	defer g.srv.Forget(handle.RunID())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	attach, _, err := g.attach(g.ctx(ctx, "run-spawnid", nil), 1, false)
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if err := handle.AwaitAttach(ctx); err != nil {
+		t.Fatalf("AwaitAttach: %v", err)
+	}
+	if err := handle.SpawnAgent(ctx); err != nil {
+		t.Fatalf("SpawnAgent: %v", err)
+	}
+	for {
+		frame, err := attach.Recv()
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		if spawn := frame.GetSpawn(); spawn != nil {
+			want := agentlink.StreamID(g.srv, "run-spawnid")
+			if len(want) == 0 || !bytes.Equal(spawn.GetStreamId(), want) {
+				t.Errorf("SpawnAgent stream_id = %q, want %q", spawn.GetStreamId(), want)
+			}
+			return
+		}
 	}
 }

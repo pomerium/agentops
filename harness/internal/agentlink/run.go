@@ -111,8 +111,9 @@ type attachedRun struct {
 	hbInterval  time.Duration
 	hbMissLimit uint32
 
-	io     *agentio.Stream
-	ioTurn chan struct{}
+	io       *agentio.Stream
+	streamID []byte
+	ioTurn   chan struct{}
 
 	attached chan struct{}
 	ready    chan struct{}
@@ -273,7 +274,7 @@ func (h *RunHandle) SpawnAgent(ctx context.Context) error {
 		return fmt.Errorf("spawn agent for run %s: no live attach", h.run.runID)
 	}
 	return live.dispatch(ctx, &agentlinkpb.ManagerFrame{
-		Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{}},
+		Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{StreamId: h.run.streamID}},
 	})
 }
 

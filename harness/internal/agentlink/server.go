@@ -28,6 +28,7 @@ const (
 
 const (
 	reasonResumeInvalid   = "agentio_resume_invalid"
+	reasonStreamMismatch  = "agentio_stream_mismatch"
 	reasonProtocol        = "protocol_violation"
 	reasonHeartbeatMissed = "heartbeat_missed"
 )
@@ -112,6 +113,7 @@ func (s *Server) Expect(runID string, seal agenticrun.Executor, cfg *agentlinkpb
 		runID: runID, seal: seal, config: cfg, opts: newExpectCallbacks(opts), log: s.log,
 		hbInterval: s.cfg.heartbeatInterval, hbMissLimit: s.cfg.heartbeatMissLimit,
 		io:       agentio.New(),
+		streamID: agentio.NewStreamID(),
 		ioTurn:   make(chan struct{}, 1),
 		attached: make(chan struct{}),
 		ready:    make(chan struct{}),

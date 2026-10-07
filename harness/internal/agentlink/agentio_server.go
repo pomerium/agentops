@@ -32,6 +32,11 @@ func (s *Server) AgentIO(stream agentlinkpb.AgentLinkService_AgentIOServer) erro
 	if open == nil {
 		return status.Error(codes.FailedPrecondition, "the first AgentIO frame must be Open")
 	}
+	if err := agentio.CheckStreamID(open, run.streamID); err != nil {
+		s.log.Error("harness: agent io names a different stream", "run_id", run.runID, "err", err)
+		s.fail(run, reasonStreamMismatch, err)
+		return status.Errorf(codes.FailedPrecondition, "%s: %v", reasonStreamMismatch, err)
+	}
 
 	claim, err := run.claimIO(ctx)
 	switch {
@@ -50,7 +55,7 @@ func (s *Server) AgentIO(stream agentlinkpb.AgentLinkService_AgentIOServer) erro
 		return status.Errorf(codes.FailedPrecondition, "%s: %v", reasonResumeInvalid, err)
 	}
 
-	if err := stream.Send(agentio.OpenFrame(run.io.Consumed())); err != nil {
+	if err := stream.Send(agentio.OpenFrame(run.io.Consumed(), run.streamID)); err != nil {
 		return err
 	}
 	run.io.StartRecorder()
