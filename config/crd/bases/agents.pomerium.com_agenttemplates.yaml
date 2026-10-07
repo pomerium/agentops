@@ -48,13 +48,20 @@ spec:
             description: |-
               AgentTemplateSpec defines the desired configuration of a workflow.
 
-              A workflow runs when the bot is @mentioned in a Slack channel bound to this
-              template (by metadata.name) in the singleton ChannelConfig.
+              A workflow runs when a client asks for it by metadata.name. Which Slack
+              channel asks for which template is the Slack bot's own configuration and is
+              deliberately not a cluster resource.
             properties:
               requiredMCPServers:
                 description: |-
                   RequiredMCPServers lists the MCP servers that must be connected for the
-                  invoking user before the workflow can run.
+                  invoking user before the workflow can run. They are disclosed to the
+                  approver on Pomerium's consent page, with a Connect link for any the
+                  approver has not yet authorized.
+
+                  This is not what the run token is allowed to reach. Nothing here grants
+                  access: each Pomerium route decides for itself whether it accepts a run
+                  token and which runs its policy admits.
                 items:
                   description: |-
                     MCPServerRef identifies an MCP server that a workflow requires the invoking
