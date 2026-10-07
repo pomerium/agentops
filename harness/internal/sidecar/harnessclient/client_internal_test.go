@@ -16,6 +16,8 @@ import (
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 )
 
+var testStreamID = []byte("stream-1")
+
 type bearer string
 
 func (b bearer) Bearer() string { return string(b) }
@@ -200,9 +202,9 @@ func (s *fakeIO) Recv() (*agentlinkpb.AgentIOFrame, error) {
 }
 
 func TestAgentIOResumesOnlyAfterThePreviousPumpReturns(t *testing.T) {
-	first := newFakeIO(append([]*agentlinkpb.AgentIOFrame{agentio.OpenFrame(0)},
+	first := newFakeIO(append([]*agentlinkpb.AgentIOFrame{agentio.OpenFrame(0, testStreamID)},
 		agentio.DataFrames([]byte("hello"), 5)...)...)
-	second := newFakeIO(agentio.OpenFrame(0))
+	second := newFakeIO(agentio.OpenFrame(0, testStreamID))
 	link := &ioLink{streams: make(chan *fakeIO, 2)}
 	link.streams <- first
 	link.streams <- second
@@ -212,7 +214,7 @@ func TestAgentIOResumesOnlyAfterThePreviousPumpReturns(t *testing.T) {
 		statusCh: make(chan *agentlinkpb.Status, 4),
 		ioSlot:   make(chan struct{}, 1),
 	}
-	ag := &AgentSession{IO: agentio.New()}
+	ag := &AgentSession{IO: agentio.New(), streamID: testStreamID}
 	defer ag.IO.Close(nil)
 	lost := make(chan error, 2)
 
@@ -278,7 +280,7 @@ func TestAnAgentThatStartsAfterShutdownIsStopped(t *testing.T) {
 	r := &delayedStart{entered: make(chan struct{}), release: make(chan struct{}), agent: ag}
 	c := &Client{cfg: Config{Runner: r}, log: slog.New(slog.DiscardHandler)}
 
-	pending := c.startSpawn(context.Background())
+	pending := c.startSpawn(context.Background(), testStreamID)
 	<-r.entered
 	c.stopAgent()
 	close(r.release)
@@ -313,7 +315,7 @@ func TestAReattachWatchesAnAgentThatFinishedStartingAfterTheDrop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	first := link.attach
-	first.frames <- &agentlinkpb.ManagerFrame{Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{}}}
+	first.frames <- &agentlinkpb.ManagerFrame{Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{StreamId: testStreamID}}}
 	done := make(chan error, 1)
 	go func() { done <- c.session(ctx, 1, c.cfg.Token.Bearer()) }()
 	<-r.entered
@@ -363,9 +365,9 @@ func (l *exitLink) AgentIO(ctx context.Context, _ ...grpc.CallOption) (agentlink
 func TestAnExitIsReportedOnlyAfterTheHarnessAckedTheFinalOutput(t *testing.T) {
 	final := []byte("final reply\n")
 	exits := make(chan AgentExit, 1)
-	ag := &AgentSession{IO: agentio.New(), Exited: exits}
+	ag := &AgentSession{IO: agentio.New(), Exited: exits, streamID: testStreamID}
 	ag.IO.Record(final)
-	link := &exitLink{attach: newFakeAttach(nil), io: newFakeIO(agentio.OpenFrame(0))}
+	link := &exitLink{attach: newFakeAttach(nil), io: newFakeIO(agentio.OpenFrame(0, testStreamID))}
 	c := &Client{
 		cfg:      Config{Token: bearer("Bearer pom_art_test")},
 		log:      slog.New(slog.DiscardHandler),
@@ -399,4 +401,30 @@ func TestAnExitIsReportedOnlyAfterTheHarnessAckedTheFinalOutput(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+func TestAnOpenForAnotherStreamIsTerminal(t *testing.T) {
+	link := &ioLink{streams: make(chan *fakeIO, 1)}
+	link.streams <- newFakeIO(agentio.OpenFrame(0, []byte("stream-2")))
+	c := &Client{
+		log:      slog.New(slog.DiscardHandler),
+		client:   link,
+		statusCh: make(chan *agentlinkpb.Status, 4),
+		ioSlot:   make(chan struct{}, 1),
+	}
+	ag := &AgentSession{IO: agentio.New(), streamID: testStreamID}
+	defer ag.IO.Close(nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.pumpAgentIO(ctx, ag, make(chan error, 1))
+
+	select {
+	case st := <-c.statusCh:
+		if st.GetReason() != ReasonStreamMismatch {
+			t.Errorf("status reason = %q, want %q", st.GetReason(), ReasonStreamMismatch)
+		}
+	default:
+		t.Fatal("an Open for another stream did not fail the session")
+	}
 }

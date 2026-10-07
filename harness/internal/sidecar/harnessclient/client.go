@@ -54,7 +54,8 @@ type AgentSession struct {
 	Stop   func()
 	PID    int64
 
-	acked ackLevel
+	acked    ackLevel
+	streamID []byte
 }
 
 type AgentExit struct {
@@ -92,14 +93,16 @@ func (e *TerminalError) Error() string {
 func (e *TerminalError) Unwrap() error { return e.Err }
 
 const (
-	ReasonUnknownRun    = "unknown_run"
-	ReasonRejected      = "attach_rejected"
-	ReasonAttachDenied  = "attach_denied"
-	ReasonAgentExited   = "agent_exited"
-	ReasonShutdown      = "shutdown"
-	ReasonLocalFailure  = "local_failure"
-	ReasonRunnerFailure = "runner_unreachable"
-	ReasonConfigFailed  = "config_failed"
+	ReasonUnknownRun     = "unknown_run"
+	ReasonRejected       = "attach_rejected"
+	ReasonAttachDenied   = "attach_denied"
+	ReasonAgentExited    = "agent_exited"
+	ReasonShutdown       = "shutdown"
+	ReasonLocalFailure   = "local_failure"
+	ReasonRunnerFailure  = "runner_unreachable"
+	ReasonConfigFailed   = "config_failed"
+	ReasonResumeInvalid  = "agentio_resume_invalid"
+	ReasonStreamMismatch = "agentio_stream_mismatch"
 )
 
 type Client struct {
@@ -384,7 +387,7 @@ func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLink
 			lastRecv = time.Now()
 			switch {
 			case r.frame.GetSpawn() != nil:
-				if p := c.startSpawn(runCtx); p != nil {
+				if p := c.startSpawn(runCtx, r.frame.GetSpawn().GetStreamId()); p != nil {
 					pending, spawned = p, p.done
 				}
 			case r.frame.GetShutdown() != nil:
@@ -468,12 +471,13 @@ func (c *Client) configure(cfg *agentlinkpb.SandboxConfig) error {
 }
 
 type pendingSpawn struct {
-	done   chan struct{}
-	cancel context.CancelFunc
-	err    error
+	done     chan struct{}
+	cancel   context.CancelFunc
+	streamID []byte
+	err      error
 }
 
-func (c *Client) startSpawn(ctx context.Context) *pendingSpawn {
+func (c *Client) startSpawn(ctx context.Context, streamID []byte) *pendingSpawn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.agent != nil || c.stopped {
@@ -481,7 +485,7 @@ func (c *Client) startSpawn(ctx context.Context) *pendingSpawn {
 	}
 	if c.spawn == nil {
 		ctx, cancel := context.WithCancel(ctx)
-		c.spawn = &pendingSpawn{done: make(chan struct{}), cancel: cancel}
+		c.spawn = &pendingSpawn{done: make(chan struct{}), cancel: cancel, streamID: streamID}
 		go c.runSpawn(ctx, c.spawn)
 	}
 	return c.spawn
@@ -491,6 +495,9 @@ func (c *Client) runSpawn(ctx context.Context, p *pendingSpawn) {
 	defer p.cancel()
 	defer close(p.done)
 	ag, err := c.cfg.Runner.Spawn(ctx)
+	if err == nil {
+		ag.streamID = p.streamID
+	}
 	if err == nil && !c.adopt(ag) {
 		ag.stop()
 		err = errors.New("the agent started after the client stopped")
@@ -651,7 +658,7 @@ func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 	if err != nil {
 		return fmt.Errorf("open agent io: %w", err)
 	}
-	if err := stream.Send(agentio.OpenFrame(ag.IO.Consumed())); err != nil {
+	if err := stream.Send(agentio.OpenFrame(ag.IO.Consumed(), ag.streamID)); err != nil {
 		return fmt.Errorf("send agent io open: %w", err)
 	}
 	first, err := stream.Recv()
@@ -662,9 +669,14 @@ func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 	if open == nil {
 		return errors.New("the first manager AgentIO frame was not Open")
 	}
+	if err := agentio.CheckStreamID(open, ag.streamID); err != nil {
+		c.log.Error("harness: agent io names a different stream", "err", err)
+		c.Fail(ReasonStreamMismatch)
+		return nil
+	}
 	if err := ag.IO.ValidateResume(open.GetConsumed()); err != nil {
 		c.log.Error("harness: agent io resume is unserviceable", "err", err)
-		c.Fail("agentio_buffer_overflow")
+		c.Fail(ReasonResumeInvalid)
 		return nil
 	}
 	ag.acked.advance(open.GetConsumed())
