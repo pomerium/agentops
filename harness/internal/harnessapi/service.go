@@ -303,8 +303,8 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		}
 		turnID, err := s.nextTurnID(ctx, sess.ID)
 		if err != nil {
-			s.release(sess.ID, o)
 			o.cancel()
+			s.settle(ctx, sess.ID, o)
 			return "", err
 		}
 		go s.launch(launchCtx, o, sess.ID, launchOpts{
@@ -328,11 +328,11 @@ func (s *Service) claimRevive(ctx context.Context, sessionID string, o *owner) e
 	}
 	current, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
-		s.release(sessionID, o)
+		s.settle(ctx, sessionID, o)
 		return api.Errorf(api.ErrUnavailable, "read session: %v", err)
 	}
 	if current.Status != api.StateSuspended {
-		s.release(sessionID, o)
+		s.settle(ctx, sessionID, o)
 		return api.Errorf(api.ErrInvalidState, "session %s is %s; it can no longer be continued", sessionID, current.Status)
 	}
 	return nil

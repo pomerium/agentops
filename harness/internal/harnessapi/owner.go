@@ -29,14 +29,6 @@ func (s *Service) claim(sessionID string, o *owner) bool {
 	return true
 }
 
-func (s *Service) release(sessionID string, o *owner) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.owners[sessionID] == o {
-		delete(s.owners, sessionID)
-	}
-}
-
 func (s *Service) lookup(sessionID string) *binding {
 	s.mu.Lock()
 	defer s.mu.Unlock()

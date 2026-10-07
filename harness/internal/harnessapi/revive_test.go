@@ -345,3 +345,43 @@ func TestAnUnrecordedReviveFailsItsAcceptedTurn(t *testing.T) {
 	}
 	t.Error("the revive's accepted turn never got TurnFailed")
 }
+
+type heldTurnSeq struct {
+	sessionstore.Sessions
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s heldTurnSeq) NextTurnSeq(context.Context, string) (int64, error) {
+	close(s.entered)
+	<-s.release
+	return 0, errors.New("the turn could not be allocated")
+}
+
+func TestAnEndAcceptedDuringAnAbandonedReviveStillEnds(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
+	h.svc.SuspendForTest(ctx, ref.GetSessionId())
+	waitForStoredState(t, h, ref, api.StateSuspended)
+
+	held := heldTurnSeq{Sessions: h.store, entered: make(chan struct{}), release: make(chan struct{})}
+	h.svc = harnessapi.New(held, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+
+	prompted := make(chan error, 1)
+	go func() {
+		_, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "carry on"})
+		prompted <- err
+	}()
+	<-held.entered
+	if _, err := h.svc.EndSession(ctx, &pb.EndSessionRequest{Ref: ref}); err != nil {
+		t.Fatalf("EndSession: %v", err)
+	}
+	close(held.release)
+	if err := <-prompted; err == nil {
+		t.Fatal("the revive succeeded although its turn could not be allocated")
+	}
+
+	waitForStoredState(t, h, ref, api.StateEnded)
+}
