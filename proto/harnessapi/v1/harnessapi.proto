@@ -489,9 +489,15 @@ enum Reason {
   REASON_REVIVE = 2;
   // The session was idle for too long.
   REASON_IDLE = 3;
-  // A revive did not succeed. The session goes back to
-  // SESSION_STATE_SUSPENDED.
+  // A revive did not succeed this time, for example because the approval
+  // lapsed. The session goes back to SESSION_STATE_SUSPENDED. A later revive
+  // can succeed.
   REASON_REVIVE_FAILED = 4;
+  // A revive found no conversation that the agent can continue, for example
+  // because the transcript is gone. The session goes back to
+  // SESSION_STATE_SUSPENDED. Each later revive fails the same way, so end the
+  // session.
+  REASON_RESUME_UNAVAILABLE = 5;
 }
 
 // EndReason tells why a session ended.

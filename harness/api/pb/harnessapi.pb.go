@@ -147,9 +147,15 @@ const (
 	Reason_REASON_REVIVE Reason = 2
 	// The session was idle for too long.
 	Reason_REASON_IDLE Reason = 3
-	// A revive did not succeed. The session goes back to
-	// SESSION_STATE_SUSPENDED.
+	// A revive did not succeed this time, for example because the approval
+	// lapsed. The session goes back to SESSION_STATE_SUSPENDED. A later revive
+	// can succeed.
 	Reason_REASON_REVIVE_FAILED Reason = 4
+	// A revive found no conversation that the agent can continue, for example
+	// because the transcript is gone. The session goes back to
+	// SESSION_STATE_SUSPENDED. Each later revive fails the same way, so end the
+	// session.
+	Reason_REASON_RESUME_UNAVAILABLE Reason = 5
 )
 
 // Enum value maps for Reason.
@@ -160,13 +166,15 @@ var (
 		2: "REASON_REVIVE",
 		3: "REASON_IDLE",
 		4: "REASON_REVIVE_FAILED",
+		5: "REASON_RESUME_UNAVAILABLE",
 	}
 	Reason_value = map[string]int32{
-		"REASON_UNSPECIFIED":   0,
-		"REASON_LAUNCH":        1,
-		"REASON_REVIVE":        2,
-		"REASON_IDLE":          3,
-		"REASON_REVIVE_FAILED": 4,
+		"REASON_UNSPECIFIED":        0,
+		"REASON_LAUNCH":             1,
+		"REASON_REVIVE":             2,
+		"REASON_IDLE":               3,
+		"REASON_REVIVE_FAILED":      4,
+		"REASON_RESUME_UNAVAILABLE": 5,
 	}
 )
 
@@ -3404,13 +3412,14 @@ const file_harnessapi_v1_harnessapi_proto_rawDesc = "" +
 	"\x15SESSION_STATE_RUNNING\x10\x04\x12\x1b\n" +
 	"\x17SESSION_STATE_SUSPENDED\x10\x05\x12\x17\n" +
 	"\x13SESSION_STATE_ENDED\x10\x06\x12\x1d\n" +
-	"\x19SESSION_STATE_INTERRUPTED\x10\a*q\n" +
+	"\x19SESSION_STATE_INTERRUPTED\x10\a*\x90\x01\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rREASON_LAUNCH\x10\x01\x12\x11\n" +
 	"\rREASON_REVIVE\x10\x02\x12\x0f\n" +
 	"\vREASON_IDLE\x10\x03\x12\x18\n" +
-	"\x14REASON_REVIVE_FAILED\x10\x04*\xf2\x02\n" +
+	"\x14REASON_REVIVE_FAILED\x10\x04\x12\x1d\n" +
+	"\x19REASON_RESUME_UNAVAILABLE\x10\x05*\xf2\x02\n" +
 	"\tEndReason\x12\x1a\n" +
 	"\x16END_REASON_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12END_REASON_REVOKED\x10\x01\x12\x16\n" +
