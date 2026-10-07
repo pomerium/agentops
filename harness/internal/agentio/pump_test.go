@@ -6,6 +6,7 @@ import (
 	"io"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,5 +161,48 @@ func TestAnEmptyDataFrameIsAProtocolViolation(t *testing.T) {
 	})
 	if err := s.Pump(ctx, newScriptedTransport(ctx, frames...), 0); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("an empty data frame returned %v, want ErrProtocol; empty frames would grow the queue past the replay cap", err)
+	}
+}
+
+type heldSender struct {
+	*scriptedTransport
+	entered chan struct{}
+	gate    chan struct{}
+	once    sync.Once
+}
+
+func (t *heldSender) Send(*agentlinkpb.AgentIOFrame) error {
+	t.once.Do(func() { close(t.entered) })
+	<-t.gate
+	return nil
+}
+
+func TestStopInterruptsAnAckWaitingForABlockedSender(t *testing.T) {
+	s := New()
+	defer s.Close(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := make(chan struct{})
+	tr := &heldSender{scriptedTransport: newScriptedTransport(ctx), entered: make(chan struct{}), gate: make(chan struct{})}
+	defer close(tr.gate)
+	s.Record(make([]byte, 34*FrameMax))
+	done := make(chan error, 1)
+	go func() { done <- s.Pump(ctx, tr, 0, WithStop(stop)) }()
+	<-tr.entered
+	go func() { _, _ = io.ReadFull(s.Inbound(), make([]byte, 1)) }()
+	tr.frames <- DataFrames([]byte("x"), 1)[0]
+	deadline := time.Now().Add(time.Second)
+	for s.Consumed() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("the inbound byte was not consumed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(2 * AckInterval)
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("WithStop did not interrupt an ack waiting for a blocked sender; a takeover would wait forever")
 	}
 }

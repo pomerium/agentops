@@ -36,12 +36,17 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 	defer close(streamDone)
 	out := make(chan *agentlinkpb.AgentIOFrame, 32)
 	fail := make(chan error, 2)
+	senderDone := make(chan struct{})
 
 	push := func(f *agentlinkpb.AgentIOFrame) bool {
 		select {
 		case out <- f:
 			return true
 		case <-streamDone:
+			return false
+		case <-senderDone:
+			return false
+		case <-o.stop:
 			return false
 		case <-ctx.Done():
 			return false
@@ -55,6 +60,7 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 	}
 
 	go func() {
+		defer close(senderDone)
 		for {
 			select {
 			case f := <-out:
@@ -162,6 +168,14 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 	defer ticker.Stop()
 	received := s.Consumed()
 	lastAck := received
+	pushFailed := func() error {
+		select {
+		case err := <-fail:
+			return err
+		default:
+		}
+		return ctx.Err()
+	}
 	flushAck := func() bool {
 		c := s.Consumed()
 		if c == lastAck {
@@ -207,11 +221,11 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 			}
 		case <-delivered:
 			if s.Consumed()-lastAck >= AckBytes && !flushAck() {
-				return nil
+				return pushFailed()
 			}
 		case <-ticker.C:
 			if !flushAck() {
-				return nil
+				return pushFailed()
 			}
 		case err := <-fail:
 			return err
