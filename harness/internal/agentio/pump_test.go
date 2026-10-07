@@ -149,3 +149,16 @@ func TestAPeerPastItsReplayCapIsAProtocolViolation(t *testing.T) {
 		t.Fatalf("Pump = %v, want ErrProtocol", err)
 	}
 }
+
+func TestAnEmptyDataFrameIsAProtocolViolation(t *testing.T) {
+	s := New()
+	defer s.Close(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	frames := append(DataFrames([]byte("x"), 1), &agentlinkpb.AgentIOFrame{
+		Msg: &agentlinkpb.AgentIOFrame_Data{Data: &agentlinkpb.AgentIOData{Seq: 1}},
+	})
+	if err := s.Pump(ctx, newScriptedTransport(ctx, frames...), 0); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("an empty data frame returned %v, want ErrProtocol; empty frames would grow the queue past the replay cap", err)
+	}
+}

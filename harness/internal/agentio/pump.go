@@ -181,8 +181,8 @@ func (s *Stream) Pump(ctx context.Context, t Transport, cursor uint64, opts ...P
 			case r.frame.GetData() != nil:
 				d := r.frame.GetData()
 				n := len(d.GetPayload())
-				if n > FrameMax {
-					return fmt.Errorf("%w: data frame of %d bytes exceeds the %d limit",
+				if n == 0 || n > FrameMax {
+					return fmt.Errorf("%w: data frame of %d bytes is outside 1..%d",
 						ErrProtocol, n, FrameMax)
 				}
 				if want := received + uint64(n); d.GetSeq() != want {
