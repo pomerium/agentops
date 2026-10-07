@@ -124,3 +124,20 @@ func TestBlockedHelloAckDoesNotHoldAForgottenRun(t *testing.T) {
 	default:
 	}
 }
+
+func TestClaimRejectsAnUnsupportedProtocolVersion(t *testing.T) {
+	for _, version := range []uint32{0, ProtocolVersion + 1} {
+		run := &attachedRun{
+			runID: "wrong-version", hbInterval: time.Hour, io: agentio.New(),
+			done: make(chan struct{}),
+		}
+		s := &Server{now: time.Now}
+		live, err := s.claim(run, &agentlinkpb.SidecarHello{ProtocolVersion: version, Attempt: 1})
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Errorf("version %d: err = %v (code %s), want FailedPrecondition", version, err, status.Code(err))
+		}
+		if live != nil || run.current() != nil {
+			t.Errorf("version %d installed a live attach", version)
+		}
+	}
+}

@@ -239,6 +239,9 @@ func (s *Server) Attach(stream agentlinkpb.AgentLinkService_AttachServer) error 
 }
 
 func (s *Server) claim(run *attachedRun, hello *agentlinkpb.SidecarHello) (*attachStream, error) {
+	if v := hello.GetProtocolVersion(); v != ProtocolVersion {
+		return nil, status.Errorf(codes.FailedPrecondition, "protocol version %d is not supported; want %d", v, ProtocolVersion)
+	}
 	now := s.now()
 	run.mu.Lock()
 	if run.finished() {
