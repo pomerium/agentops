@@ -56,6 +56,15 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.failLaunch(ctx, sess, opts, o, "", api.EndLaunchFailed, "")
 		return
 	}
+	if opts.agentPrompt != "" && opts.turnID == "" {
+		turnID, err := s.nextTurnID(ctx, sess.ID)
+		if err != nil {
+			s.log.ErrorContext(ctx, "launch: could not allocate the opening turn", "err", err)
+			s.failLaunch(ctx, sess, opts, o, "", api.EndLaunchFailed, "the opening turn could not be allocated")
+			return
+		}
+		opts.turnID = turnID
+	}
 	from := sess.Status
 	tmpl, promptAppendix, err := storedTemplate(sess)
 	if err != nil {
@@ -209,15 +218,7 @@ func (s *Service) activateAndRun(
 	}
 	var ticket uint64
 	opening := false
-	openingTurn := opts.turnID
-	if opts.agentPrompt != "" && openingTurn == "" {
-		id, err := s.nextTurnID(ctx, sess.ID)
-		if err != nil {
-			s.log.WarnContext(ctx, "could not allocate the opening turn", "err", err)
-		}
-		openingTurn = id
-	}
-	if openingTurn != "" && opts.agentPrompt != "" {
+	if opts.agentPrompt != "" {
 		ticket, opening = b.enter()
 	}
 
@@ -237,7 +238,7 @@ func (s *Service) activateAndRun(
 		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
 	}) {
 		if opening {
-			s.emit(ctx, sess.ID, &pb.Event{TurnId: openingTurn, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
+			s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
 			b.forfeit(ticket)
 		}
 		spec := stopSpec{end: api.EndLaunchFailed, detail: unrecorded}
@@ -258,7 +259,7 @@ func (s *Service) activateAndRun(
 	}
 
 	if opening {
-		go s.runTurn(context.WithoutCancel(ctx), b, ticket, openingTurn, opts.agentPrompt)
+		go s.runTurn(context.WithoutCancel(ctx), b, ticket, opts.turnID, opts.agentPrompt)
 	}
 	return b
 }

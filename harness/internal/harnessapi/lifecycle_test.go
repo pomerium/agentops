@@ -590,3 +590,38 @@ func TestTheOpeningPromptRunsBeforeALaterOne(t *testing.T) {
 		t.Errorf("the agent's second prompt was %q, want %q", second, "second")
 	}
 }
+
+type refusedTurnSeq struct{ sessionstore.Sessions }
+
+func (refusedTurnSeq) NextTurnSeq(context.Context, string) (int64, error) {
+	return 0, errors.New("the turn could not be allocated")
+}
+
+func TestALaunchThatCannotAllocateItsOpeningTurnFails(t *testing.T) {
+	ctx := as(stubClient)
+	h := newHarness(t)
+	h.svc = harnessapi.New(refusedTurnSeq{Sessions: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+
+	created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+		Template: "deploy", ConversationRef: "stub:conv-1",
+		ApprovalPrompt: "ship the thing", InitialPrompt: "first",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ref := byID(created.GetSession().GetId())
+	waitForStoredState(t, h, ref, api.StateEnded)
+	page, err := h.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: &pb.SessionRef{SessionId: ref.GetSessionId(), IncludeTerminal: true}})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, ev := range page.GetEvents() {
+		if ev.GetStateChanged().GetNew() == api.StateRunning {
+			t.Error("the session ran without its opening prompt")
+		}
+		if ended := ev.GetSessionEnded(); ended != nil && ended.GetReason() != api.EndLaunchFailed {
+			t.Errorf("the session ended with %v, want %v", ended.GetReason(), api.EndLaunchFailed)
+		}
+	}
+}
