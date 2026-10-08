@@ -47,7 +47,7 @@ func PermissionBlocks(sessionID, toolCallID, ownerUserID, title string, choices 
 	for _, ch := range choices {
 		btn := slack.NewButtonBlockElement(
 			ActionPermission,
-			EncodePermissionValue(sessionID, toolCallID, ch.OptionID),
+			PermissionValue(sessionID, toolCallID, ch.OptionID),
 			slack.NewTextBlockObject(slack.PlainTextType, clip(ch.Name, maxButtonLabel), true, false),
 		)
 		if isAllowKind(ch.Kind) {

@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -55,3 +57,17 @@ func DecodePermissionValue(v string) (sessionID, toolCallID, optionID string, ok
 	}
 	return parts[0], parts[1], parts[2], true
 }
+
+const maxButtonValue = 2000
+
+const permissionTokenPrefix = "pt."
+
+func PermissionValue(sessionID, toolCallID, optionID string) string {
+	if v := EncodePermissionValue(sessionID, toolCallID, optionID); len(v) <= maxButtonValue {
+		return v
+	}
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + toolCallID + "\x00" + optionID))
+	return permissionTokenPrefix + hex.EncodeToString(sum[:16])
+}
+
+func IsPermissionToken(v string) bool { return strings.HasPrefix(v, permissionTokenPrefix) }

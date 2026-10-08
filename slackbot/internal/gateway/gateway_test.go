@@ -584,3 +584,22 @@ func TestWaitGivesUpAtItsDeadline(t *testing.T) {
 		t.Fatal("Wait returned no error with an action still running past its deadline")
 	}
 }
+
+func TestAPermissionButtonValueFitsSlack(t *testing.T) {
+	blocks := gateway.PermissionBlocks("sess-1", "call-2", "U1", "Edit config",
+		[]gateway.PermissionChoice{{OptionID: strings.Repeat("x", 1500), Name: "Allow", Kind: "allow_once"}})
+	button := blocks[1].(*slack.ActionBlock).Elements.ElementSet[0].(*slack.ButtonBlockElement)
+	if n := len(button.Value); n > 2000 {
+		t.Fatalf("the button value has %d characters; Slack rejects more than 2000", n)
+	}
+	if !gateway.IsPermissionToken(button.Value) {
+		t.Fatalf("an oversized value should become a token: %.40q", button.Value)
+	}
+	if got := gateway.PermissionValue("sess-1", "call-2", strings.Repeat("x", 1500)); got != button.Value {
+		t.Fatal("the token for the same choice must be the same every time")
+	}
+	short := gateway.PermissionValue("sess-1", "call-2", "allow")
+	if s, c, o, ok := gateway.DecodePermissionValue(short); !ok || s != "sess-1" || c != "call-2" || o != "allow" {
+		t.Fatalf("a value that fits must carry the IDs themselves: %q", short)
+	}
+}
