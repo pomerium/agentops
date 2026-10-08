@@ -158,3 +158,15 @@ func TestAPromptAfterTheSessionFinishedChangesNothing(t *testing.T) {
 		t.Fatalf("a finished session took a turn: %v", st)
 	}
 }
+
+func TestASpawnAfterCloseStartsNoAgent(t *testing.T) {
+	svc := New(WithCommand([]string{"/bin/sh", "-c", "sleep 60"}), WithKillDelay(time.Millisecond))
+	svc.Close()
+	defer svc.Close()
+	_, err := svc.open(&runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Spawn{Spawn: &runnerpb.Spawn{
+		StreamId: []byte("A"), Session: &agentlinkpb.SessionParams{Cwd: t.TempDir()},
+	}}})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("Spawn after Close: err = %v, want Unavailable", err)
+	}
+}

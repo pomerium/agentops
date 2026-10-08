@@ -54,6 +54,7 @@ type Service struct {
 	mu     sync.Mutex
 	sess   *session
 	client context.CancelCauseFunc
+	closed bool
 }
 
 func New(opts ...Option) *Service {
@@ -89,6 +90,7 @@ func (s *Service) Register(gs *grpc.Server) {
 
 func (s *Service) Close() {
 	s.mu.Lock()
+	s.closed = true
 	sess := s.sess
 	s.mu.Unlock()
 	if sess != nil {
@@ -109,6 +111,9 @@ func (s *Service) open(first *runnerpb.RunnerClientFrame) (*session, error) {
 				return nil, status.Error(codes.AlreadyExists, "an agent session with another stream id is running")
 			}
 			return s.sess, nil
+		}
+		if s.closed {
+			return nil, status.Error(codes.Unavailable, "the runner is shutting down")
 		}
 		proc, err := s.spawn()
 		if err != nil {
