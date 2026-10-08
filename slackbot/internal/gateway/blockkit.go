@@ -12,6 +12,8 @@ const ActionPermission = "acp_permission"
 
 const MaxSectionChars = 2900
 
+const maxButtonLabel = 75
+
 func AgentMessageBlocks(text string) []slack.Block {
 	if text == "" {
 		text = "_(no output)_"
@@ -46,7 +48,7 @@ func PermissionBlocks(sessionID, toolCallID, ownerUserID, title string, choices 
 		btn := slack.NewButtonBlockElement(
 			ActionPermission,
 			EncodePermissionValue(sessionID, toolCallID, ch.OptionID),
-			slack.NewTextBlockObject(slack.PlainTextType, ch.Name, true, false),
+			slack.NewTextBlockObject(slack.PlainTextType, clip(ch.Name, maxButtonLabel), true, false),
 		)
 		if isAllowKind(ch.Kind) {
 			btn = btn.WithStyle(slack.StylePrimary)

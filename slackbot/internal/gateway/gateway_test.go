@@ -492,3 +492,19 @@ func TestALongPermissionTitleFitsTheSection(t *testing.T) {
 		}
 	}
 }
+
+func TestALongPermissionOptionNameFitsItsButton(t *testing.T) {
+	blocks := gateway.PermissionBlocks("sess-1", "call-2", "U1", "Edit config",
+		[]gateway.PermissionChoice{{OptionID: "allow", Name: strings.Repeat("x", 76), Kind: "allow_once"}})
+	actions, ok := blocks[1].(*slack.ActionBlock)
+	if !ok {
+		t.Fatalf("second block is not an action block: %T", blocks[1])
+	}
+	button, ok := actions.Elements.ElementSet[0].(*slack.ButtonBlockElement)
+	if !ok {
+		t.Fatalf("first element is not a button: %T", actions.Elements.ElementSet[0])
+	}
+	if n := utf8.RuneCountInString(button.Text.Text); n > 75 {
+		t.Fatalf("the button label has %d characters; Slack rejects more than 75", n)
+	}
+}
