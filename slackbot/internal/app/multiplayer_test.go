@@ -123,6 +123,23 @@ func TestAFailedCatchupReadIsCarriedByTheNextTurn(t *testing.T) {
 	}
 }
 
+func TestTheOpeningTurnsEndKeepsAFollowUpBusy(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	f.app.HandleMessage(context.Background(), replyIn(f, "U1", "also run the tests"))
+	waitFor(t, "the follow-up turn", func() bool { return len(f.api.promptRequests()) == 1 })
+
+	f.api.emit("sess-1", "opening", &pb.TurnCompleted{})
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "follow-up still running", Final: true})
+	f.poster.waitForPost(t, "follow-up still running")
+
+	for _, r := range f.poster.reactionsOn(threadRoot, "waiting") {
+		if !r.add {
+			t.Fatal("the opening turn's end cleared the busy marker of a follow-up that is still running")
+		}
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -147,23 +164,36 @@ func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	}
 }
 
+func finishOpeningTurns(t *testing.T, f *fixture) int {
+	t.Helper()
+	f.api.emit("sess-1", "opening-1", &pb.TurnCompleted{})
+	f.api.emit("sess-2", "opening-2", &pb.TurnCompleted{})
+	waitFor(t, "the opening turns to end", func() bool {
+		ops := f.poster.reactionsOn(threadRoot, "waiting")
+		return len(ops) > 0 && !ops[len(ops)-1].add
+	})
+	return len(f.poster.reactionsOn(threadRoot, "waiting"))
+}
+
+func busyOpsSince(f *fixture, mark int) []reactionOp {
+	return f.poster.reactionsOn(threadRoot, "waiting")[mark:]
+}
+
 func TestBusyReactionAggregatesAcrossSessions(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	twoParticipants(t, f)
+	mark := finishOpeningTurns(t, f)
 
 	f.app.HandleMention(ctx, mentionIn(f, "U1", "start something long"))
 	f.app.HandleMention(ctx, mentionIn(f, "U2", "me too"))
 	waitFor(t, "both turns to start", func() bool { return len(f.api.promptRequests()) >= 2 })
-	waitFor(t, "the busy reaction", func() bool {
-		return len(f.poster.reactionsOn(threadRoot, "waiting")) >= 1
-	})
+	waitFor(t, "the busy reaction", func() bool { return len(busyOpsSince(f, mark)) >= 1 })
 
 	f.api.emit("sess-1", "t1", &pb.TurnCompleted{})
-	waitFor(t, "the first turn to complete", func() bool {
-		return len(f.poster.reactionsOn(threadRoot, "waiting")) >= 1
-	})
-	for _, r := range f.poster.reactionsOn(threadRoot, "waiting") {
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.2", Text: "sess-1 is done", Final: true})
+	f.poster.waitForPost(t, "sess-1 is done")
+	for _, r := range busyOpsSince(f, mark) {
 		if !r.add {
 			t.Fatal("the busy reaction came off while another session was still working")
 		}
@@ -171,7 +201,7 @@ func TestBusyReactionAggregatesAcrossSessions(t *testing.T) {
 
 	f.api.emit("sess-2", "t2", &pb.TurnCompleted{})
 	waitFor(t, "the busy reaction to come off", func() bool {
-		for _, r := range f.poster.reactionsOn(threadRoot, "waiting") {
+		for _, r := range busyOpsSince(f, mark) {
 			if !r.add {
 				return true
 			}
@@ -184,13 +214,12 @@ func TestASessionEndingMidTurnReleasesTheRoomsBusyMarker(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	twoParticipants(t, f)
+	mark := finishOpeningTurns(t, f)
 
 	f.app.HandleMention(ctx, mentionIn(f, "U1", "start something long"))
 	f.app.HandleMention(ctx, mentionIn(f, "U2", "me too"))
 	waitFor(t, "both turns to start", func() bool { return len(f.api.promptRequests()) >= 2 })
-	waitFor(t, "the busy reaction", func() bool {
-		return len(f.poster.reactionsOn(threadRoot, "waiting")) >= 1
-	})
+	waitFor(t, "the busy reaction", func() bool { return len(busyOpsSince(f, mark)) >= 1 })
 
 	f.api.setState("sess-1", api.StateRunning, api.StateEnded, noReason)
 	f.api.emit("sess-1", "", &pb.SessionEnded{Reason: api.EndAgentExit})
@@ -198,7 +227,7 @@ func TestASessionEndingMidTurnReleasesTheRoomsBusyMarker(t *testing.T) {
 
 	f.api.emit("sess-2", "t2", &pb.TurnCompleted{})
 	waitFor(t, "the busy reaction to come off", func() bool {
-		for _, r := range f.poster.reactionsOn(threadRoot, "waiting") {
+		for _, r := range busyOpsSince(f, mark) {
 			if !r.add {
 				return true
 			}
