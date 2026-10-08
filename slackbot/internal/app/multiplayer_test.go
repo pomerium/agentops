@@ -263,6 +263,21 @@ func TestALongThreadStillCarriesAPeerAnswerFinishedAfterTheCursor(t *testing.T) 
 	}
 }
 
+func TestTheFirstParticipantGetsTheDiscussionBeforeTheJoin(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	liveThread(t, f)
+	f.humanSaid("U9", "staging must stay stopped")
+
+	f.app.HandleMention(ctx, mentionIn(f, "U2", "check staging"))
+	f.poster.waitForPost(t, "joined with their own agent")
+	f.app.HandleMention(ctx, mentionIn(f, "U1", "what should we do?"))
+	waitFor(t, "the first participant's request", func() bool { return len(f.api.promptRequests()) == 1 })
+	if got := f.api.promptRequests()[0].Content; !strings.Contains(got, "staging must stay stopped") {
+		t.Fatalf("the discussion before the join never reached the first participant's agent:\n%s", got)
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -533,8 +548,8 @@ func TestSoloThreadBehaviorIsUnchanged(t *testing.T) {
 	if got := f.api.promptRequests()[0].Content; got != "and the changelog" {
 		t.Errorf("a solo turn must carry the words alone, got:\n%s", got)
 	}
-	if meta := f.slackState("sess-1"); meta["multiplayer"] == true || meta["last_seen_ts"] != nil {
-		t.Errorf("a solo thread should keep no multiplayer state: %v", meta)
+	if meta := f.slackState("sess-1"); meta["multiplayer"] == true {
+		t.Errorf("a solo thread must not be marked multiplayer: %v", meta)
 	}
 
 	f.api.setState("sess-1", api.StateRunning, api.StateSuspended, api.ReasonIdle)
