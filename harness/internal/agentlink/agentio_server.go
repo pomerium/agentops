@@ -97,30 +97,16 @@ func (s *Server) serveIO(ctx context.Context, stream agentlinkpb.AgentLinkServic
 		}
 	}()
 
-	var lastAck uint64
-	flush := func() error {
-		cmds := run.takeCommands()
-		for i, f := range cmds {
-			if err := stream.Send(f); err != nil {
-				run.requeue(cmds[i:])
-				return err
-			}
+	sendErr := make(chan error, 1)
+	go func() {
+		if err := sendCommands(ctx, stream, run); err != nil {
+			sendErr <- err
 		}
-		if acked := run.ackedSeq(); acked > lastAck {
-			if err := stream.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Ack{Ack: &agentlinkpb.AgentIOAck{Consumed: acked}}}); err != nil {
-				return err
-			}
-			lastAck = acked
-		}
-		return nil
-	}
+	}()
 
 	var pending *agentlinkpb.AgentIOFrame
 	var pendingSeq uint64
 	for {
-		if err := flush(); err != nil {
-			return err
-		}
 		var in <-chan recvResult
 		var out chan<- *agentlinkpb.AgentIOFrame
 		if pending == nil {
@@ -156,13 +142,52 @@ func (s *Server) serveIO(ctx context.Context, stream agentlinkpb.AgentLinkServic
 				run.setDelivered(pendingSeq)
 			}
 			pending, pendingSeq = nil, 0
-		case <-run.outReady:
+		case err := <-sendErr:
+			return err
 		case <-claim.closed:
 			return status.Error(codes.Aborted, errIOSuperseded.Error())
 		case <-run.done:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
+		}
+	}
+}
+
+func sendCommands(ctx context.Context, stream agentlinkpb.AgentLinkService_AgentIOServer, run *attachedRun) error {
+	var sent, lastAck uint64
+	for {
+		for {
+			c, ok := run.nextCommand(sent)
+			if !ok {
+				break
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err := stream.Send(c.frame); err != nil {
+				return err
+			}
+			run.commitCommand(c.id)
+			sent = c.id
+		}
+		if acked := run.ackedSeq(); acked > lastAck {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err := stream.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Ack{Ack: &agentlinkpb.AgentIOAck{Consumed: acked}}}); err != nil {
+				return err
+			}
+			lastAck = acked
+		}
+		select {
+		case <-run.outReady:
+			if ctx.Err() != nil {
+				run.signalOut()
+				return nil
+			}
+		case <-ctx.Done():
+			return nil
 		}
 	}
 }

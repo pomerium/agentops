@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -135,7 +136,13 @@ type attachedRun struct {
 	err       error
 	delivered uint64
 	acked     uint64
-	commands  []*agentlinkpb.AgentIOFrame
+	commands  []queuedCommand
+	commandID uint64
+}
+
+type queuedCommand struct {
+	id    uint64
+	frame *agentlinkpb.AgentIOFrame
 }
 
 type ioClaim struct {
@@ -237,18 +244,21 @@ func (r *attachedRun) ackedSeq() uint64 {
 	return r.acked
 }
 
-func (r *attachedRun) takeCommands() []*agentlinkpb.AgentIOFrame {
+func (r *attachedRun) nextCommand(after uint64) (queuedCommand, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := r.commands
-	r.commands = nil
-	return out
+	for _, c := range r.commands {
+		if c.id > after {
+			return c, true
+		}
+	}
+	return queuedCommand{}, false
 }
 
-func (r *attachedRun) requeue(frames []*agentlinkpb.AgentIOFrame) {
+func (r *attachedRun) commitCommand(id uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.commands = append(append([]*agentlinkpb.AgentIOFrame(nil), frames...), r.commands...)
+	r.commands = slices.DeleteFunc(r.commands, func(c queuedCommand) bool { return c.id == id })
 }
 
 func (r *attachedRun) finish(cause error) {
@@ -335,7 +345,8 @@ func (h *RunHandle) Ack(seq uint64) {
 
 func (h *RunHandle) Send(f *agentlinkpb.AgentIOFrame) {
 	h.run.mu.Lock()
-	h.run.commands = append(h.run.commands, f)
+	h.run.commandID++
+	h.run.commands = append(h.run.commands, queuedCommand{id: h.run.commandID, frame: f})
 	h.run.mu.Unlock()
 	h.run.signalOut()
 }
