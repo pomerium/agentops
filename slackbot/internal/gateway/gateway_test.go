@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +19,7 @@ import (
 
 	"github.com/slack-go/slack"
 
-	"github.com/pomerium/agentops/internal/channels/slack/gateway"
+	"github.com/pomerium/agentops/slackbot/internal/gateway"
 )
 
 const testSecret = "8f742231b10e8888abcd99yyyzzz85a5"
@@ -40,15 +41,10 @@ func signedRequest(t *testing.T, path, contentType string, body []byte) *http.Re
 }
 
 type fakeApp struct {
-	mu             sync.Mutex
-	mentions       []gateway.MentionInvocation
-	messages       []gateway.ThreadMessage
-	interactions   []gateway.Interaction
-	callbackErr    error
-	gotCallback    [2]string
-	connectURL     string
-	connectErr     error
-	gotConnectFlow string
+	mu           sync.Mutex
+	mentions     []gateway.MentionInvocation
+	messages     []gateway.ThreadMessage
+	interactions []gateway.Interaction
 }
 
 func (f *fakeApp) HandleMention(_ context.Context, in gateway.MentionInvocation) {
@@ -65,16 +61,6 @@ func (f *fakeApp) HandleInteraction(_ context.Context, in gateway.Interaction) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.interactions = append(f.interactions, in)
-}
-func (f *fakeApp) OAuthCallback(_ context.Context, code, state string) error {
-	f.gotCallback = [2]string{code, state}
-	return f.callbackErr
-}
-func (f *fakeApp) ConnectRedirect(_ context.Context, flowID string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.gotConnectFlow = flowID
-	return f.connectURL, f.connectErr
 }
 
 func (f *fakeApp) waitMention(t *testing.T) gateway.MentionInvocation {
@@ -97,7 +83,7 @@ func (f *fakeApp) waitMention(t *testing.T) gateway.MentionInvocation {
 const testBotUserID = "U0BOT"
 
 func newServer(app gateway.App) *gateway.Server {
-	return gateway.New(gateway.Config{SigningSecret: testSecret, BotUserID: testBotUserID}, app, nil)
+	return gateway.New(testSecret, app, gateway.WithBotUserID(testBotUserID))
 }
 
 func TestParseMention(t *testing.T) {
@@ -107,7 +93,7 @@ func TestParseMention(t *testing.T) {
 		{"  <@U0BOT>   hello   ", "U0BOT", "hello"},
 		{"hey <@U0BOT> do it", "U0BOT", "do it"},
 		{"<@U0BOT>", "U0BOT", ""},
-		{"<@U0BOT> stuff", "", "stuff"}, // unknown bot id: strip leading mention
+		{"<@U0BOT> stuff", "", "stuff"},
 	}
 	for _, c := range cases {
 		if prompt := gateway.ParseMention(c.in, c.bot); prompt != c.prompt {
@@ -120,8 +106,6 @@ func TestMentionInMessageStartsSession(t *testing.T) {
 	app := &fakeApp{}
 	srv := newServer(app)
 
-	// Slack delivers a channel @mention as a plain message event whose text
-	// contains the bot's <@id> (there is no separate app_mention subscription).
 	inner := `{"type":"event_callback","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","text":"<@U0BOT> deploy-service ship it","ts":"1700000000.0001"}}`
 	req := signedRequest(t, "/slack/events", "application/json", []byte(inner))
 	rec := httptest.NewRecorder()
@@ -164,8 +148,6 @@ func TestThreadedMentionDispatchesMention(t *testing.T) {
 	app := &fakeApp{}
 	srv := newServer(app)
 
-	// A mention inside an existing thread loops the bot in: it dispatches as a
-	// mention (carrying the origin thread), not as a plain thread reply.
 	inner := `{"type":"event_callback","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","text":"<@U0BOT> sre what do you think?","ts":"1700000000.0042","thread_ts":"1700000000.0001"}}`
 	req := signedRequest(t, "/slack/events", "application/json", []byte(inner))
 	rec := httptest.NewRecorder()
@@ -196,8 +178,6 @@ func TestThreadBroadcastMentionDispatchesMention(t *testing.T) {
 	app := &fakeApp{}
 	srv := newServer(app)
 
-	// An "also send to channel" reply carries subtype thread_broadcast but is a
-	// normal user message; a bot mention in one must still loop the bot in.
 	inner := `{"type":"event_callback","team_id":"T1","event":{"type":"message","subtype":"thread_broadcast","user":"U1","channel":"C1","text":"<@U0BOT> sre help here","ts":"1700000000.0043","thread_ts":"1700000000.0001"}}`
 	req := signedRequest(t, "/slack/events", "application/json", []byte(inner))
 	rec := httptest.NewRecorder()
@@ -216,7 +196,6 @@ func TestThreadReplyDispatchesMessage(t *testing.T) {
 	app := &fakeApp{}
 	srv := newServer(app)
 
-	// A reply inside a thread (no mention needed) drives the next turn.
 	inner := `{"type":"event_callback","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","text":"status?","ts":"2.0","thread_ts":"1700000000.0001"}}`
 	req := signedRequest(t, "/slack/events", "application/json", []byte(inner))
 	rec := httptest.NewRecorder()
@@ -249,7 +228,7 @@ func TestHTTPRequestLogged(t *testing.T) {
 	app := &fakeApp{}
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	srv := gateway.New(gateway.Config{SigningSecret: testSecret}, app, logger)
+	srv := gateway.New(testSecret, app, gateway.WithLogger(logger))
 
 	body := []byte(`{"type":"event_callback","event":{"type":"app_mention","user":"U1","channel":"C1","text":"<@U0BOT> hello","ts":"1.0"}}`)
 	req := signedRequest(t, "/slack/events", "application/json", body)
@@ -267,7 +246,7 @@ func TestSignatureRejected(t *testing.T) {
 	srv := newServer(app)
 	body := []byte(`{"type":"event_callback","event":{"type":"app_mention","text":"x"}}`)
 	req := signedRequest(t, "/slack/events", "application/json", body)
-	req.Header.Set("X-Slack-Signature", "v0=deadbeef") // tamper
+	req.Header.Set("X-Slack-Signature", "v0=deadbeef")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -315,7 +294,7 @@ func TestEventRetryIsNotRedispatched(t *testing.T) {
 func TestOversizedBodyRejected(t *testing.T) {
 	app := &fakeApp{}
 	srv := newServer(app)
-	big := make([]byte, (1<<20)+1024) // > 1 MiB
+	big := make([]byte, (1<<20)+1024)
 	for i := range big {
 		big[i] = 'a'
 	}
@@ -324,48 +303,6 @@ func TestOversizedBodyRejected(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized body: status = %d, want 413", rec.Code)
-	}
-}
-
-func TestOAuthCallbackRoutes(t *testing.T) {
-	app := &fakeApp{}
-	srv := newServer(app)
-	req := httptest.NewRequest(http.MethodGet, "/oauth/callback?code=abc&state=xyz", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
-	}
-	if app.gotCallback[0] != "abc" || app.gotCallback[1] != "xyz" {
-		t.Errorf("callback args = %v", app.gotCallback)
-	}
-}
-
-func TestConnectRedirectRoutes(t *testing.T) {
-	app := &fakeApp{connectURL: "https://provider.example/authorize?client_id=x&state=y"}
-	srv := newServer(app)
-	req := httptest.NewRequest(http.MethodGet, "/connect/flow-123", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status = %d, want 302", rec.Code)
-	}
-	if got := rec.Header().Get("Location"); got != app.connectURL {
-		t.Errorf("Location = %q, want %q", got, app.connectURL)
-	}
-	if app.gotConnectFlow != "flow-123" {
-		t.Errorf("flow id = %q, want flow-123", app.gotConnectFlow)
-	}
-}
-
-func TestConnectRedirectExpired(t *testing.T) {
-	app := &fakeApp{connectErr: fmt.Errorf("expired")}
-	srv := newServer(app)
-	req := httptest.NewRequest(http.MethodGet, "/connect/nope", nil)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 for unresolvable connect link", rec.Code)
 	}
 }
 
@@ -380,30 +317,29 @@ func TestPermissionValueRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAuthPromptBlocksContainsLinks(t *testing.T) {
-	blocks := gateway.AuthPromptBlocks("deploy-service", []gateway.AuthStatus{
-		{ServerName: "github", URL: "https://app.example/connect/gh"},
-		{ServerName: "k8s", Connected: true},
-	})
-	js, _ := json.Marshal(blocks)
-	s := string(js)
-	// The unconnected server keeps its connect link/button.
-	for _, want := range []string{"github", "https://app.example/connect/gh", "deploy-service"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("auth blocks missing %q in %s", want, s)
+func TestActionValuesSurviveSlack(t *testing.T) {
+	values := map[string]string{
+		"permission": gateway.EncodePermissionValue("sess-1", "call-2", "allow"),
+	}
+	for name, v := range values {
+		if v == "" {
+			t.Errorf("%s: encoded to the empty string", name)
+		}
+		for i, r := range v {
+			if r < 0x20 || r == 0x7f {
+				t.Errorf("%s: value %q has a control character %#U at %d; Slack strips these and the decode then fails",
+					name, v, r, i)
+			}
 		}
 	}
-	// The connected server shows a checkmark and NO connect button.
-	if !strings.Contains(s, "Connected *k8s*") {
-		t.Errorf("expected connected checkmark row for k8s in %s", s)
-	}
-	if strings.Contains(s, "Connect k8s") {
-		t.Errorf("connected server must not render a Connect button: %s", s)
+
+	mangled := "sess-1call-2allow"
+	if _, _, _, ok := gateway.DecodePermissionValue(mangled); ok {
+		t.Errorf("DecodePermissionValue(%q) accepted a separator-stripped value", mangled)
 	}
 }
 
 func TestAgentMessageBlocksSplitsLongText(t *testing.T) {
-	// ~11k chars must split into multiple sections, each within Slack's 3000 cap.
 	long := strings.Repeat("abcdefghij\n", 1000)
 	blocks := gateway.AgentMessageBlocks(long)
 	if len(blocks) < 2 {
@@ -421,7 +357,7 @@ func TestAgentMessageBlocksSplitsLongText(t *testing.T) {
 }
 
 func TestPermissionBlocksEncodeAction(t *testing.T) {
-	blocks := gateway.PermissionBlocks("sess-1", "call-2", "Edit config", []gateway.PermissionChoice{
+	blocks := gateway.PermissionBlocks("sess-1", "call-2", "U1", "Edit config", []gateway.PermissionChoice{
 		{OptionID: "allow", Name: "Allow", Kind: "allow_once"},
 		{OptionID: "deny", Name: "Deny", Kind: "reject_once"},
 	})
@@ -432,5 +368,80 @@ func TestPermissionBlocksEncodeAction(t *testing.T) {
 	}
 	if !strings.Contains(s, "Edit config") || !strings.Contains(s, "Allow") {
 		t.Errorf("permission blocks missing content: %s", s)
+	}
+	section, ok := blocks[0].(*slack.SectionBlock)
+	if !ok || section.Text == nil {
+		t.Fatalf("first block is not a section block: %T", blocks[0])
+	}
+	if !strings.Contains(section.Text.Text, "<@U1>, the agent needs your permission") {
+		t.Errorf("permission prompt should name the owner: %s", section.Text.Text)
+	}
+}
+
+func (f *fakeApp) waitInteraction(t *testing.T) gateway.Interaction {
+	t.Helper()
+	for range 100 {
+		f.mu.Lock()
+		if len(f.interactions) > 0 {
+			in := f.interactions[0]
+			f.mu.Unlock()
+			return in
+		}
+		f.mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the interaction to be dispatched")
+	return gateway.Interaction{}
+}
+
+func TestInteractivityDispatchesAPermissionClick(t *testing.T) {
+	app := &fakeApp{}
+	srv := newServer(app)
+
+	value := gateway.EncodePermissionValue("sess-1", "call-2", "allow")
+	payload := fmt.Sprintf(`{
+      "type": "block_actions",
+      "user": {"id": "U0456GHIJKL", "username": "alice", "team_id": "T0789MNOPQR"},
+      "team": {"id": "T0789MNOPQR"},
+      "channel": {"id": "C0123ABCDEF", "name": "agentops-test"},
+      "container": {"type": "message", "message_ts": "1785246742.001300",
+                    "channel_id": "C0123ABCDEF", "is_ephemeral": false,
+                    "thread_ts": "1785246201.347149"},
+      "message": {"type": "message", "ts": "1785246742.001300",
+                  "thread_ts": "1785246201.347149"},
+      "response_url": "https://hooks.slack.com/actions/T1/1/abc",
+      "actions": [{"action_id": %q, "block_id": "acp_permission_actions",
+                   "text": {"type": "plain_text", "text": "Allow once"},
+                   "value": %q, "style": "primary", "type": "button",
+                   "action_ts": "1785246784.030897"}]
+    }`, gateway.ActionPermission, value)
+
+	form := "payload=" + url.QueryEscape(payload)
+	req := signedRequest(t, "/slack/interactivity", "application/x-www-form-urlencoded", []byte(form))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	in := app.waitInteraction(t)
+	if in.ActionID != gateway.ActionPermission {
+		t.Errorf("ActionID = %q, want %q", in.ActionID, gateway.ActionPermission)
+	}
+	if in.UserID != "U0456GHIJKL" || in.TeamID != "T0789MNOPQR" {
+		t.Errorf("actor = %q/%q, want U0456GHIJKL/T0789MNOPQR", in.UserID, in.TeamID)
+	}
+	if in.ChannelID != "C0123ABCDEF" || in.ThreadTS != "1785246201.347149" {
+		t.Errorf("thread = %q/%q, want C0123ABCDEF/1785246201.347149", in.ChannelID, in.ThreadTS)
+	}
+	if in.ResponseURL == "" {
+		t.Error("ResponseURL is the only way to answer a click; it must survive")
+	}
+	sessionID, requestID, optionID, ok := gateway.DecodePermissionValue(in.Value)
+	if !ok {
+		t.Fatalf("the value Slack echoed back did not decode: %q", in.Value)
+	}
+	if sessionID != "sess-1" || requestID != "call-2" || optionID != "allow" {
+		t.Errorf("decoded = %q/%q/%q", sessionID, requestID, optionID)
 	}
 }

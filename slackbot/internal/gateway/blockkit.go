@@ -3,70 +3,13 @@ package gateway
 import (
 	"github.com/slack-go/slack"
 
-	"github.com/pomerium/agentops/internal/mdsplit"
+	"github.com/pomerium/agentops/slackbot/internal/mdsplit"
 )
 
-// ActionPermission is the Block Kit action_id used for permission approve/deny
-// buttons. The button value carries the routing identifiers (see
-// EncodePermissionValue).
 const ActionPermission = "acp_permission"
 
-// ActionConnectPrefix is the action_id prefix for the per-server "Connect"
-// buttons in the auth prompt; the suffix is the server name and the button
-// value is the connect URL.
-const ActionConnectPrefix = "connect_"
-
-// AuthStatus describes one required MCP server in the connect prompt: whether
-// the user is already connected, and (when not) the short URL that opens the
-// OAuth flow.
-type AuthStatus struct {
-	ServerName string
-	Connected  bool
-	URL        string // short connect URL; empty when Connected
-}
-
-// AuthPromptBlocks renders the "you need to connect these servers" message: one
-// row per server, showing a "Connect" link button for servers still needing
-// auth and a green checkmark for ones already connected.
-func AuthPromptBlocks(workflow string, servers []AuthStatus) []slack.Block {
-	header := slack.NewSectionBlock(
-		slack.NewTextBlockObject(slack.MarkdownType,
-			"To run *"+workflow+"* I need access to the following tools. Click to connect each one:",
-			false, false),
-		nil, nil,
-	)
-	blocks := []slack.Block{header}
-	for _, s := range servers {
-		if s.Connected {
-			blocks = append(blocks,
-				slack.NewSectionBlock(
-					slack.NewTextBlockObject(slack.MarkdownType, "• :white_check_mark: Connected *"+s.ServerName+"*", false, false),
-					nil, nil,
-				),
-			)
-			continue
-		}
-		btn := slack.NewButtonBlockElement(ActionConnectPrefix+s.ServerName, s.URL,
-			slack.NewTextBlockObject(slack.PlainTextType, "Connect "+s.ServerName, true, false)).
-			WithURL(s.URL).
-			WithStyle(slack.StylePrimary)
-		blocks = append(blocks,
-			slack.NewSectionBlock(
-				slack.NewTextBlockObject(slack.MarkdownType, "• *"+s.ServerName+"*", false, false),
-				nil,
-				slack.NewAccessory(btn),
-			),
-		)
-	}
-	return blocks
-}
-
-// MaxSectionChars is a safe cap below Slack's 3000-char section-text limit.
 const MaxSectionChars = 2900
 
-// AgentMessageBlocks renders agent output as one or more markdown section
-// blocks, splitting text so no single section exceeds Slack's 3000-char limit
-// (which would otherwise make chat.update fail and the message stop updating).
 func AgentMessageBlocks(text string) []slack.Block {
 	if text == "" {
 		text = "_(no output)_"
@@ -80,19 +23,19 @@ func AgentMessageBlocks(text string) []slack.Block {
 	return blocks
 }
 
-// PermissionChoice is one option offered for a permission request.
 type PermissionChoice struct {
 	OptionID string
 	Name     string
 	Kind     string
 }
 
-// PermissionBlocks renders an interactive approve/deny prompt for a tool call.
-// Each button's value encodes (sessionID, toolCallID, optionID) so the
-// interaction handler can route the user's choice back into the ACP session.
-func PermissionBlocks(sessionID, toolCallID, title string, choices []PermissionChoice) []slack.Block {
+func PermissionBlocks(sessionID, toolCallID, ownerUserID, title string, choices []PermissionChoice) []slack.Block {
+	prompt := ":lock: The agent needs permission to: *" + title + "*"
+	if ownerUserID != "" {
+		prompt = ":lock: <@" + ownerUserID + ">, the agent needs your permission to: *" + title + "*"
+	}
 	section := slack.NewSectionBlock(
-		slack.NewTextBlockObject(slack.MarkdownType, ":lock: The agent needs permission to: *"+title+"*", false, false),
+		slack.NewTextBlockObject(slack.MarkdownType, prompt, false, false),
 		nil, nil,
 	)
 	elements := make([]slack.BlockElement, 0, len(choices))
