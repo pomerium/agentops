@@ -87,7 +87,8 @@ func (a *App) renderMissed(ctx context.Context, view *pb.SessionView, m sessionM
 	defer a.unregisterThread(t)
 
 	t.setState(api.StateSuspended)
-	last, rendered := m.LastSeq, 0
+	last := a.turnStartBefore(ctx, view.GetId(), m.LastSeq)
+	boundary, inTurn, rendered := last, false, 0
 	for {
 		res, err := a.api.ListEvents(ctx, &pb.ListEventsRequest{
 			Ref: a.ref(view.GetId()), AfterSeq: last,
@@ -95,13 +96,17 @@ func (a *App) renderMissed(ctx context.Context, view *pb.SessionView, m sessionM
 		if err != nil {
 			a.log.WarnContext(ctx, "read a session's events failed; the next sweep continues from here",
 				"session", view.GetId(), "after_seq", last, "err", err)
-			a.saveMeta(ctx, t, func(meta *sessionMeta) { meta.LastSeq = last })
+			a.saveMeta(ctx, t, func(meta *sessionMeta) { meta.LastSeq = boundary })
 			return false
 		}
 		events := res.GetEvents()
 		for _, ev := range events {
+			var atBoundary bool
+			if atBoundary, inTurn = turnBoundary(ev, inTurn); atBoundary {
+				boundary = ev.GetSeq()
+			}
 			a.renderEvent(ctx, t, "", ev)
-			last = ev.Seq
+			last = ev.GetSeq()
 		}
 		rendered += len(events)
 		if len(events) == 0 || last >= view.GetLastSeq() {
