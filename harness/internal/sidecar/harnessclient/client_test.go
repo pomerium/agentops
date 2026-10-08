@@ -871,3 +871,78 @@ func TestARestartedSidecarRetriesAJoinThatFailsBeforeItAttaches(t *testing.T) {
 		t.Fatal("the restarted sidecar never attached")
 	}
 }
+
+type stoppedReader struct {
+	runnerpb.UnimplementedAgentRunnerServiceServer
+}
+
+func (*stoppedReader) Run(s runnerpb.AgentRunnerService_RunServer) error {
+	if _, err := s.Recv(); err != nil {
+		return err
+	}
+	if err := s.Send(&runnerpb.RunnerServerFrame{
+		Msg: &runnerpb.RunnerServerFrame_Started{
+			Started: &runnerpb.Started{StreamId: []byte("s")},
+		},
+	}); err != nil {
+		return err
+	}
+	<-s.Context().Done()
+	return s.Context().Err()
+}
+
+func TestCloseInterruptsABlockedRunnerSend(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rnr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "r.sock")
+	lis, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs := grpc.NewServer()
+	runnerpb.RegisterAgentRunnerServiceServer(gs, &stoppedReader{})
+	go func() { _ = gs.Serve(lis) }()
+	defer gs.Stop()
+
+	uds, err := harnessclient.NewUDSRunner(socket, testLogger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uds.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ag, err := uds.Join(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for range 16 {
+			if ag.Send(&runnerpb.RunnerClientFrame{
+				Msg: &runnerpb.RunnerClientFrame_Prompt{
+					Prompt: &agentlinkpb.Prompt{
+						Text: strings.Repeat("x", 1<<20),
+					},
+				},
+			}) != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-sent:
+		t.Fatal("expected the unread commands to block Send")
+	case <-time.After(200 * time.Millisecond):
+	}
+	closed := make(chan struct{})
+	go func() { ag.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close could not interrupt Send")
+	}
+}

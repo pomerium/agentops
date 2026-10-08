@@ -617,7 +617,15 @@ func (c *Client) stopAgent() {
 }
 
 func stop(ag *AgentSession) {
-	_ = ag.Send(&runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Stop{Stop: &runnerpb.Stop{}}})
+	sent := make(chan struct{})
+	go func() {
+		_ = ag.Send(&runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Stop{Stop: &runnerpb.Stop{}}})
+		close(sent)
+	}()
+	select {
+	case <-sent:
+	case <-time.After(closeGrace):
+	}
 	ag.Close()
 }
 

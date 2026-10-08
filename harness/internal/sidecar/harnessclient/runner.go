@@ -126,12 +126,21 @@ func (r *UDSRunner) open(ctx context.Context, first *runnerpb.RunnerClientFrame)
 		},
 		Close: func() {
 			closeOnce.Do(func() {
-				mu.Lock()
-				_ = stream.CloseSend()
-				mu.Unlock()
+				closed := make(chan struct{})
+				go func() {
+					mu.Lock()
+					_ = stream.CloseSend()
+					mu.Unlock()
+					close(closed)
+				}()
+				grace := time.After(closeGrace)
 				select {
-				case <-lost:
-				case <-time.After(closeGrace):
+				case <-closed:
+					select {
+					case <-lost:
+					case <-grace:
+					}
+				case <-grace:
 				}
 				cancel()
 			})

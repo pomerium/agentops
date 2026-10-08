@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,5 +192,35 @@ func TestATerminalStatusLeavesNoReceiverBehind(t *testing.T) {
 			t.Fatal("the terminal receiver outlived its canceled session")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStopIsBoundedWhenTheRunnerStopsReading(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	closed := make(chan struct{})
+	ag := &AgentSession{
+		Send: func(*runnerpb.RunnerClientFrame) error {
+			<-release
+			return io.ErrClosedPipe
+		},
+		Close: func() {
+			close(closed)
+			unblock()
+		},
+	}
+	done := make(chan struct{})
+	go func() { stop(ag); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * closeGrace):
+		unblock()
+		t.Fatal("stop waited for a Stop that the runner never read")
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("stop did not close the session")
 	}
 }
