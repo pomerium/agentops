@@ -223,6 +223,7 @@ func (a *App) followAgain(ctx context.Context, view *pb.SessionView) bool {
 		return false
 	}
 	t := threadFromMeta(view, m)
+	t.replayThrough = view.GetLastSeq()
 	if ok, _ := a.registerThread(t); !ok {
 		return false
 	}

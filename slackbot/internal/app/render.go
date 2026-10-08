@@ -199,6 +199,9 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 
 	case *pb.Event_Suspended:
 		a.clearIdleWarning(ctx, t, msgIdleClosed)
+		if t.pastPause(ev.GetSeq()) {
+			return
+		}
 		a.restateStatus(ctx, t, msgStatusIdleSuspended)
 		a.watchSuspended(ctx, t, ev.GetSeq())
 
@@ -236,6 +239,9 @@ func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.St
 			a.swapReaction(ctx, t.channel, ackTS, reactionStarting, reactionFailed)
 			t.reviveMention.Store(nil)
 			a.drainBusy(ctx, t)
+			if t.pastPause(seq) {
+				return
+			}
 			a.restateStatus(ctx, t, msgStatusRetryContinue)
 			a.watchSuspended(ctx, t, seq)
 		case api.ReasonResumeUnavailable:
