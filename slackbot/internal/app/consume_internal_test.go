@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/slack-go/slack"
 
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
@@ -95,5 +96,33 @@ func TestAnswerPartsJoinExactlyUnlessAToolCallCameBetween(t *testing.T) {
 	r.toolCall()
 	if got := r.appendPart("\nDone."); got != "prefix\n\nChecked the logs.\nDone." {
 		t.Fatalf("a part that brings its own whitespace gets no more: %q", got)
+	}
+}
+
+type countingPoster struct {
+	Poster
+	posts int
+}
+
+func (p *countingPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	p.posts++
+	return "prompt-ts", nil
+}
+
+func TestAReplayedPermissionRequestReusesItsPrompt(t *testing.T) {
+	p := &countingPoster{}
+	a := New(nil, p, nil)
+	view := &pb.SessionView{Id: "s1", State: api.StateRunning}
+	m := sessionMeta{ChannelID: "C1", ThreadTS: "168.1", UserID: "U1", TeamID: "T1"}
+	request := &pb.PermissionRequest{RequestId: "r1", Summary: "Run a command"}
+	ctx := context.Background()
+
+	original := threadFromMeta(view, m)
+	a.askPermission(ctx, original, request)
+	restarted := threadFromMeta(view, original.meta())
+	a.askPermission(ctx, restarted, request)
+
+	if p.posts != 1 {
+		t.Fatalf("one permission request produced %d prompts", p.posts)
 	}
 }
