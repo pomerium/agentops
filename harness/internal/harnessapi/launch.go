@@ -230,9 +230,8 @@ func (s *Service) activateAndRun(
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, "")
 		return nil
 	}
-	go s.consume(b)
 	ctx = context.WithoutCancel(ctx)
-	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
+	linked := s.write(ctx, sess.ID, func(ctx context.Context) error {
 		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching); err != nil {
 			return err
 		}
@@ -240,7 +239,9 @@ func (s *Service) activateAndRun(
 			return err
 		}
 		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
-	}) {
+	})
+	go s.consume(b)
+	if !linked {
 		if opening {
 			s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
 			b.leave(opts.turnID)
