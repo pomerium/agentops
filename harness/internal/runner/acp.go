@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	acp "github.com/coder/acp-go-sdk"
 
@@ -225,6 +226,19 @@ func configRequestID(req acp.SetSessionConfigOptionRequest) string {
 	return ""
 }
 
+const partMax = 256 << 10
+
+func cutPart(s string) (string, string) {
+	if len(s) <= partMax {
+		return s, ""
+	}
+	i := partMax
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i], s[i:]
+}
+
 type Aggregator struct {
 	emit func(turnID string, ev *agentlinkpb.AgentEvent)
 
@@ -269,20 +283,40 @@ func (a *Aggregator) Title(toolCallID string) string {
 }
 
 func (a *Aggregator) flushThoughtLocked() {
-	if a.thought.Len() == 0 {
-		return
-	}
 	text := a.thought.String()
 	a.thought.Reset()
-	a.emit(a.turnID, &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_Thought{Thought: &agentlinkpb.AgentThought{Text: text}}})
+	for text != "" {
+		var part string
+		part, text = cutPart(text)
+		a.emit(a.turnID, &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_Thought{Thought: &agentlinkpb.AgentThought{Text: part}}})
+	}
 }
 
 func (a *Aggregator) flushMessageLocked(final bool) {
-	if a.buf.Len() == 0 {
-		return
-	}
 	text := a.buf.String()
 	a.buf.Reset()
+	for text != "" {
+		var part string
+		part, text = cutPart(text)
+		a.emitPartLocked(part, final && text == "")
+	}
+}
+
+func (a *Aggregator) splitFullLocked(b *strings.Builder, emit func(string)) {
+	if b.Len() <= partMax {
+		return
+	}
+	text := b.String()
+	b.Reset()
+	for len(text) > partMax {
+		var part string
+		part, text = cutPart(text)
+		emit(part)
+	}
+	b.WriteString(text)
+}
+
+func (a *Aggregator) emitPartLocked(text string, final bool) {
 	a.part++
 	turn := a.turnID
 	if turn == "" {
@@ -301,9 +335,13 @@ func (a *Aggregator) Update(u acp.SessionUpdate) {
 		if text := contentText(u.AgentMessageChunk.Content); text != "" {
 			a.flushThoughtLocked()
 			a.buf.WriteString(text)
+			a.splitFullLocked(&a.buf, func(part string) { a.emitPartLocked(part, false) })
 		}
 	case u.AgentThoughtChunk != nil:
 		a.thought.WriteString(contentText(u.AgentThoughtChunk.Content))
+		a.splitFullLocked(&a.thought, func(part string) {
+			a.emit(a.turnID, &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_Thought{Thought: &agentlinkpb.AgentThought{Text: part}}})
+		})
 	case u.ToolCall != nil:
 		a.toolCallLocked(&agentlinkpb.ToolCall{
 			Id:       string(u.ToolCall.ToolCallId),
@@ -367,7 +405,7 @@ func rawJSON(v any) []byte {
 		return nil
 	}
 	b, err := json.Marshal(v)
-	if err != nil {
+	if err != nil || len(b) > partMax {
 		return nil
 	}
 	return b
