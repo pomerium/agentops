@@ -104,6 +104,7 @@ type thread struct {
 	approvalDMEdited atomic.Value
 
 	state         atomic.Pointer[api.SessionState]
+	endedFrom     atomic.Pointer[api.SessionState]
 	metaMu        sync.Mutex
 	metaState     sessionMeta
 	statusMu      sync.Mutex
