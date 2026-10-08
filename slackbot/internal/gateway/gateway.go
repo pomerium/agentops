@@ -1,13 +1,13 @@
 package gateway
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -257,13 +257,13 @@ func (s *Server) handleInteractivity(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	if err := r.ParseForm(); err != nil {
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	var cb slack.InteractionCallback
-	if err := json.Unmarshal([]byte(r.FormValue("payload")), &cb); err != nil {
+	if err := json.Unmarshal([]byte(form.Get("payload")), &cb); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}

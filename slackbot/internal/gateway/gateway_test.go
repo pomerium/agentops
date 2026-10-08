@@ -445,3 +445,32 @@ func TestInteractivityDispatchesAPermissionClick(t *testing.T) {
 		t.Errorf("decoded = %q/%q/%q", sessionID, requestID, optionID)
 	}
 }
+
+func TestAnInteractionPayloadOutsideTheSignedBodyIsRejected(t *testing.T) {
+	payload := `{"type":"block_actions","user":{"id":"UOWNER","team_id":"T1"},"team":{"id":"T1"},` +
+		`"channel":{"id":"C1"},"message":{"thread_ts":"1.0"},` +
+		`"actions":[{"action_id":"acp_permission","value":"forged"}]}`
+	for _, tc := range []struct {
+		contentType string
+		body        string
+	}{
+		{"application/json", `{}`},
+		{"application/x-www-form-urlencoded", `other=1`},
+	} {
+		t.Run(tc.contentType, func(t *testing.T) {
+			app := &fakeApp{}
+			req := signedRequest(t, "/slack/interactivity?payload="+url.QueryEscape(payload), tc.contentType, []byte(tc.body))
+			rec := httptest.NewRecorder()
+			newServer(app).Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 for a payload Slack did not sign", rec.Code)
+			}
+			time.Sleep(20 * time.Millisecond)
+			app.mu.Lock()
+			defer app.mu.Unlock()
+			if len(app.interactions) != 0 {
+				t.Fatalf("an unsigned payload was dispatched: %+v", app.interactions)
+			}
+		})
+	}
+}
