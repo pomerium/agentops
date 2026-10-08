@@ -427,6 +427,24 @@ func TestAFailedContinuationClosesItsStream(t *testing.T) {
 	}
 }
 
+func TestAFailedStateReadDoesNotTurnDiscussionIntoATurn(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+		"multiplayer": true, "last_seen_ts": threadRoot,
+	})
+	f.poster.failNextReads(1)
+
+	f.app.HandleMessage(context.Background(), replyIn(f, "U1", "this is discussion, not a request"))
+
+	if n := len(f.api.promptRequests()); n != 0 {
+		t.Fatalf("a plain reply in a paused multiplayer thread started %d turns", n)
+	}
+	if n := len(f.api.createRequests()); n != 0 {
+		t.Fatalf("a plain reply in a paused multiplayer thread started %d sessions", n)
+	}
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
