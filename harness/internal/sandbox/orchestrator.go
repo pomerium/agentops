@@ -290,11 +290,11 @@ func WithOnDelayed(f func(waited time.Duration)) SupervisionOption {
 }
 
 func (o *Orchestrator) Expect(runID string, prepared *Prepared, opts ...SupervisionOption) (*Attachment, error) {
-	return o.expect(runID, prepared.Executor, prepared.SandboxName, sandboxConfig(prepared.spec), opts)
+	return o.expect(runID, prepared.Executor, prepared.SandboxName, sandboxConfig(prepared.spec), false, opts)
 }
 
 func (o *Orchestrator) expect(runID string, seal agenticrun.Executor, podName string, cfg *agentlinkpb.SandboxConfig,
-	opts []SupervisionOption, linkOpts ...agentlink.ExpectOption,
+	adopted bool, opts []SupervisionOption, linkOpts ...agentlink.ExpectOption,
 ) (*Attachment, error) {
 	if o.link == nil {
 		return nil, errors.New("no agent link configured")
@@ -326,8 +326,13 @@ func (o *Orchestrator) expect(runID string, seal agenticrun.Executor, podName st
 			att.fire(reason)
 		}),
 	)
+	if adopted {
+		att.spawned.Store(true)
+		att.startGrace(o.cfg.attachGrace)
+	}
 	handle, err := o.link.Expect(runID, seal, cfg, linkOpts...)
 	if err != nil {
+		att.cancelGrace()
 		return nil, err
 	}
 	att.handle = handle
@@ -433,13 +438,11 @@ func (o *Orchestrator) Adopt(ctx context.Context, spec AdoptSpec, opts ...Superv
 	if string(pod.UID) != spec.Executor.PodUID {
 		return nil, fmt.Errorf("pod %q was replaced (uid %s != sealed %s)", spec.SandboxName, pod.UID, spec.Executor.PodUID)
 	}
-	att, err := o.expect(spec.RunID, spec.Executor, spec.SandboxName, sandboxConfig(spec.Launch), opts,
+	att, err := o.expect(spec.RunID, spec.Executor, spec.SandboxName, sandboxConfig(spec.Launch), true, opts,
 		agentlink.WithStreamID(spec.StreamID), agentlink.WithResumeAfter(spec.ResumeAfter))
 	if err != nil {
 		return nil, err
 	}
-	att.spawned.Store(true)
-	att.startGrace(o.cfg.attachGrace)
 	o.log.InfoContext(ctx, "waiting for an adopted sandbox to attach again",
 		"run_id", spec.RunID, "pod", spec.SandboxName, "resume_after", spec.ResumeAfter, "grace", o.cfg.attachGrace.String())
 	return &Session{att: att, acpID: spec.ACPSessionID}, nil

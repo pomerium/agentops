@@ -67,6 +67,7 @@ type fakeAgentLink struct {
 	forgotten  []string
 	expectErr  error
 	spawnReply func(h *fakeHandle)
+	onExpect   func(h *fakeHandle)
 }
 
 func newFakeAgentLink() *fakeAgentLink {
@@ -94,6 +95,9 @@ func (g *fakeAgentLink) Expect(runID string, _ agenticrun.Executor, cfg *agentli
 	}
 	g.expected[runID] = h
 	g.configs[runID] = cfg
+	if g.onExpect != nil {
+		g.onExpect(h)
+	}
 	return h, nil
 }
 
@@ -520,6 +524,28 @@ func TestAdoptExpectsTheRunAgainAtItsResumePoint(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("an adopted run that never attached again was never closed")
+	}
+}
+
+func TestAdoptKeepsASidecarThatAttachesBeforeAdoptReturns(t *testing.T) {
+	link := newFakeAgentLink()
+	link.onExpect = func(h *fakeHandle) { h.attach(1, true) }
+	o := New(newFakeClaims(), testPods(), nil, link,
+		WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
+		WithAttachGrace(50*time.Millisecond),
+	)
+	downs := make(chan string, 4)
+	if _, err := o.Adopt(context.Background(), AdoptSpec{
+		RunID: "run-9", ClaimName: "claim-9", SandboxName: "sandbox-agent",
+		Executor: agenticrun.Executor{Namespace: "ns", ServiceAccount: "sandbox-agent", PodName: "sandbox-agent", PodUID: "uid-1"},
+		Launch:   LaunchSpec{SessionID: "s9", Template: testTemplate()},
+	}, WithOnDown(func(cause string) { downs <- cause })); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	select {
+	case cause := <-downs:
+		t.Fatalf("an adopted run that attached during Adopt was closed: %s", cause)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
