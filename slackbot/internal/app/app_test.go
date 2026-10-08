@@ -452,6 +452,26 @@ func TestStartupFollowsASessionPastAPauseItMissed(t *testing.T) {
 	f.poster.waitForPost(t, "and still followed")
 }
 
+func TestStartupWatchesASessionThatPausedWhileTheBotWasDown(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateRunning, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+	f.api.setState("old-1", api.StateRunning, api.StateSuspended, api.ReasonIdle)
+	f.api.emit("old-1", "", &pb.Suspended{Reason: api.ReasonIdle})
+
+	f.app.ReconcileOnStartup(context.Background())
+	f.poster.waitForPost(t, "paused this session")
+	waitFor(t, "the watch", func() bool { return f.slackState("old-1")["watching"] == true })
+
+	f.api.setState("old-1", api.StateSuspended, api.StateEnded, noReason)
+	f.api.emit("old-1", "", &pb.SessionEnded{Reason: api.EndExpired})
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go f.app.RunSweeper(ctx, 10*time.Millisecond)
+	f.poster.waitForPost(t, "approval ran out")
+}
+
 func TestStartupLeavesTheSessionsItAlreadyFollowsAlone(t *testing.T) {
 	f := newFixture(t)
 	f.app.HandleMention(context.Background(), mention(f, "ship it"))
