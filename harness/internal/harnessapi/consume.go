@@ -58,7 +58,6 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 	turnID, seq := ev.GetTurnId(), ev.GetSeq()
 	var out *pb.Event
 	var permission *pb.PermissionRequest
-	var deadline time.Time
 	switch p := ev.GetPayload().(type) {
 	case *agentlinkpb.AgentEvent_Message:
 		out = &pb.Event{Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{
@@ -128,17 +127,25 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 	}
 
 	out.TurnId = turnID
+	req := ev.GetPermissionRequest()
+	var waiter *permissionWaiter
+	var fresh bool
+	if req != nil {
+		waiter, fresh = b.sink.register(req, func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
+	}
 	if !s.recordPod(ctx, b, seq, func(ctx context.Context) error {
 		if permission != nil {
-			deadline = b.sink.deadline()
-			permission.Deadline = timestamppb.New(deadline)
+			permission.Deadline = timestamppb.New(b.sink.stamp(waiter, fresh))
 		}
 		return s.emitPod(ctx, b.sessionID, out, seq)
 	}) {
+		if fresh {
+			b.sink.drop(req.GetRequestId(), waiter)
+		}
 		return false
 	}
-	if req := ev.GetPermissionRequest(); req != nil {
-		b.sink.await(req, deadline, func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
+	if fresh {
+		b.sink.arm(req.GetRequestId(), waiter)
 	}
 	b.session.Ack(seq)
 	if ev.GetTurnFinished() != nil {

@@ -458,3 +458,68 @@ func TestAPermissionTimerStartsOnlyOnceTheRequestIsRecorded(t *testing.T) {
 		t.Errorf("recorded deadline %v, want it to start from the successful write (after %v)", deadline, min)
 	}
 }
+
+type checkPublished struct {
+	EventLog
+	check func()
+}
+
+func (l checkPublished) AppendFromPod(ctx context.Context, ev *pb.Event, podSeq uint64) error {
+	if err := l.EventLog.AppendFromPod(ctx, ev, podSeq); err != nil {
+		return err
+	}
+	l.check()
+	return nil
+}
+
+func permissionEvent(seq uint64, requestID string) *agentlinkpb.AgentEvent {
+	return &agentlinkpb.AgentEvent{
+		Seq: seq, TurnId: "t1",
+		Payload: &agentlinkpb.AgentEvent_PermissionRequest{PermissionRequest: &agentlinkpb.PermissionRequest{
+			RequestId: requestID, TurnId: "t1", Options: []*agentlinkpb.PermissionOption{{Id: "allow"}},
+		}},
+	}
+}
+
+func TestAPublishedPermissionIsAnswerable(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	checked := false
+	svc.events = checkPublished{EventLog: svc.events, check: func() {
+		checked = true
+		if err := b.sink.validate("request", "allow"); err != nil {
+			t.Errorf("a published request cannot be answered: %v", err)
+		}
+	}}
+
+	if !svc.handleEvent(context.Background(), b, permissionEvent(2, "request")) {
+		t.Fatal("the request was not recorded")
+	}
+	if !checked {
+		t.Fatal("the request was never published")
+	}
+}
+
+func TestAPermissionThatIsNeverRecordedIsNotAnswerable(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	podLog := &flakyPodLog{EventLog: svc.events}
+	podLog.failures.Store(-1)
+	svc.events = podLog
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.handleEvent(context.Background(), b, permissionEvent(2, "request"))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	b.close(0)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the consumer kept retrying after the binding closed")
+	}
+	if got := b.sink.pending(); len(got) != 0 {
+		t.Errorf("pending requests = %v, want none for a request that was never recorded", got)
+	}
+}

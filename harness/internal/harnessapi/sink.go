@@ -59,6 +59,52 @@ func (s *logSink) await(req *agentlinkpb.PermissionRequest, deadline time.Time, 
 	s.armLocked(id, w, time.Until(deadline))
 }
 
+func (s *logSink) register(req *agentlinkpb.PermissionRequest, expire func(requestID string)) (*permissionWaiter, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w, ok := s.waiters[req.GetRequestId()]; ok || s.stopped {
+		return w, false
+	}
+	offered := make([]string, 0, len(req.GetOptions()))
+	for _, o := range req.GetOptions() {
+		offered = append(offered, o.GetId())
+	}
+	w := &permissionWaiter{turnID: req.GetTurnId(), options: offered, expire: expire}
+	s.waiters[req.GetRequestId()] = w
+	return w, true
+}
+
+func (s *logSink) stamp(w *permissionWaiter, fresh bool) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w == nil {
+		return time.Now().Add(s.permTimeout)
+	}
+	if fresh {
+		w.deadline = time.Now().Add(s.permTimeout)
+	}
+	return w.deadline
+}
+
+func (s *logSink) arm(id string, w *permissionWaiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.waiters[id] == w && w.timer == nil && !s.stopped {
+		s.armLocked(id, w, time.Until(w.deadline))
+	}
+}
+
+func (s *logSink) drop(id string, w *permissionWaiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.waiters[id] == w {
+		delete(s.waiters, id)
+		if w.timer != nil {
+			w.timer.Stop()
+		}
+	}
+}
+
 func (s *logSink) armLocked(id string, w *permissionWaiter, after time.Duration) {
 	w.timer = time.AfterFunc(after, func() {
 		if s.fire() {
@@ -92,7 +138,9 @@ func (s *logSink) stop() {
 	s.mu.Lock()
 	s.stopped = true
 	for _, w := range s.waiters {
-		w.timer.Stop()
+		if w.timer != nil {
+			w.timer.Stop()
+		}
 	}
 	s.mu.Unlock()
 	s.firing.Wait()
@@ -119,7 +167,9 @@ func (s *logSink) take(requestID string) (*permissionWaiter, bool) {
 		return nil, false
 	}
 	delete(s.waiters, requestID)
-	w.timer.Stop()
+	if w.timer != nil {
+		w.timer.Stop()
+	}
 	return w, true
 }
 
