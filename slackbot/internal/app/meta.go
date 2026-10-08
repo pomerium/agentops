@@ -31,8 +31,9 @@ type sessionMeta struct {
 	Watching bool  `json:"watching,omitempty"`
 	LastSeq  int64 `json:"last_seq,omitempty"`
 
-	AnswerTurn string `json:"answer_turn,omitempty"`
-	AnswerTS   string `json:"answer_ts,omitempty"`
+	AnswerTurn   string         `json:"answer_turn,omitempty"`
+	AnswerTS     string         `json:"answer_ts,omitempty"`
+	AnswerPieces map[int]string `json:"answer_pieces,omitempty"`
 
 	PermissionPrompts map[string]string `json:"permission_prompts,omitempty"`
 
@@ -147,6 +148,15 @@ func withPermissionPrompt(prompts map[string]string, requestID, ts string) map[s
 		out = map[string]string{}
 	}
 	out[requestID] = ts
+	return out
+}
+
+func withAnswerPiece(pieces map[int]string, i int, ts string) map[int]string {
+	out := maps.Clone(pieces)
+	if out == nil {
+		out = map[int]string{}
+	}
+	out[i] = ts
 	return out
 }
 
