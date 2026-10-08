@@ -88,7 +88,7 @@ func (a *App) startSession(ctx context.Context, spec startSpec) *thread {
 		m.Multiplayer = m.Multiplayer || spec.joinedAt != ""
 		m.Watching = true
 		if m.LastSeenTS == "" {
-			m.LastSeenTS = cmp.Or(spec.catchupFrom, spec.joinedAt)
+			m.LastSeenTS = cmp.Or(spec.catchupFrom, spec.joinedAt, in.MessageTS)
 		}
 	})
 	a.flipRoom(ctx, t, flipped, spec.flipFrom)
