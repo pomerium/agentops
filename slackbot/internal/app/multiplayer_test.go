@@ -140,6 +140,18 @@ func TestTheOpeningTurnsEndKeepsAFollowUpBusy(t *testing.T) {
 	}
 }
 
+func TestAJoinedSessionsReadyStatusAsksForAMention(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	f.app.HandleMention(context.Background(), mentionIn(f, "U2", ""))
+	f.poster.waitForPost(t, "joined with their own agent")
+	f.api.setState("sess-2", api.StatePending, api.StateRunning, noReason)
+	ready := f.poster.waitForUpdate(t, "<@U2>'s agent: Ready")
+	if !strings.Contains(ready.text, "@mention") || strings.Contains(ready.text, "reply in this thread") {
+		t.Errorf("a multiplayer ready status must ask for an @mention, since plain replies are discussion: %q", ready.text)
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
