@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
+	"github.com/cenkalti/backoff/v7"
+	"github.com/slack-go/slack"
 	"golang.org/x/time/rate"
 
 	"github.com/pomerium/agentops/harness/api/client"
@@ -54,12 +58,11 @@ func run(log *slog.Logger) error {
 	}
 
 	poster := slackclient.NewPoster(cfg.Slack.BotToken)
-	botUserID, homeTeamID, err := poster.BotIdentity(ctx)
+	botUserID, homeTeamID, err := botIdentity(ctx, poster.BotIdentity, log)
 	if err != nil {
-		log.Warn("could not determine bot identity via auth.test; mentions in messages can't be detected", "err", err)
-	} else {
-		log.Info("resolved bot identity", "bot_user_id", botUserID, "home_team_id", homeTeamID)
+		return fmt.Errorf("determine the bot's Slack identity with auth.test: %w", err)
 	}
+	log.Info("resolved bot identity", "bot_user_id", botUserID, "home_team_id", homeTeamID)
 	limits := slackclient.DefaultLimits()
 	if cfg.Slack.StreamInterval > 0 {
 		limits.UpdateStream = rate.Every(cfg.Slack.StreamInterval)
@@ -110,4 +113,29 @@ func run(log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+var rejectedTokens = []string{"invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired"}
+
+func botIdentity(ctx context.Context, lookup func(context.Context) (string, string, error), log *slog.Logger, opts ...backoff.RetryOption) (string, string, error) {
+	type identity struct{ user, team string }
+	id, err := backoff.Retry(ctx, func() (identity, error) {
+		user, team, err := lookup(ctx)
+		var rejected slack.SlackErrorResponse
+		switch {
+		case errors.As(err, &rejected) && slices.Contains(rejectedTokens, rejected.Err):
+			return identity{}, backoff.Permanent(err)
+		case err != nil:
+			return identity{}, err
+		case user == "":
+			return identity{}, errors.New("auth.test returned no bot user ID")
+		}
+		return identity{user: user, team: team}, nil
+	}, append([]backoff.RetryOption{
+		backoff.WithMaxElapsedTime(2 * time.Minute),
+		backoff.WithNotify(func(err error, next time.Duration) {
+			log.Warn("could not determine the bot's Slack identity; retrying", "retry_in", next, "err", err)
+		}),
+	}, opts...)...)
+	return id.user, id.team, err
 }
