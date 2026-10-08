@@ -527,6 +527,67 @@ func TestStartupReplaysATurnItsCursorStopsInside(t *testing.T) {
 	})
 }
 
+func TestTheSweeperFollowsALiveSessionStartupCouldNotRead(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateRunning, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+	f.poster.failNextReads(1)
+	f.app.ReconcileOnStartup(context.Background())
+	if n := f.api.openStreams("old-1"); n != 0 {
+		t.Fatalf("startup followed a session whose thread it could not read: %d streams", n)
+	}
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go f.app.RunSweeper(ctx, 10*time.Millisecond)
+	waitFor(t, "the sweeper to follow the session", func() bool { return f.api.openStreams("old-1") == 1 })
+}
+
+func TestTheSweeperShowsAnEndingThatCameWhileTheBotWasDown(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+	f.api.setState("sess-1", api.StatePending, api.StateRunning, noReason)
+	waitForState(t, f, "sess-1", api.StateRunning)
+	f.app.Shutdown()
+	waitFor(t, "the old consumer to stop", func() bool { return f.api.openStreams("sess-1") == 0 })
+
+	f.api.setState("sess-1", api.StateRunning, api.StateEnded, noReason)
+	f.api.emit("sess-1", "", &pb.SessionEnded{Reason: api.EndExpired})
+
+	restarted := slackapp.New(f.api.serve(t), f.poster, f.resolver,
+		slackapp.WithBotUserID("UBOT"), slackapp.WithHomeTeamID("T1"))
+	t.Cleanup(restarted.Shutdown)
+	restarted.ReconcileOnStartup(context.Background())
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go restarted.RunSweeper(ctx, 10*time.Millisecond)
+	f.poster.waitForPost(t, "approval ran out")
+}
+
+func TestTheSweeperDoesNotRepeatAnEnding(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	f.api.setState("sess-1", api.StateRunning, api.StateEnded, noReason)
+	f.api.emit("sess-1", "", &pb.SessionEnded{Reason: api.EndEnded})
+	f.poster.waitForPost(t, "Finished")
+	f.seedSession("old-1", "slack:C1:168.1:T1:U9", api.StateEnded, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U9", "team_id": "T1",
+	})
+	f.api.emit("old-1", "", &pb.SessionEnded{Reason: api.EndExpired})
+	waitFor(t, "the first consumer to stop", func() bool { return f.api.openStreams("sess-1") == 0 })
+	before := len(f.poster.allPosts())
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go f.app.RunSweeper(ctx, 10*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	if posts := f.poster.allPosts(); len(posts) != before {
+		t.Errorf("the sweeper posted about sessions whose endings were shown or never owed: %v", posts[before:])
+	}
+}
+
 func TestStartupLeavesTheSessionsItAlreadyFollowsAlone(t *testing.T) {
 	f := newFixture(t)
 	f.app.HandleMention(context.Background(), mention(f, "ship it"))
