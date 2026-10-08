@@ -4,9 +4,13 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/slack-go/slack"
 
@@ -390,9 +394,9 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, 
 	}
 	replies, err := a.poster.ThreadReplies(ctx, t.channel, t.threadTS, "", transcriptFetchMax)
 	if err != nil {
-		a.log.WarnContext(ctx, "read the whole thread for a catch-up failed; reading only what came after the cursor",
+		a.log.WarnContext(ctx, "read the whole thread for a catch-up failed; reading from an hour before the cursor",
 			"session", t.sessionID, "err", err)
-		replies, err = a.poster.ThreadReplies(ctx, t.channel, t.threadTS, cursor, transcriptFetchMax)
+		replies, err = a.poster.ThreadReplies(ctx, t.channel, t.threadTS, tsBefore(cursor, catchupLookback), transcriptFetchMax)
 	}
 	if err != nil {
 		a.log.WarnContext(ctx, "read the thread for a catch-up failed; the turn goes without one and the next turn carries it",
@@ -410,6 +414,27 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, 
 			"session", t.sessionID, "entries", len(entries), "truncated", truncated)
 	}
 	return block, true
+}
+
+const catchupLookback = time.Hour
+
+func tsBefore(ts string, d time.Duration) string {
+	secs, micros, ok := strings.Cut(ts, ".")
+	s, err := strconv.ParseInt(secs, 10, 64)
+	if err != nil {
+		return ts
+	}
+	us := int64(0)
+	if ok && micros != "" {
+		if us, err = strconv.ParseInt((micros + "000000")[:6], 10, 64); err != nil {
+			return ts
+		}
+	}
+	at := time.Unix(s, us*1000).Add(-d)
+	if at.Unix() < 0 {
+		return "0.000000"
+	}
+	return fmt.Sprintf("%d.%06d", at.Unix(), at.Nanosecond()/1000)
 }
 
 func (a *App) advanceCursor(ctx context.Context, t *thread, triggerTS string) {
