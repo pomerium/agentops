@@ -108,6 +108,7 @@ type thread struct {
 	metaState     sessionMeta
 	statusMu      sync.Mutex
 	busy          atomic.Int32
+	openingTurn   atomic.Bool
 	idleWarn      atomic.Pointer[idleNotice]
 	reviveMention atomic.Pointer[gateway.MentionInvocation]
 	released      atomic.Bool
