@@ -741,11 +741,7 @@ func (a *App) flipRoom(ctx context.Context, t *thread, others []*thread, atTS st
 	if len(others) == 0 || t.room == nil {
 		return
 	}
-	if t.room.flipped.CompareAndSwap(false, true) {
-		a.log.InfoContext(ctx, "thread is now multiplayer",
-			"channel", t.channel, "thread_ts", t.threadTS, "participants", len(others)+1)
-		a.post(ctx, t.channel, t.threadTS, slack.MsgOptionText(msgRoomMultiplayer, false))
-	}
+	a.markMultiplayer(ctx, t, len(others)+1)
 	for _, o := range append(others, t) {
 		if o.meta().Multiplayer {
 			continue
@@ -757,6 +753,15 @@ func (a *App) flipRoom(ctx context.Context, t *thread, others []*thread, atTS st
 			}
 		})
 	}
+}
+
+func (a *App) markMultiplayer(ctx context.Context, t *thread, participants int) {
+	if t.room == nil || !t.room.flipped.CompareAndSwap(false, true) {
+		return
+	}
+	a.log.InfoContext(ctx, "thread is now multiplayer",
+		"channel", t.channel, "thread_ts", t.threadTS, "participants", participants)
+	a.post(ctx, t.channel, t.threadTS, slack.MsgOptionText(msgRoomMultiplayer, false))
 }
 
 func (a *App) Shutdown() {
