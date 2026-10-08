@@ -453,7 +453,7 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) bool {
 			continue
 		}
 		sent[i] = ts
-		if firstTS == "" {
+		if i == 0 {
 			firstTS = ts
 			a.rememberAnswer(ctx, t, ts)
 		}
