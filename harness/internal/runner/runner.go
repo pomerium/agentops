@@ -180,14 +180,24 @@ func (s *Service) Run(stream runnerpb.AgentRunnerService_RunServer) error {
 	var feedCancel context.CancelFunc
 	var feedDone chan struct{}
 	feedErr := make(chan error, 1)
-	stopFeed := func() {
+	stopFeed := func() bool {
+		if feedCancel == nil {
+			return true
+		}
+		feedCancel()
+		select {
+		case <-feedDone:
+		case <-ctx.Done():
+			return false
+		}
+		feedCancel, feedDone = nil, nil
+		return true
+	}
+	defer func() {
 		if feedCancel != nil {
 			feedCancel()
-			<-feedDone
-			feedCancel, feedDone = nil, nil
 		}
-	}
-	defer stopFeed()
+	}()
 
 	for {
 		select {
@@ -198,7 +208,9 @@ func (s *Service) Run(stream runnerpb.AgentRunnerService_RunServer) error {
 			}
 			switch f := r.frame; {
 			case f.GetReplay() != nil:
-				stopFeed()
+				if !stopFeed() {
+					continue
+				}
 				after := f.GetReplay().GetAfter()
 				if err := sess.out.check(after); err != nil {
 					return status.Errorf(codes.FailedPrecondition, "replay: %v", err)

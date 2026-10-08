@@ -432,6 +432,7 @@ func TestReplaySendsTheEventsAfterThePointAndAcksTrimThem(t *testing.T) {
 	p2.ack(last)
 	p3, _ := mustJoin(t, client)
 	p3.replay(last)
+	p3.ack(last)
 	p3.prompt("t2", 2, "say c")
 	next := p3.event()
 	if next.GetSeq() != last+1 || next.GetTurnId() != "t2" {
@@ -442,6 +443,22 @@ func TestReplaySendsTheEventsAfterThePointAndAcksTrimThem(t *testing.T) {
 	p4.send(&runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Replay{Replay: &runnerpb.Replay{After: 1}}})
 	if _, err := p4.stream.Recv(); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("replay before the acked point: err = %v, want FailedPrecondition", err)
+	}
+}
+
+func TestASecondReplayOnOneStreamStartsAfterTheFirstFeed(t *testing.T) {
+	client := serve(t, runnertest.Command())
+	p, _ := mustSpawn(t, client, nil)
+	p.replay(0)
+	readyFrom(t, p)
+	p.prompt("t1", 1, "say a\ntool c1 x\nsay b")
+	first := p.until(finished("t1"))
+
+	p.replay(1)
+	again := p.until(finished("t1"))
+	assertSeqs(t, again, 2)
+	if len(again) != len(first) {
+		t.Fatalf("second replay on the stream sent %v, want %v", describe(again), describe(first))
 	}
 }
 
