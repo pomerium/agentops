@@ -505,21 +505,19 @@ func (a *App) closePermission(ctx context.Context, t *thread, p *pb.PermissionRe
 
 func (a *App) warnIdle(ctx context.Context, t *thread, lead time.Duration) {
 	notice := idleNotice{channel: t.channel, dm: t.multiplayer()}
-	opts := []slack.MsgOption{chromeMeta(t.sessionID)}
+	var err error
 	if notice.dm {
-		notice.channel = t.ownerUserID
-		opts = append(opts, slack.MsgOptionText(idleWarningDM(lead, a.threadLink(ctx, t)), false))
+		notice.channel, notice.ts, err = a.poster.PostDM(ctx, t.ownerUserID, chromeMeta(t.sessionID),
+			slack.MsgOptionText(idleWarningDM(lead, a.threadLink(ctx, t)), false))
 	} else {
-		opts = append(opts,
+		notice.ts, err = a.poster.PostMessage(ctx, t.channel, chromeMeta(t.sessionID),
 			slack.MsgOptionText(lifecycleText(t, idleWarning(lead)), false),
 			slack.MsgOptionTS(t.threadTS))
 	}
-	ts, err := a.poster.PostMessage(ctx, notice.channel, opts...)
 	if err != nil {
 		a.log.WarnContext(ctx, "deliver idle warning failed", "session", t.sessionID, "err", err)
 		return
 	}
-	notice.ts = ts
 	t.idleWarn.Store(&notice)
 }
 

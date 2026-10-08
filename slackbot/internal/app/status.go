@@ -131,7 +131,7 @@ func endedStatus(p *pb.SessionEnded, approvalWindow time.Duration, workflow stri
 }
 
 func (a *App) deliverApproval(ctx context.Context, t *thread, p *pb.ApprovalRequired) {
-	ts, err := a.poster.PostMessage(ctx, t.ownerUserID,
+	channel, ts, err := a.poster.PostDM(ctx, t.ownerUserID,
 		append([]slack.MsgOption{chromeMeta(t.sessionID)},
 			approvalMsgOptions(t.ownerUserID, t.workflow, a.threadLink(ctx, t), p.GetApprovalUrl())...)...)
 	if err != nil {
@@ -144,7 +144,7 @@ func (a *App) deliverApproval(ctx context.Context, t *thread, p *pb.ApprovalRequ
 		return
 	}
 	a.saveMeta(ctx, t, func(m *sessionMeta) {
-		m.ApprovalChannelID = t.ownerUserID
+		m.ApprovalChannelID = channel
 		m.ApprovalMessageTS = ts
 	})
 }
