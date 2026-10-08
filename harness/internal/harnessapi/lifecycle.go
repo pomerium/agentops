@@ -232,6 +232,7 @@ func (s *Service) adopt(ctx context.Context, sess sessionstore.Session, o *owner
 	}
 	b := newBinding(sess.ID, sess.SandboxClaimName, live, newLogSink(s, sess.ID, s.cfg.permissionTimeout))
 	b.runID = sess.RunID
+	b.syncing = true
 	close(b.ready)
 	if !s.register(o, b) {
 		close(b.consumed)

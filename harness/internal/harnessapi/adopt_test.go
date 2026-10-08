@@ -2,6 +2,7 @@ package harnessapi_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -9,7 +10,9 @@ import (
 
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
+	"github.com/pomerium/agentops/harness/internal/sandbox"
 )
 
 func restart(t *testing.T, h *harness) *harness {
@@ -310,5 +313,60 @@ func TestAnAgentExitEndsTheSession(t *testing.T) {
 	ended := waitForEvent(t, h, ref, kindOf("session_ended", ""))
 	if ended.GetSessionEnded().GetReason() != api.EndAgentExit {
 		t.Errorf("end reason = %v, want %v", ended.GetSessionEnded().GetReason(), api.EndAgentExit)
+	}
+}
+
+type heldStateSession struct {
+	harnessapi.LiveSession
+	release <-chan struct{}
+}
+
+func (s heldStateSession) Inbox() <-chan *agentlinkpb.AgentIOFrame {
+	<-s.release
+	return s.LiveSession.Inbox()
+}
+
+type heldStateLauncher struct {
+	*fakeLauncher
+	release <-chan struct{}
+}
+
+func (l heldStateLauncher) Adopt(ctx context.Context, spec sandbox.AdoptSpec, opts ...sandbox.SupervisionOption) (harnessapi.LiveSession, error) {
+	live, err := l.fakeLauncher.Adopt(ctx, spec, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return heldStateSession{LiveSession: live, release: l.release}, nil
+}
+
+func TestAPromptAfterARestartWaitsForTheSavedOlderOne(t *testing.T) {
+	h := newHarness(t)
+	view := launchRunning(t, h, "stub:prompt-order")
+	ref := byID(view.GetId())
+	r := h.launcher.session.current()
+	r.setDrops(true, false)
+	if _, err := h.svc.Prompt(as(stubClient), &pb.PromptRequest{Ref: ref, Content: "lost"}); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	h.svc.Shutdown()
+	r.setDrops(false, false)
+
+	release := make(chan struct{})
+	h2 := *h
+	h2.svc = harnessapi.New(h.store, harnessapi.NewEventLog(h.store), heldStateLauncher{fakeLauncher: h.launcher, release: release},
+		h.tmpl, h.runs, harnessapi.WithLogger(testLogger(t)))
+	t.Cleanup(h2.svc.Shutdown)
+	<-h2.svc.ReconcileOnStartup(context.Background())
+
+	next, err := h2.svc.Prompt(as(stubClient), &pb.PromptRequest{Ref: ref, Content: "newer"})
+	if err != nil {
+		close(release)
+		t.Fatalf("Prompt after the restart: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	waitForEvent(t, &h2, ref, kindOf("turn_completed", next.GetTurnId()))
+	if got := h.launcher.session.promptList(); !slices.Contains(got, "lost") {
+		t.Fatalf("prompts the agent ran = %v; the restart lost the older saved prompt", got)
 	}
 }
