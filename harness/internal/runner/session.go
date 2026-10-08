@@ -44,12 +44,12 @@ type permWait struct {
 
 var _ acp.Client = (*session)(nil)
 
-func newSession(log *slog.Logger, streamID []byte, proc *agentProc, killDelay time.Duration) *session {
+func newSession(log *slog.Logger, streamID []byte, proc *agentProc, killDelay time.Duration, maxOutbox int) *session {
 	s := &session{
 		log:       log,
 		streamID:  bytes.Clone(streamID),
 		proc:      proc,
-		out:       newOutbox(outboxMax),
+		out:       newOutbox(maxOutbox),
 		killDelay: killDelay,
 		wake:      make(chan struct{}, 1),
 		done:      make(chan struct{}),
@@ -102,6 +102,7 @@ func (s *session) run(params *agentlinkpb.SessionParams) {
 
 func (s *session) watchExit(cancel context.CancelFunc) {
 	<-s.proc.done
+	s.out.release()
 	s.proc.terminate(s.log, s.killDelay)
 	select {
 	case <-s.conn.Done():

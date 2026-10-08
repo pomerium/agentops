@@ -35,6 +35,7 @@ type options struct {
 	pipe      func() (*os.File, *os.File, error)
 	killDelay time.Duration
 	logger    *slog.Logger
+	outboxMax int
 }
 
 func WithCommand(argv []string) Option { return func(o *options) { o.command = argv } }
@@ -71,6 +72,9 @@ func New(opts ...Option) *Service {
 	}
 	if o.killDelay <= 0 {
 		o.killDelay = defaultKillDelay
+	}
+	if o.outboxMax <= 0 {
+		o.outboxMax = outboxMax
 	}
 	log := o.logger
 	if log == nil {
@@ -112,7 +116,7 @@ func (s *Service) open(first *runnerpb.RunnerClientFrame) (*session, error) {
 			return nil, status.Errorf(codes.Internal, "spawn agent: %v", err)
 		}
 		s.log.Info("agent-runner: agent started", "pid", proc.pid(), "command", s.cfg.command)
-		s.sess = newSession(s.log, sp.GetStreamId(), proc, s.cfg.killDelay)
+		s.sess = newSession(s.log, sp.GetStreamId(), proc, s.cfg.killDelay, s.cfg.outboxMax)
 		go s.sess.run(sp.GetSession())
 		return s.sess, nil
 	case first.GetJoin() != nil:

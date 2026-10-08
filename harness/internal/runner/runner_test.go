@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -529,6 +530,24 @@ func TestStopEndsTheRunningTurnAndReportsExited(t *testing.T) {
 			t.Fatalf("agent %d survived Stop", started.GetPid())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestStopReportsExitedWhileTheOutboxIsFull(t *testing.T) {
+	gate := filepath.Join(t.TempDir(), "never")
+	client := serve(t, runnertest.Command(), runner.WithOutboxLimit(1))
+	p, _ := mustSpawn(t, client, nil)
+	p.replay(0)
+	p.ack(readyFrom(t, p).GetSeq())
+	p.prompt("t1", 1, "say before\ntool c1 build\nsay after\nwait "+gate)
+	if ev := p.event(); ev.GetMessage() == nil {
+		t.Fatalf("first turn event = %v, want the message before the tool call", describe([]*agentlinkpb.AgentEvent{ev}))
+	}
+	p.stop()
+
+	evs := p.until(exited)
+	if !slices.ContainsFunc(evs, finished("t1")) {
+		t.Fatalf("events after Stop = %v, want t1 finished before exited", describe(evs))
 	}
 }
 
