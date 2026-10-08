@@ -75,11 +75,6 @@ func approvalDMDoneText(threadLink string) string {
 	return ":white_check_mark: Approved — your agent is running in " + threadLink + "."
 }
 
-func approvalDMStaleText(threadLink string) string {
-	return ":warning: Interrupted by a restart — do not approve. @mention me in " + threadLink +
-		" and I'll start again."
-}
-
 func idleWarning(lead time.Duration) string {
 	return fmt.Sprintf(":hourglass: Nothing's come through in a while, so I'll close this session in about %s "+
 		"and free up the workspace. Reply and I'll keep it going.", humanMinutes(lead))
