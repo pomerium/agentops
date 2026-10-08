@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -238,7 +239,7 @@ func (f *fakeAPI) state(sessionID string) (api.SessionState, bool) {
 func (f *fakeAPI) emit(sessionID, turnID string, payload proto.Message) {
 	f.mu.Lock()
 	f.seq++
-	ev := &pb.Event{SessionId: sessionID, Seq: f.seq, TurnId: turnID, Timestamp: timestamppb.Now()}
+	ev := &pb.Event{SessionId: sessionID, Seq: f.seq, TurnId: turnID, Timestamp: timestamppb.New(fakeEventTime)}
 	setPayload(ev, payload)
 	if view, ok := f.sessions[sessionID]; ok {
 		f.updated[sessionID] = time.Now()
@@ -252,6 +253,13 @@ func (f *fakeAPI) emit(sessionID, turnID string, payload proto.Message) {
 	if feed != nil {
 		feed.publish(ev)
 	}
+}
+
+var fakeEventTime = time.Unix(160, 0)
+
+func tsValue(ts string) float64 {
+	v, _ := strconv.ParseFloat(ts, 64)
+	return v
 }
 
 func setPayload(ev *pb.Event, payload proto.Message) {
@@ -604,7 +612,7 @@ func (p *fakePoster) ThreadReplies(_ context.Context, _, threadTS, since string,
 	if since != "" {
 		kept := out[:0]
 		for _, m := range out {
-			if m.Timestamp >= since {
+			if tsValue(m.Timestamp) >= tsValue(since) {
 				kept = append(kept, m)
 			}
 		}

@@ -461,6 +461,23 @@ func TestAPausedOwnersReplyAfterAJoinIsDiscussion(t *testing.T) {
 	}
 }
 
+func TestAPausedSessionInAVeryLongThreadCanContinue(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+	f.api.setState("old-1", pb.SessionState_SESSION_STATE_UNSPECIFIED, api.StateSuspended, noReason)
+	f.poster.mu.Lock()
+	f.poster.tooLong = true
+	f.poster.mu.Unlock()
+
+	f.app.HandleMention(context.Background(), mentionIn(f, "U1", "continue"))
+	waitFor(t, "the continuation", func() bool { return len(f.api.promptRequests()) == 1 })
+	if ends := f.api.endRequests(); len(ends) != 0 {
+		t.Errorf("a long thread ended the paused session: %v", ends)
+	}
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
