@@ -29,3 +29,23 @@ func TestARemovedFileUnbindsEveryChannel(t *testing.T) {
 		}
 	}
 }
+
+func TestABadEditKeepsThePreviousMap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "channels.yaml")
+	if err := os.WriteFile(path, []byte("channels:\n  C1: deploy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m, err := New(path, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("channels: [this is not a map\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.reload(); err == nil {
+		t.Fatal("reload of an unparseable map should fail")
+	}
+	if got, err := m.TemplateFor(context.Background(), "C1"); err != nil || got != "deploy" {
+		t.Errorf("after a bad edit: got %q/%v, want the previous binding", got, err)
+	}
+}

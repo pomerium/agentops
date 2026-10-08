@@ -72,22 +72,3 @@ func TestMissingFileBindsNothing(t *testing.T) {
 		t.Errorf("got %v, want ErrChannelNotBound", err)
 	}
 }
-
-func TestABadEditKeepsThePreviousMap(t *testing.T) {
-	ctx := context.Background()
-	path := write(t, "channels:\n  C1: deploy\n")
-	m, err := channelmap.New(path, nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("channels: [this is not a map\n"), 0o600); err != nil {
-		t.Fatalf("write bad map: %v", err)
-	}
-	if _, err := channelmap.New(path, nil); err == nil {
-		t.Fatal("an unparseable map should fail to load")
-	}
-	got, err := m.TemplateFor(ctx, "C1")
-	if err != nil || got != "deploy" {
-		t.Errorf("after a bad edit: got %q/%v, want the previous binding", got, err)
-	}
-}
