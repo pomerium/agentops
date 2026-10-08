@@ -219,9 +219,16 @@ func (s *Service) activateAndRun(
 	}
 	opening := opts.agentPrompt != ""
 	if opening {
-		b.enter(opts.turnID)
 		b.gated = true
-		s.sendPrompt(context.WithoutCancel(ctx), b, opts.turnID, opts.turnSeq, opts.agentPrompt)
+		if err := s.sendPrompt(context.WithoutCancel(ctx), b, opts.turnID, opts.turnSeq, opts.agentPrompt); err != nil {
+			s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{
+				Reason: "the turn could not be saved",
+			}}})
+			b.gated = false
+			opening = false
+		} else {
+			b.enter(opts.turnID)
+		}
 	}
 
 	if !s.register(o, b) {

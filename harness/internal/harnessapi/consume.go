@@ -285,12 +285,8 @@ func (s *Service) dropCommand(ctx context.Context, c sessionstore.PodCommand) {
 	}
 }
 
-func (s *Service) sendPrompt(ctx context.Context, b *binding, turnID string, turnSeq uint64, text string) {
+func (s *Service) sendPrompt(ctx context.Context, b *binding, turnID string, turnSeq uint64, text string) error {
 	p := &agentlinkpb.Prompt{TurnId: turnID, TurnSeq: turnSeq, Text: text}
-	defer func() {
-		b.held = append(b.held, p)
-		b.release()
-	}()
 	payload, err := proto.Marshal(p)
 	if err == nil {
 		err = s.store.PutPodCommand(ctx, sessionstore.PodCommand{
@@ -298,9 +294,12 @@ func (s *Service) sendPrompt(ctx context.Context, b *binding, turnID string, tur
 		})
 	}
 	if err != nil {
-		s.log.WarnContext(ctx, "could not save a turn before sending it; a restart before the agent gets it loses the turn",
-			"session", b.sessionID, "turn_id", turnID, "err", err)
+		s.log.WarnContext(ctx, "could not save a turn; it is not sent", "session", b.sessionID, "turn_id", turnID, "err", err)
+		return err
 	}
+	b.held = append(b.held, p)
+	b.release()
+	return nil
 }
 
 func (s *Service) ungate(b *binding) {
@@ -310,7 +309,7 @@ func (s *Service) ungate(b *binding) {
 	b.release()
 }
 
-func (s *Service) decide(ctx context.Context, b *binding, turnID, requestID, optionID string, cancelled bool) {
+func (s *Service) saveDecision(ctx context.Context, b *binding, turnID, requestID, optionID string, cancelled bool) error {
 	d := &agentlinkpb.PermissionDecision{RequestId: requestID, OptionId: optionID, Cancelled: cancelled}
 	payload, err := proto.Marshal(d)
 	if err == nil {
@@ -319,9 +318,9 @@ func (s *Service) decide(ctx context.Context, b *binding, turnID, requestID, opt
 		})
 	}
 	if err != nil {
-		s.log.WarnContext(ctx, "could not save a permission decision before sending it", "session", b.sessionID, "request_id", requestID, "err", err)
+		s.log.WarnContext(ctx, "could not save a permission decision; it is not sent", "session", b.sessionID, "request_id", requestID, "err", err)
 	}
-	b.session.Decide(requestID, optionID, cancelled)
+	return err
 }
 
 func (s *Service) expirePermission(ctx context.Context, b *binding, requestID string) {
@@ -329,10 +328,14 @@ func (s *Service) expirePermission(ctx context.Context, b *binding, requestID st
 	if !ok {
 		return
 	}
+	if err := s.saveDecision(ctx, b, w.turnID, requestID, "", true); err != nil {
+		b.sink.restore(requestID, w, b.sink.expireRetry)
+		return
+	}
 	s.emit(ctx, b.sessionID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
 		RequestId: requestID, Resolution: unanswered(api.ResolutionExpired).GetResolution(),
 	}}})
-	s.decide(ctx, b, w.turnID, requestID, "", true)
+	b.session.Decide(requestID, "", true)
 }
 
 func encodeExecutor(e agenticrun.Executor) string {

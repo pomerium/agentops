@@ -15,6 +15,7 @@ type logSink struct {
 	svc         *Service
 	sessionID   string
 	permTimeout time.Duration
+	expireRetry time.Duration
 
 	mu      sync.Mutex
 	waiters map[string]*permissionWaiter
@@ -23,9 +24,11 @@ type logSink struct {
 }
 
 type permissionWaiter struct {
-	turnID  string
-	options []string
-	timer   *time.Timer
+	turnID   string
+	options  []string
+	deadline time.Time
+	expire   func(requestID string)
+	timer    *time.Timer
 }
 
 func newLogSink(svc *Service, sessionID string, permTimeout time.Duration) *logSink {
@@ -33,6 +36,7 @@ func newLogSink(svc *Service, sessionID string, permTimeout time.Duration) *logS
 		svc:         svc,
 		sessionID:   sessionID,
 		permTimeout: permTimeout,
+		expireRetry: time.Second,
 		waiters:     map[string]*permissionWaiter{},
 	}
 }
@@ -49,17 +53,29 @@ func (s *logSink) await(req *agentlinkpb.PermissionRequest, expire func(requestI
 		offered = append(offered, o.GetId())
 	}
 	id := req.GetRequestId()
-	s.waiters[id] = &permissionWaiter{
-		turnID:  req.GetTurnId(),
-		options: offered,
-		timer: time.AfterFunc(s.permTimeout, func() {
-			if s.fire() {
-				defer s.firing.Done()
-				expire(id)
-			}
-		}),
-	}
+	w := &permissionWaiter{turnID: req.GetTurnId(), options: offered, deadline: deadline, expire: expire}
+	s.waiters[id] = w
+	s.armLocked(id, w, s.permTimeout)
 	return deadline
+}
+
+func (s *logSink) armLocked(id string, w *permissionWaiter, after time.Duration) {
+	w.timer = time.AfterFunc(after, func() {
+		if s.fire() {
+			defer s.firing.Done()
+			w.expire(id)
+		}
+	})
+}
+
+func (s *logSink) restore(id string, w *permissionWaiter, after time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.waiters[id]; ok || s.stopped {
+		return
+	}
+	s.waiters[id] = w
+	s.armLocked(id, w, max(after, 0))
 }
 
 func (s *logSink) fire() bool {

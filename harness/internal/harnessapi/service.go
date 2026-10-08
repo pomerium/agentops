@@ -289,7 +289,11 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 			return "", api.Errorf(api.ErrInvalidState, "session %s is not attached to this process", sess.ID)
 		}
 		ctx = context.WithoutCancel(ctx)
-		s.sendPrompt(ctx, b, turnID, uint64(n), content)
+		if err := s.sendPrompt(ctx, b, turnID, uint64(n), content); err != nil {
+			b.sendMu.Unlock()
+			b.leave(turnID)
+			return "", api.Errorf(api.ErrUnavailable, "save turn %s of session %s: %v", turnID, sess.ID, err)
+		}
 		b.sendMu.Unlock()
 		s.extendLease(ctx, b)
 		return turnID, nil
@@ -394,10 +398,14 @@ func (s *Service) RespondPermission(ctx context.Context, req *pb.RespondPermissi
 		return nil, api.Errorf(api.ErrUnknownRequest, "permission request %q is unknown or already resolved", req.GetRequestId())
 	}
 	ctx = context.WithoutCancel(ctx)
+	if err := s.saveDecision(ctx, b, w.turnID, req.GetRequestId(), req.GetOptionId(), false); err != nil {
+		b.sink.restore(req.GetRequestId(), w, time.Until(w.deadline))
+		return nil, api.Errorf(api.ErrUnavailable, "save the decision for permission request %q: %v", req.GetRequestId(), err)
+	}
 	s.emit(ctx, sess.ID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
 		RequestId: req.GetRequestId(), Resolution: &pb.PermissionResolved_OptionId{OptionId: req.GetOptionId()},
 	}}})
-	s.decide(ctx, b, w.turnID, req.GetRequestId(), req.GetOptionId(), false)
+	b.session.Decide(req.GetRequestId(), req.GetOptionId(), false)
 	s.resolved.record(sess.ID, req.GetRequestId())
 	return &pb.RespondPermissionResponse{}, nil
 }

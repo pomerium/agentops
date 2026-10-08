@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
+	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
+	"github.com/pomerium/agentops/harness/internal/apiserver"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
@@ -293,5 +296,128 @@ func TestAFailedOutboxReadHoldsNewTurnsUntilTheReplayIsDone(t *testing.T) {
 		if !slices.Contains(b.outstanding(), id) {
 			t.Errorf("outstanding = %v, want it to keep %s", b.outstanding(), id)
 		}
+	}
+}
+
+type refusedOutbox struct {
+	Store
+	refuse atomic.Bool
+}
+
+func (s *refusedOutbox) PutPodCommand(ctx context.Context, cmd sessionstore.PodCommand) error {
+	if s.refuse.Load() {
+		return errors.New("database unavailable")
+	}
+	return s.Store.PutPodCommand(ctx, cmd)
+}
+
+func TestAnUnsavedPromptIsNotAccepted(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	live := &promptProbe{}
+	b.session = live
+	outbox := &refusedOutbox{Store: st}
+	outbox.refuse.Store(true)
+	svc.store = outbox
+	sess, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	if _, err := svc.startTurn(ctx, sess, "hello"); !errors.Is(err, api.ErrUnavailable) {
+		t.Fatalf("startTurn with a failed save: err = %v, want %v", err, api.ErrUnavailable)
+	}
+	if got := live.acceptedTurns(); len(got) != 0 {
+		t.Errorf("the agent got %v for a turn that was not saved", got)
+	}
+	if got := b.outstanding(); len(got) != 0 {
+		t.Errorf("outstanding = %v, want no turn", got)
+	}
+}
+
+type decisionLog struct {
+	idleSession
+	mu        sync.Mutex
+	decisions []*agentlinkpb.PermissionDecision
+}
+
+func (p *decisionLog) Decide(requestID, optionID string, cancelled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.decisions = append(p.decisions, &agentlinkpb.PermissionDecision{RequestId: requestID, OptionId: optionID, Cancelled: cancelled})
+}
+
+func (p *decisionLog) sent() []*agentlinkpb.PermissionDecision {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.decisions)
+}
+
+type anyClient struct{ Templates }
+
+func (anyClient) ClientBinding(context.Context, string) (*v1alpha1.ClientBinding, error) {
+	return &v1alpha1.ClientBinding{}, nil
+}
+
+func TestAnUnsavedPermissionChoiceStaysAnswerable(t *testing.T) {
+	ctx := apiserver.WithClientID(context.Background(), "client")
+	svc, st := runningService(t, quietLauncher{})
+	svc.templates = anyClient{}
+	b := svc.lookup("s1")
+	live := &decisionLog{}
+	b.session = live
+	b.sink.await(&agentlinkpb.PermissionRequest{
+		RequestId: "request", TurnId: "t1", Options: []*agentlinkpb.PermissionOption{{Id: "allow"}},
+	}, func(id string) { svc.expirePermission(context.Background(), b, id) })
+	outbox := &refusedOutbox{Store: st}
+	outbox.refuse.Store(true)
+	svc.store = outbox
+	req := &pb.RespondPermissionRequest{Ref: &pb.SessionRef{SessionId: "s1"}, RequestId: "request", OptionId: "allow"}
+
+	if _, err := svc.RespondPermission(ctx, req); !errors.Is(err, api.ErrUnavailable) {
+		t.Fatalf("RespondPermission with a failed save: err = %v, want %v", err, api.ErrUnavailable)
+	}
+	if got := live.sent(); len(got) != 0 {
+		t.Fatalf("sent %v for a choice that was not saved", got)
+	}
+
+	outbox.refuse.Store(false)
+	if _, err := svc.RespondPermission(ctx, req); err != nil {
+		t.Fatalf("RespondPermission after the store recovers: %v", err)
+	}
+	if got := live.sent(); len(got) != 1 || got[0].GetOptionId() != "allow" || got[0].GetCancelled() {
+		t.Errorf("decisions sent = %v, want one allow", got)
+	}
+}
+
+func TestAnExpiryThatCannotBeSavedIsRetried(t *testing.T) {
+	svc, st := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	live := &decisionLog{}
+	b.session = live
+	outbox := &refusedOutbox{Store: st}
+	outbox.refuse.Store(true)
+	svc.store = outbox
+	b.sink.permTimeout = 10 * time.Millisecond
+	b.sink.expireRetry = 10 * time.Millisecond
+	b.sink.await(&agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}, func(id string) {
+		svc.expirePermission(context.Background(), b, id)
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	if got := live.sent(); len(got) != 0 {
+		t.Fatalf("sent %v for an expiry that was not saved", got)
+	}
+	outbox.refuse.Store(false)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(live.sent()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the expiry was never sent after the store recovered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := live.sent(); len(got) != 1 || !got[0].GetCancelled() {
+		t.Errorf("decisions sent = %v, want one cancellation", got)
 	}
 }
