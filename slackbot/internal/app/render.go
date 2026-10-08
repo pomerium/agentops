@@ -35,9 +35,12 @@ type renderer struct {
 	broken   bool
 	finished bool
 	permTS   map[string]string
+	waiting  map[string]bool
 }
 
-func newRenderer() *renderer { return &renderer{permTS: map[string]string{}} }
+func newRenderer() *renderer {
+	return &renderer{permTS: map[string]string{}, waiting: map[string]bool{}}
+}
 
 func (r *renderer) beginTurn(turnID string) {
 	r.mu.Lock()
@@ -506,23 +509,56 @@ func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequ
 		title = "a tool call"
 	}
 	blocks := gateway.PermissionBlocks(t.sessionID, p.GetRequestId(), t.ownerUserID, title, choices)
+	if a.postPrompt(ctx, t, p.GetRequestId(), blocks) {
+		return
+	}
+	t.render.mu.Lock()
+	t.render.waiting[p.GetRequestId()] = true
+	t.render.mu.Unlock()
+	go a.retryPrompt(ctx, t, p.GetRequestId(), blocks)
+}
+
+func (a *App) postPrompt(ctx context.Context, t *thread, requestID string, blocks []slack.Block) bool {
 	ts, err := a.poster.PostMessage(ctx, t.channel,
 		chromeMeta(t.sessionID), slack.MsgOptionBlocks(blocks...), slack.MsgOptionTS(t.threadTS))
 	if err != nil {
 		a.log.ErrorContext(ctx, "post permission prompt failed",
-			"channel", t.channel, "thread_ts", t.threadTS, "err", err)
-		return
+			"session", t.sessionID, "request", requestID, "err", err)
+		return false
 	}
 	t.render.mu.Lock()
-	t.render.permTS[p.GetRequestId()] = ts
+	t.render.permTS[requestID] = ts
 	t.render.mu.Unlock()
 	a.saveMeta(ctx, t, func(m *sessionMeta) {
-		m.PermissionPrompts = withPermissionPrompt(m.PermissionPrompts, p.GetRequestId(), ts)
+		m.PermissionPrompts = withPermissionPrompt(m.PermissionPrompts, requestID, ts)
 	})
+	return true
+}
+
+func (a *App) retryPrompt(ctx context.Context, t *thread, requestID string, blocks []slack.Block) {
+	policy := backoff.NewExponentialBackOff()
+	policy.InitialInterval = 500 * time.Millisecond
+	policy.MaxInterval = 30 * time.Second
+	_, _ = backoff.Retry(ctx, func() (struct{}, error) {
+		t.render.mu.Lock()
+		waiting := t.render.waiting[requestID]
+		t.render.mu.Unlock()
+		if !waiting {
+			return struct{}{}, nil
+		}
+		if !a.postPrompt(ctx, t, requestID, blocks) {
+			return struct{}{}, errors.New("the permission prompt is not posted yet")
+		}
+		t.render.mu.Lock()
+		delete(t.render.waiting, requestID)
+		t.render.mu.Unlock()
+		return struct{}{}, nil
+	}, backoff.WithBackOff(policy), backoff.WithMaxElapsedTime(0))
 }
 
 func (a *App) closePermission(ctx context.Context, t *thread, p *pb.PermissionResolved) {
 	t.render.mu.Lock()
+	delete(t.render.waiting, p.GetRequestId())
 	ts := t.render.permTS[p.GetRequestId()]
 	t.render.mu.Unlock()
 	if ts == "" {
