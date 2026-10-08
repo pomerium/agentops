@@ -506,6 +506,27 @@ func TestARestartMidAnswerKeepsTheAnswerInOneMessage(t *testing.T) {
 	}
 }
 
+func TestStartupReplaysATurnItsCursorStopsInside(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateRunning, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1", "last_seq": 2,
+	})
+	f.api.emit("old-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "First finding."})
+	f.api.emit("old-1", "", &pb.LaunchStalled{})
+	f.api.emit("old-1", "t1", &pb.AgentMessage{PartId: "t1.2", Text: "Second finding.", Final: true})
+
+	f.app.ReconcileOnStartup(context.Background())
+	answer := f.poster.waitForPost(t, "First finding.")
+	waitFor(t, "the whole answer in one message", func() bool {
+		for _, u := range f.poster.updatesTo(answer.ts) {
+			if !u.debounced && strings.Contains(u.text, "First finding.") && strings.Contains(u.text, "Second finding.") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestStartupLeavesTheSessionsItAlreadyFollowsAlone(t *testing.T) {
 	f := newFixture(t)
 	f.app.HandleMention(context.Background(), mention(f, "ship it"))
