@@ -379,6 +379,34 @@ func TestForeignWorkspaceMentionIsIgnored(t *testing.T) {
 	}
 }
 
+func TestStartingOverQuotesTheTriggeringReplyOnce(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, f *fixture){
+		"held in memory": func(t *testing.T, f *fixture) {
+			liveThread(t, f)
+			f.api.setState("sess-1", api.StateRunning, api.StateSuspended, noReason)
+			waitForState(t, f, "sess-1", api.StateSuspended)
+		},
+		"after a restart": func(t *testing.T, f *fixture) {
+			f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+				"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+			})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			setup(t, f)
+			f.api.promptErr = api.ErrNotRevivable
+			before := len(f.api.createRequests())
+			f.app.HandleMessage(context.Background(), replyIn(f, "U1", "still there?"))
+			waitFor(t, "the fresh session", func() bool { return len(f.api.createRequests()) > before })
+			seed := f.api.createRequests()[before].InitialPrompt
+			if n := strings.Count(seed, "still there?"); n != 1 {
+				t.Errorf("the triggering reply appears %d times in the fresh session's seed, want 1:\n%s", n, seed)
+			}
+		})
+	}
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
