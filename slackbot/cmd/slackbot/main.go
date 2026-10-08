@@ -115,12 +115,16 @@ func run(log *slog.Logger) error {
 	return srv.Shutdown(shutdownCtx)
 }
 
+const identityLookupTimeout = 15 * time.Second
+
 var rejectedTokens = []string{"invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired"}
 
 func botIdentity(ctx context.Context, lookup func(context.Context) (string, string, error), log *slog.Logger, opts ...backoff.RetryOption) (string, string, error) {
 	type identity struct{ user, team string }
 	id, err := backoff.Retry(ctx, func() (identity, error) {
-		user, team, err := lookup(ctx)
+		attempt, cancel := context.WithTimeout(ctx, identityLookupTimeout)
+		defer cancel()
+		user, team, err := lookup(attempt)
 		var rejected slack.SlackErrorResponse
 		switch {
 		case errors.As(err, &rejected) && slices.Contains(rejectedTokens, rejected.Err):

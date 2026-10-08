@@ -50,3 +50,15 @@ func TestBotIdentityWithoutAUserIDIsAnError(t *testing.T) {
 		t.Fatal("serving without a bot user ID ignores every top-level mention; it must be an error")
 	}
 }
+
+func TestBotIdentityGivesEachLookupADeadline(t *testing.T) {
+	lookup := func(ctx context.Context) (string, string, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			return "", "", errors.New("the Slack lookup has no deadline")
+		}
+		return "UBOT", "T1", nil
+	}
+	if _, _, err := botIdentity(context.Background(), lookup, quiet, backoff.WithMaxTries(1)); err != nil {
+		t.Fatal(err)
+	}
+}
