@@ -80,3 +80,20 @@ func TestAConsumerRetriesAnUnavailableHarnessUntilStopped(t *testing.T) {
 		t.Fatal("a stopped consumer left its thread registered")
 	}
 }
+
+func TestAnswerPartsJoinExactlyUnlessAToolCallCameBetween(t *testing.T) {
+	r := newRenderer()
+	r.beginTurn("t1")
+	r.appendPart("pre")
+	if got := r.appendPart("fix"); got != "prefix" {
+		t.Fatalf("a part split by size changed the text: %q", got)
+	}
+	r.toolCall()
+	if got := r.appendPart("Checked the logs."); got != "prefix\n\nChecked the logs." {
+		t.Fatalf("text after a tool call should start a new paragraph: %q", got)
+	}
+	r.toolCall()
+	if got := r.appendPart("\nDone."); got != "prefix\n\nChecked the logs.\nDone." {
+		t.Fatalf("a part that brings its own whitespace gets no more: %q", got)
+	}
+}
