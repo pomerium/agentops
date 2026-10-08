@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -79,23 +81,23 @@ func refThread(ref string) (channelID, threadTS, teamID, userID string, ok bool)
 	return parts[1], parts[2], parts[3], parts[4], true
 }
 
-func (a *App) loadMeta(ctx context.Context, view *pb.SessionView) (sessionMeta, bool) {
+var errNoSlackState = errors.New("this session's thread carries no readable Slack state")
+
+func (a *App) loadMeta(ctx context.Context, view *pb.SessionView) (sessionMeta, error) {
 	channelID, threadTS, _, _, ok := refThread(view.GetConversationRef())
 	if !ok {
-		return sessionMeta{}, false
+		return sessionMeta{}, errNoSlackState
 	}
 	msgs, err := a.poster.ThreadReplies(ctx, channelID, threadTS, "", maxThreadRead)
 	if err != nil {
-		a.log.WarnContext(ctx, "could not read a session's thread for its state",
-			"session", view.GetId(), "channel", channelID, "thread_ts", threadTS, "err", err)
-		return sessionMeta{}, false
+		return sessionMeta{}, fmt.Errorf("read the thread of session %s: %w", view.GetId(), err)
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if m, ok := stateFrom(msgs[i], view.GetId()); ok {
-			return m, true
+			return m, nil
 		}
 	}
-	return sessionMeta{}, false
+	return sessionMeta{}, errNoSlackState
 }
 
 func identityOf(view *pb.SessionView) (sessionMeta, bool) {
