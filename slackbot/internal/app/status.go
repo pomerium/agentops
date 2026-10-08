@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -195,33 +196,38 @@ func (a *App) ReconcileOnStartup(ctx context.Context) {
 		return
 	}
 	sessions := res.GetSessions()
-	settled := 0
+	followed := 0
 	for _, view := range sessions {
 		if view.GetState() == api.StateSuspended {
 			continue
 		}
-		m, err := a.loadMeta(ctx, view)
-		if err != nil {
-			a.tel.Debug(ctx, "startup reconcile: no Slack state in this session's thread", "session", view.GetId())
-			continue
+		if a.followAgain(ctx, view) {
+			followed++
 		}
-		a.settleInterrupted(ctx, view, m)
-		settled++
 	}
 	a.log.InfoContext(ctx, "slack startup reconcile complete",
-		"live_sessions", len(sessions), "threads_told_they_were_interrupted", settled)
+		"live_sessions", len(sessions), "followed_again", followed)
 }
 
-func (a *App) settleInterrupted(ctx context.Context, view *pb.SessionView, m sessionMeta) {
-	if view.GetState() == api.StateAwaitingApproval && m.ApprovalChannelID != "" && m.ApprovalMessageTS != "" {
-		link, err := a.poster.Permalink(ctx, m.ChannelID, m.ThreadTS)
-		if err != nil {
-			a.tel.Debug(ctx, "thread permalink failed", "session", view.GetId(), "err", err)
+func (a *App) followAgain(ctx context.Context, view *pb.SessionView) bool {
+	m, err := a.loadMeta(ctx, view)
+	if errors.Is(err, errNoSlackState) {
+		var ok bool
+		if m, ok = identityOf(view); !ok {
+			a.tel.Debug(ctx, "startup reconcile: not a Slack session", "session", view.GetId())
+			return false
 		}
-		if _, err := a.poster.UpdateMessage(ctx, m.ApprovalChannelID, m.ApprovalMessageTS,
-			dmFinalOptions(view.GetId(), approvalDMStaleText(linkOr(link, "the thread")))...); err != nil {
-			a.log.WarnContext(ctx, "startup reconcile: edit approval DM failed", "session", view.GetId(), "err", err)
-		}
+	} else if err != nil {
+		a.log.WarnContext(ctx, "startup reconcile: could not read a live session's thread; not following it",
+			"session", view.GetId(), "err", err)
+		return false
 	}
-	a.restateStatus(ctx, threadFromMeta(view, m), msgStatusInterrupted)
+	t := threadFromMeta(view, m)
+	if ok, _ := a.registerThread(t); !ok {
+		return false
+	}
+	a.startConsumer(t, "", m.LastSeq)
+	a.log.InfoContext(ctx, "startup reconcile: following a live session again",
+		"session", view.GetId(), "state", view.GetState(), "after_seq", m.LastSeq)
+	return true
 }

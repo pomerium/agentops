@@ -83,6 +83,7 @@ func (a *App) consume(ctx context.Context, t *thread, ackTS string, afterSeq int
 			if ctx.Err() != nil {
 				return
 			}
+			t.applyMeta(func(m *sessionMeta) { m.LastSeq = max(m.LastSeq, ev.GetSeq()) })
 			a.renderEvent(ctx, t, ackTS, ev)
 		}
 	}
@@ -243,6 +244,7 @@ func endReaction(reason api.EndReason) string {
 
 func (a *App) endTurn(ctx context.Context, t *thread) {
 	a.clearBusy(ctx, t)
+	a.saveMeta(ctx, t, func(*sessionMeta) {})
 	t.render.mu.Lock()
 	finalTS, reacted := t.render.curTS, t.render.reacted
 	t.render.reacted = false
