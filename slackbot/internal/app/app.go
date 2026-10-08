@@ -114,8 +114,9 @@ type thread struct {
 	reviveMention atomic.Pointer[gateway.MentionInvocation]
 	released      atomic.Bool
 
-	render *renderer
-	stop   context.CancelFunc
+	render        *renderer
+	stop          context.CancelFunc
+	replayThrough int64
 }
 
 type idleNotice struct {
@@ -132,6 +133,10 @@ func (t *thread) currentState() api.SessionState {
 }
 
 func (t *thread) setState(s api.SessionState) { t.state.Store(&s) }
+
+func (t *thread) pastPause(seq int64) bool {
+	return seq <= t.replayThrough
+}
 
 func (t *thread) owns(userID, teamID string) bool {
 	return userID == t.ownerUserID && teamID == t.teamID
