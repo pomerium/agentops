@@ -36,6 +36,7 @@ type ChannelTemplates interface {
 
 type Poster interface {
 	PostMessage(ctx context.Context, channelID string, opts ...slack.MsgOption) (ts string, err error)
+	PostDM(ctx context.Context, userID string, opts ...slack.MsgOption) (channelID, ts string, err error)
 	PostEphemeral(ctx context.Context, channelID, userID string, opts ...slack.MsgOption) (ts string, err error)
 	UpdateMessage(ctx context.Context, channelID, ts string, opts ...slack.MsgOption) (string, error)
 	DeleteMessage(ctx context.Context, channelID, ts string) error
