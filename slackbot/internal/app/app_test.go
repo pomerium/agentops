@@ -325,6 +325,40 @@ func TestATurnsMessageKeepsEveryPartOfTheAnswer(t *testing.T) {
 	}
 }
 
+func TestATurnThatEndsWithoutAFinalPartFinishesItsMessage(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "checked the logs", Final: false})
+	inProgress := f.poster.waitForPost(t, "checked the logs")
+	f.api.emit("sess-1", "t1", &pb.TurnCompleted{})
+
+	waitFor(t, "the finished message", func() bool {
+		for _, u := range f.poster.updatesTo(inProgress.ts) {
+			if !u.debounced && u.text == "checked the logs" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestATurnThatEndsWithoutAFinalPartPostsItsWholeAnswer(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+
+	long := strings.Repeat("word ", 3000) + "the very end"
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: long, Final: false})
+	f.poster.waitForPost(t, "word word")
+	f.api.emit("sess-1", "t1", &pb.TurnCompleted{})
+
+	waitFor(t, "the rest of the answer in a second message", func() bool {
+		return len(f.poster.postsContaining("word word")) >= 2
+	})
+}
+
 func TestSessionEndedIsRenderedAndReleasesTheThread(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
