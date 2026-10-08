@@ -86,6 +86,7 @@ func (a *App) renderMissed(ctx context.Context, view *pb.SessionView, m sessionM
 	}
 	defer a.unregisterThread(t)
 
+	t.catchingUp = true
 	t.setState(api.StateSuspended)
 	last := a.turnStartBefore(ctx, view.GetId(), m.LastSeq)
 	boundary, inTurn, rendered := last, false, 0
