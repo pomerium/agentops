@@ -214,7 +214,7 @@ func TestShutdownStopsThePermissionTimers(t *testing.T) {
 	live := &decisionProbe{decisions: make(chan bool, 1)}
 	b.session = live
 	b.sink.permTimeout = time.Hour
-	b.sink.await(&agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}, func(id string) {
+	b.sink.await(&agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}, b.sink.deadline(), func(id string) {
 		svc.expirePermission(context.Background(), b, id)
 	})
 
@@ -369,7 +369,7 @@ func TestAnUnsavedPermissionChoiceStaysAnswerable(t *testing.T) {
 	b.session = live
 	b.sink.await(&agentlinkpb.PermissionRequest{
 		RequestId: "request", TurnId: "t1", Options: []*agentlinkpb.PermissionOption{{Id: "allow"}},
-	}, func(id string) { svc.expirePermission(context.Background(), b, id) })
+	}, b.sink.deadline(), func(id string) { svc.expirePermission(context.Background(), b, id) })
 	outbox := &refusedOutbox{Store: st}
 	outbox.refuse.Store(true)
 	svc.store = outbox
@@ -401,7 +401,7 @@ func TestAnExpiryThatCannotBeSavedIsRetried(t *testing.T) {
 	svc.store = outbox
 	b.sink.permTimeout = 10 * time.Millisecond
 	b.sink.expireRetry = 10 * time.Millisecond
-	b.sink.await(&agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}, func(id string) {
+	b.sink.await(&agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}, b.sink.deadline(), func(id string) {
 		svc.expirePermission(context.Background(), b, id)
 	})
 
@@ -419,5 +419,42 @@ func TestAnExpiryThatCannotBeSavedIsRetried(t *testing.T) {
 	}
 	if got := live.sent(); len(got) != 1 || !got[0].GetCancelled() {
 		t.Errorf("decisions sent = %v, want one cancellation", got)
+	}
+}
+
+func TestAPermissionTimerStartsOnlyOnceTheRequestIsRecorded(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	live := &decisionLog{}
+	b.session = live
+	b.sink.permTimeout = 50 * time.Millisecond
+	podLog := &flakyPodLog{EventLog: svc.events}
+	podLog.failures.Store(3)
+	svc.events = podLog
+
+	started := time.Now()
+	svc.handleEvent(context.Background(), b, &agentlinkpb.AgentEvent{
+		Seq: 2, TurnId: "t1",
+		Payload: &agentlinkpb.AgentEvent_PermissionRequest{PermissionRequest: &agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}},
+	})
+	if got := live.sent(); len(got) != 0 {
+		t.Fatalf("expired the request before it was recorded: %v", got)
+	}
+	if b.sink.validate("request", "") == nil || len(b.sink.pending()) != 1 {
+		t.Fatalf("pending requests = %v, want the recorded request", b.sink.pending())
+	}
+
+	evs, err := podLog.History(context.Background(), "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	var deadline time.Time
+	for _, ev := range evs {
+		if r := ev.GetPermissionRequest(); r != nil {
+			deadline = r.GetDeadline().AsTime()
+		}
+	}
+	if min := started.Add(b.sink.permTimeout + 100*time.Millisecond); deadline.Before(min) {
+		t.Errorf("recorded deadline %v, want it to start from the successful write (after %v)", deadline, min)
 	}
 }

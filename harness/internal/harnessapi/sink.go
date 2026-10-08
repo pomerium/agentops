@@ -41,12 +41,13 @@ func newLogSink(svc *Service, sessionID string, permTimeout time.Duration) *logS
 	}
 }
 
-func (s *logSink) await(req *agentlinkpb.PermissionRequest, expire func(requestID string)) time.Time {
-	deadline := time.Now().Add(s.permTimeout)
+func (s *logSink) deadline() time.Time { return time.Now().Add(s.permTimeout) }
+
+func (s *logSink) await(req *agentlinkpb.PermissionRequest, deadline time.Time, expire func(requestID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.waiters[req.GetRequestId()]; ok || s.stopped {
-		return deadline
+		return
 	}
 	offered := make([]string, 0, len(req.GetOptions()))
 	for _, o := range req.GetOptions() {
@@ -55,8 +56,7 @@ func (s *logSink) await(req *agentlinkpb.PermissionRequest, expire func(requestI
 	id := req.GetRequestId()
 	w := &permissionWaiter{turnID: req.GetTurnId(), options: offered, deadline: deadline, expire: expire}
 	s.waiters[id] = w
-	s.armLocked(id, w, s.permTimeout)
-	return deadline
+	s.armLocked(id, w, time.Until(deadline))
 }
 
 func (s *logSink) armLocked(id string, w *permissionWaiter, after time.Duration) {

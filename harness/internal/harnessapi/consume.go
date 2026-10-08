@@ -57,6 +57,8 @@ func (s *Service) consume(b *binding) {
 func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.AgentEvent) bool {
 	turnID, seq := ev.GetTurnId(), ev.GetSeq()
 	var out *pb.Event
+	var permission *pb.PermissionRequest
+	var deadline time.Time
 	switch p := ev.GetPayload().(type) {
 	case *agentlinkpb.AgentEvent_Message:
 		out = &pb.Event{Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{
@@ -89,18 +91,17 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 		}}}
 	case *agentlinkpb.AgentEvent_PermissionRequest:
 		req := p.PermissionRequest
-		deadline := b.sink.await(req, func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
 		options := make([]*pb.PermissionOption, 0, len(req.GetOptions()))
 		for _, o := range req.GetOptions() {
 			options = append(options, &pb.PermissionOption{Id: o.GetId(), Name: o.GetName(), Kind: o.GetKind()})
 		}
-		out = &pb.Event{Payload: &pb.Event_PermissionRequest{PermissionRequest: &pb.PermissionRequest{
+		permission = &pb.PermissionRequest{
 			RequestId:  req.GetRequestId(),
 			Summary:    req.GetSummary(),
 			Options:    options,
-			Deadline:   timestamppb.New(deadline),
 			ToolCallId: req.GetToolCallId(),
-		}}}
+		}
+		out = &pb.Event{Payload: &pb.Event_PermissionRequest{PermissionRequest: permission}}
 	case *agentlinkpb.AgentEvent_TurnFinished:
 		if reason := p.TurnFinished.GetError(); reason != "" {
 			out = &pb.Event{Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: agentErrorReason(reason)}}}
@@ -127,8 +128,17 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 	}
 
 	out.TurnId = turnID
-	if !s.recordPod(ctx, b, seq, func(ctx context.Context) error { return s.emitPod(ctx, b.sessionID, out, seq) }) {
+	if !s.recordPod(ctx, b, seq, func(ctx context.Context) error {
+		if permission != nil {
+			deadline = b.sink.deadline()
+			permission.Deadline = timestamppb.New(deadline)
+		}
+		return s.emitPod(ctx, b.sessionID, out, seq)
+	}) {
 		return false
+	}
+	if req := ev.GetPermissionRequest(); req != nil {
+		b.sink.await(req, deadline, func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
 	}
 	b.session.Ack(seq)
 	if ev.GetTurnFinished() != nil {
@@ -266,7 +276,7 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 	b.sendMu.Unlock()
 
 	for _, req := range pending {
-		b.sink.await(req, func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
+		b.sink.await(req, b.sink.deadline(), func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
 	}
 	waiting := map[string]bool{}
 	for _, req := range st.GetPendingPermissions() {
