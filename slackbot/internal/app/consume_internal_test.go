@@ -425,3 +425,37 @@ func TestACatchupDoesNotReplayAnApprovalRequestIntoAPausedSession(t *testing.T) 
 		t.Fatalf("a catch-up sent %d approval DMs and ended the paused session %d times", p.dms, c.ends)
 	}
 }
+
+type restartPiecesPoster struct {
+	Poster
+	posts int
+}
+
+func (p *restartPiecesPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	p.posts++
+	return strings.Repeat("x", p.posts), nil
+}
+
+func (*restartPiecesPoster) UpdateMessage(_ context.Context, _, ts string, _ ...slack.MsgOption) (string, error) {
+	return ts, nil
+}
+
+func TestARestartDoesNotRepostAFinalAnswersLaterPieces(t *testing.T) {
+	p := &restartPiecesPoster{}
+	a := New(nil, p, nil)
+	view := &pb.SessionView{Id: "s1"}
+	original := threadFromMeta(view, sessionMeta{ChannelID: "C1", ThreadTS: "1.0"})
+	original.render.beginTurn("t1")
+	text := strings.Repeat("a", maxMessageChars+1)
+	ctx := context.Background()
+	if !a.showFinal(ctx, original, text) {
+		t.Fatal("the first delivery failed")
+	}
+	restarted := threadFromMeta(view, original.meta())
+	if !a.showFinal(ctx, restarted, text) {
+		t.Fatal("the replay failed")
+	}
+	if p.posts != 2 {
+		t.Fatalf("an answer of two pieces was posted as %d messages", p.posts)
+	}
+}
