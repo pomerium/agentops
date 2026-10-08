@@ -370,3 +370,54 @@ func TestAPromptAfterARestartWaitsForTheSavedOlderOne(t *testing.T) {
 		t.Fatalf("prompts the agent ran = %v; the restart lost the older saved prompt", got)
 	}
 }
+
+type silentAdoptSession struct {
+	harnessapi.LiveSession
+	inbox <-chan *agentlinkpb.AgentIOFrame
+}
+
+func (s silentAdoptSession) Inbox() <-chan *agentlinkpb.AgentIOFrame {
+	return s.inbox
+}
+
+type silentAdoptLauncher struct{ *fakeLauncher }
+
+func (l silentAdoptLauncher) Adopt(
+	ctx context.Context, spec sandbox.AdoptSpec,
+	opts ...sandbox.SupervisionOption,
+) (harnessapi.LiveSession, error) {
+	live, err := l.fakeLauncher.Adopt(ctx, spec, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return silentAdoptSession{
+		LiveSession: live,
+		inbox:       make(chan *agentlinkpb.AgentIOFrame),
+	}, nil
+}
+
+func TestUnattachedAdoptionFailsItsSavedTurn(t *testing.T) {
+	h := newHarness(t)
+	ref := byID(launchRunning(t, h, "stub:no-reattach").GetId())
+	h.launcher.session.current().setDrops(true, false)
+	turn, err := h.svc.Prompt(as(stubClient),
+		&pb.PromptRequest{Ref: ref, Content: "saved"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.svc.Shutdown()
+
+	h2 := *h
+	h2.svc = harnessapi.New(h.store, harnessapi.NewEventLog(h.store),
+		silentAdoptLauncher{h.launcher}, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+	t.Cleanup(h2.svc.Shutdown)
+	<-h2.svc.ReconcileOnStartup(context.Background())
+	h2.launcher.down("tunnel_lost")
+	waitForStoredState(t, &h2, ref, api.StateEnded)
+
+	if countKind(history(t, &h2, ref), "turn_failed",
+		turn.GetTurnId()) != 1 {
+		t.Fatal("the saved turn never finished before the session ended")
+	}
+}
