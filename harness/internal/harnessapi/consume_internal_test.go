@@ -197,3 +197,35 @@ func TestAReconnectSendsTheOlderTurnBeforeANewOne(t *testing.T) {
 		t.Errorf("outstanding = %v, want it to keep %s", b.outstanding(), second)
 	}
 }
+
+type decisionProbe struct {
+	idleSession
+	decisions chan bool
+}
+
+func (p *decisionProbe) Decide(_, _ string, cancelled bool) { p.decisions <- cancelled }
+
+func TestShutdownStopsThePermissionTimers(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	live := &decisionProbe{decisions: make(chan bool, 1)}
+	b.session = live
+	b.sink.permTimeout = time.Hour
+	b.sink.await(&agentlinkpb.PermissionRequest{RequestId: "request", TurnId: "t1"}, func(id string) {
+		svc.expirePermission(context.Background(), b, id)
+	})
+
+	svc.Shutdown()
+
+	b.sink.mu.Lock()
+	if w := b.sink.waiters["request"]; w != nil {
+		w.timer.Reset(time.Millisecond)
+	}
+	b.sink.mu.Unlock()
+
+	select {
+	case cancelled := <-live.decisions:
+		t.Fatalf("a retired manager sent a decision (cancelled=%v)", cancelled)
+	case <-time.After(100 * time.Millisecond):
+	}
+}

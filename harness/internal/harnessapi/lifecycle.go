@@ -337,5 +337,6 @@ func (s *Service) Shutdown() {
 	s.mu.Unlock()
 	for _, b := range live {
 		<-b.consumed
+		b.sink.stop()
 	}
 }

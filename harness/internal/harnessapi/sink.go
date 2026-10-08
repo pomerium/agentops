@@ -18,6 +18,8 @@ type logSink struct {
 
 	mu      sync.Mutex
 	waiters map[string]*permissionWaiter
+	stopped bool
+	firing  sync.WaitGroup
 }
 
 type permissionWaiter struct {
@@ -39,7 +41,7 @@ func (s *logSink) await(req *agentlinkpb.PermissionRequest, expire func(requestI
 	deadline := time.Now().Add(s.permTimeout)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.waiters[req.GetRequestId()]; ok {
+	if _, ok := s.waiters[req.GetRequestId()]; ok || s.stopped {
 		return deadline
 	}
 	offered := make([]string, 0, len(req.GetOptions()))
@@ -50,9 +52,34 @@ func (s *logSink) await(req *agentlinkpb.PermissionRequest, expire func(requestI
 	s.waiters[id] = &permissionWaiter{
 		turnID:  req.GetTurnId(),
 		options: offered,
-		timer:   time.AfterFunc(s.permTimeout, func() { expire(id) }),
+		timer: time.AfterFunc(s.permTimeout, func() {
+			if s.fire() {
+				defer s.firing.Done()
+				expire(id)
+			}
+		}),
 	}
 	return deadline
+}
+
+func (s *logSink) fire() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.firing.Add(1)
+	return true
+}
+
+func (s *logSink) stop() {
+	s.mu.Lock()
+	s.stopped = true
+	for _, w := range s.waiters {
+		w.timer.Stop()
+	}
+	s.mu.Unlock()
+	s.firing.Wait()
 }
 
 func (s *logSink) validate(requestID, optionID string) error {
