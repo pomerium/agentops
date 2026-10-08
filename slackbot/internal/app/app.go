@@ -376,7 +376,7 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, 
 		a.tel.Debug(ctx, "no catch-up cursor yet; this turn carries no delta", "session", t.sessionID)
 		return "", true
 	}
-	replies, err := a.poster.ThreadReplies(ctx, t.channel, t.threadTS, cursor, transcriptFetchMax)
+	replies, err := a.poster.ThreadReplies(ctx, t.channel, t.threadTS, "", transcriptFetchMax)
 	if err != nil {
 		a.log.WarnContext(ctx, "read the thread for a catch-up failed; the turn goes without one and the next turn carries it",
 			"session", t.sessionID, "err", err)
