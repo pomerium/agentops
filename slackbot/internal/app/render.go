@@ -479,6 +479,11 @@ func (a *App) rememberAnswer(ctx context.Context, t *thread, ts string) {
 }
 
 func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequest) {
+	for _, o := range p.GetOptions() {
+		if v := gateway.PermissionValue(t.sessionID, p.GetRequestId(), o.GetId()); gateway.IsPermissionToken(v) {
+			a.permissionTokens.Store(v, permissionChoice{sessionID: t.sessionID, requestID: p.GetRequestId(), optionID: o.GetId()})
+		}
+	}
 	t.render.mu.Lock()
 	_, shown := t.render.permTS[p.GetRequestId()]
 	t.render.mu.Unlock()
