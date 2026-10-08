@@ -197,6 +197,42 @@ func TestTSBefore(t *testing.T) {
 	}
 }
 
+type partialFinalPoster struct {
+	Poster
+	updates, posts int
+}
+
+func (p *partialFinalPoster) UpdateMessage(context.Context, string, string, ...slack.MsgOption) (string, error) {
+	p.updates++
+	if p.updates == 1 {
+		return "", errors.New("connection lost")
+	}
+	return "answer", nil
+}
+
+func (p *partialFinalPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	p.posts++
+	return "tail", nil
+}
+
+func (*partialFinalPoster) RemoveReaction(context.Context, string, string, string) error { return nil }
+
+func TestARetriedFinalAnswerDoesNotRepostAPieceThatWentOut(t *testing.T) {
+	p := &partialFinalPoster{}
+	a := New(nil, p, nil)
+	th := &thread{channel: "C1", threadTS: "1.0", render: newRenderer()}
+	th.render.beginTurn("t1")
+	th.render.curTS = "answer"
+	ctx := context.Background()
+	a.renderEvent(ctx, th, "", &pb.Event{TurnId: "t1", Payload: &pb.Event_AgentMessage{
+		AgentMessage: &pb.AgentMessage{Text: strings.Repeat("a", maxMessageChars+1), Final: true},
+	}})
+	a.endTurn(ctx, th, "t1")
+	if p.posts != 1 {
+		t.Fatalf("the answer's second piece was posted %d times", p.posts)
+	}
+}
+
 type interruptedHistory struct {
 	harnessapipbconnect.HarnessAPIServiceClient
 	calls int
