@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -192,64 +191,30 @@ func dmFinalOptions(sessionID, text string) []slack.MsgOption {
 func (a *App) ReconcileOnStartup(ctx context.Context) {
 	res, err := a.api.ListSessions(ctx, &pb.ListSessionsRequest{LiveOnly: true})
 	if err != nil {
-		a.log.ErrorContext(ctx, "startup reconcile: list sessions failed", "err", err)
+		a.log.ErrorContext(ctx, "startup reconcile: list sessions failed; the sweeper picks the sessions up", "err", err)
 		return
 	}
 	sessions := res.GetSessions()
-	followed, watched := 0, 0
+	deferred := 0
 	for _, view := range sessions {
-		if view.GetState() == api.StateSuspended {
-			if a.watchMissedPause(ctx, view) {
-				watched++
-			}
-			continue
-		}
-		if a.followAgain(ctx, view) {
-			followed++
+		if !a.reconcile(ctx, view) {
+			deferred++
 		}
 	}
 	a.log.InfoContext(ctx, "slack startup reconcile complete",
-		"live_sessions", len(sessions), "followed_again", followed, "pauses_caught_up", watched)
+		"live_sessions", len(sessions), "left_to_the_sweeper", deferred)
 }
 
-func (a *App) watchMissedPause(ctx context.Context, view *pb.SessionView) bool {
-	m, err := a.loadMeta(ctx, view)
-	switch {
-	case errors.Is(err, errNoSlackState):
-		return false
-	case err != nil:
-		a.log.WarnContext(ctx, "startup reconcile: could not read a paused session's thread",
-			"session", view.GetId(), "err", err)
-		return false
-	case m.Watching:
-		return false
-	}
-	return a.renderMissed(ctx, view, m, true)
-}
-
-func (a *App) followAgain(ctx context.Context, view *pb.SessionView) bool {
-	m, err := a.loadMeta(ctx, view)
-	if errors.Is(err, errNoSlackState) {
-		var ok bool
-		if m, ok = identityOf(view); !ok {
-			a.tel.Debug(ctx, "startup reconcile: not a Slack session", "session", view.GetId())
-			return false
-		}
-	} else if err != nil {
-		a.log.WarnContext(ctx, "startup reconcile: could not read a live session's thread; not following it",
-			"session", view.GetId(), "err", err)
-		return false
-	}
+func (a *App) followAgain(ctx context.Context, view *pb.SessionView, m sessionMeta) {
 	t := threadFromMeta(view, m)
 	t.replayThrough = view.GetLastSeq()
 	if ok, _ := a.registerThread(t); !ok {
-		return false
+		return
 	}
 	after := a.turnStartBefore(ctx, view.GetId(), m.LastSeq)
 	a.startConsumer(t, "", after)
-	a.log.InfoContext(ctx, "startup reconcile: following a live session again",
+	a.log.InfoContext(ctx, "following a live session again",
 		"session", view.GetId(), "state", view.GetState(), "after_seq", after)
-	return true
 }
 
 func (a *App) turnStartBefore(ctx context.Context, sessionID string, cursor int64) int64 {

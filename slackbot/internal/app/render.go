@@ -94,6 +94,9 @@ func (a *App) startConsumer(t *thread, ackTS string, afterSeq int64) {
 	if t.render == nil {
 		t.render = newRenderer()
 	}
+	if !t.meta().Watching {
+		a.saveMeta(context.Background(), t, func(m *sessionMeta) { m.Watching = true })
+	}
 	go func() {
 		defer cancel()
 		a.consume(ctx, t, ackTS, afterSeq)
@@ -310,8 +313,10 @@ func (a *App) renderEnded(ctx context.Context, t *thread, ackTS string, p *pb.Se
 	}
 	t.setState(api.StateEnded)
 	if t.released.Load() {
+		a.saveMeta(ctx, t, func(m *sessionMeta) { m.Watching = false })
 		return
 	}
+	t.applyMeta(func(m *sessionMeta) { m.Watching = false })
 	a.restateStatus(ctx, t, endedStatus(p, time.Duration(t.approvalWindow.Load()), t.workflow))
 }
 
@@ -351,6 +356,7 @@ func (a *App) startOver(ctx context.Context, t *thread, in gateway.MentionInvoca
 		return
 	}
 	t.setState(api.StateEnded)
+	t.applyMeta(func(m *sessionMeta) { m.Watching = false })
 	a.restateStatus(ctx, t, msgStatusCannotContinue)
 	a.unregisterThread(t)
 	a.startJoin(ctx, in, !t.multiplayer())

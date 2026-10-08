@@ -86,6 +86,7 @@ func (a *App) startSession(ctx context.Context, spec startSpec) *thread {
 		m.UserID = in.UserID
 		m.TeamID = in.TeamID
 		m.Multiplayer = m.Multiplayer || spec.joinedAt != ""
+		m.Watching = true
 		if m.LastSeenTS == "" {
 			m.LastSeenTS = cmp.Or(spec.catchupFrom, spec.joinedAt)
 		}

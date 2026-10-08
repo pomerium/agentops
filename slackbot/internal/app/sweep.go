@@ -40,26 +40,43 @@ func (a *App) sweepWatched(ctx context.Context, since time.Time) bool {
 	}
 	complete := true
 	for _, view := range res.GetSessions() {
-		if view.GetState() == api.StateSuspended {
-			continue
-		}
-		m, err := a.loadMeta(ctx, view)
-		switch {
-		case errors.Is(err, errNoSlackState):
-			continue
-		case err != nil:
-			a.log.WarnContext(ctx, "sweep: could not read a session's thread; the next sweep covers it again",
-				"session", view.GetId(), "err", err)
-			complete = false
-			continue
-		case !m.Watching:
-			continue
-		}
-		if !a.renderMissed(ctx, view, m, false) {
+		if !a.reconcile(ctx, view) {
 			complete = false
 		}
 	}
 	return complete
+}
+
+func (a *App) reconcile(ctx context.Context, view *pb.SessionView) bool {
+	if a.holds(view.GetId()) {
+		return true
+	}
+	live, paused := api.Live(view.GetState()), view.GetState() == api.StateSuspended
+	m, err := a.loadMeta(ctx, view)
+	switch {
+	case errors.Is(err, errNoSlackState):
+		identity, ok := identityOf(view)
+		if !ok || !live || paused {
+			return true
+		}
+		m = identity
+	case err != nil:
+		a.log.WarnContext(ctx, "could not read a session's thread; the next sweep tries again",
+			"session", view.GetId(), "err", err)
+		return false
+	}
+	switch {
+	case paused && !m.Watching:
+		return a.renderMissed(ctx, view, m, true)
+	case paused:
+		return true
+	case live:
+		a.followAgain(ctx, view, m)
+		return true
+	case m.Watching:
+		return a.renderMissed(ctx, view, m, false)
+	}
+	return true
 }
 
 func (a *App) renderMissed(ctx context.Context, view *pb.SessionView, m sessionMeta, keepWatching bool) bool {
@@ -76,7 +93,7 @@ func (a *App) renderMissed(ctx context.Context, view *pb.SessionView, m sessionM
 			Ref: a.ref(view.GetId()), AfterSeq: last,
 		})
 		if err != nil {
-			a.log.WarnContext(ctx, "read a paused session's events failed; the next sweep continues from here",
+			a.log.WarnContext(ctx, "read a session's events failed; the next sweep continues from here",
 				"session", view.GetId(), "after_seq", last, "err", err)
 			a.saveMeta(ctx, t, func(meta *sessionMeta) { meta.LastSeq = last })
 			return false
