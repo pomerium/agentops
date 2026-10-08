@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -173,5 +174,74 @@ func TestTheLinkIsSavedBeforeTheConsumerAdvancesThePodSeq(t *testing.T) {
 			t.Fatalf("link = stream %q at pod seq %d, want new-stream at 2", got.StreamID, got.PodSeq)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type listedCommands struct {
+	*sqlite.Store
+	listed chan struct{}
+	once   sync.Once
+}
+
+func (s *listedCommands) ListPodCommands(ctx context.Context, sessionID string) ([]sessionstore.PodCommand, error) {
+	defer s.once.Do(func() { close(s.listed) })
+	return s.Store.ListPodCommands(ctx, sessionID)
+}
+
+type runsAfter struct {
+	agenticrun.RunClient
+	after <-chan struct{}
+}
+
+func (r runsAfter) GetRun(context.Context, string) (*agenticrun.RunStatus, error) {
+	select {
+	case <-r.after:
+	case <-time.After(time.Second):
+	}
+	return &agenticrun.RunStatus{}, nil
+}
+
+type openingSession struct {
+	*promptProbe
+	inbox chan *agentlinkpb.AgentIOFrame
+}
+
+func (s openingSession) StreamID() []byte                        { return []byte("stream") }
+func (s openingSession) Inbox() <-chan *agentlinkpb.AgentIOFrame { return s.inbox }
+
+func TestAStateBeforeTheOpeningTurnIsSentKeepsTheTurn(t *testing.T) {
+	ctx := context.Background()
+	st := &listedCommands{Store: openStore(t), listed: make(chan struct{})}
+	sess := sessionstore.Session{
+		ID: "s1", ClientID: "client", ConversationRef: "conversation",
+		TemplateName: "deploy", Status: api.StateAwaitingApproval,
+	}
+	if err := st.CreateSession(ctx, sess); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	inbox := make(chan *agentlinkpb.AgentIOFrame, 1)
+	inbox <- &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_State{State: &agentlinkpb.AgentState{}}}
+	live := openingSession{promptProbe: &promptProbe{}, inbox: inbox}
+	svc := New(st, NewEventLog(st), queuedLauncher{session: live}, nil, runsAfter{after: st.listed},
+		WithLogger(slog.New(slog.DiscardHandler)))
+	t.Cleanup(svc.Shutdown)
+	o := &owner{outcome: &runOutcome{}}
+	if !svc.claim("s1", o) {
+		t.Fatal("claim the session")
+	}
+	prepared := &sandbox.Prepared{ClaimName: "claim", SandboxName: "sandbox", Executor: agenticrun.Executor{
+		Namespace: "ns", ServiceAccount: "sa", PodName: "sandbox", PodUID: "uid",
+	}}
+	opts := launchOpts{agentPrompt: "opening", turnID: "t1", turnSeq: 1}
+	b := svc.activateAndRun(ctx, sess, opts, prepared, &sandbox.Attachment{}, "run-1", o)
+	if b == nil {
+		t.Fatal("activateAndRun failed")
+	}
+
+	if got := live.acceptedTurns(); !slices.Equal(got, []string{"t1"}) {
+		t.Errorf("turns the agent accepted = %v, want [t1]", got)
+	}
+	if !slices.Contains(b.outstanding(), "t1") {
+		t.Errorf("outstanding = %v, want the running opening turn t1", b.outstanding())
 	}
 }

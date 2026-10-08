@@ -12,7 +12,6 @@ import (
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
-	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 	"github.com/pomerium/agentops/harness/internal/telemetry"
@@ -222,6 +221,7 @@ func (s *Service) activateAndRun(
 	if opening {
 		b.enter(opts.turnID)
 		b.gated = true
+		s.sendPrompt(context.WithoutCancel(ctx), b, opts.turnID, opts.turnSeq, opts.agentPrompt)
 	}
 
 	if !s.register(o, b) {
@@ -265,7 +265,7 @@ func (s *Service) activateAndRun(
 	}
 
 	if opening {
-		s.ungate(ctx, b, &agentlinkpb.Prompt{TurnId: opts.turnID, TurnSeq: opts.turnSeq, Text: opts.agentPrompt})
+		s.ungate(b)
 		s.extendLease(ctx, b)
 	}
 	return b

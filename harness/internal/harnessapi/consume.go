@@ -289,13 +289,11 @@ func (s *Service) sendPrompt(ctx context.Context, b *binding, turnID string, tur
 	}
 }
 
-func (s *Service) ungate(ctx context.Context, b *binding, opening *agentlinkpb.Prompt) {
+func (s *Service) ungate(b *binding) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
 	b.gated = false
-	if opening != nil {
-		s.sendPrompt(ctx, b, opening.GetTurnId(), opening.GetTurnSeq(), opening.GetText())
-	}
+	slices.SortFunc(b.held, func(x, y *agentlinkpb.Prompt) int { return cmp.Compare(x.GetTurnSeq(), y.GetTurnSeq()) })
 	for _, p := range b.held {
 		b.session.Prompt(p.GetTurnId(), p.GetTurnSeq(), p.GetText())
 	}
