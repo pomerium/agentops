@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/pomerium/agentops/harness/api"
@@ -22,36 +23,49 @@ func (a *App) RunSweeper(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case tick := <-ticker.C:
-			a.sweepWatched(ctx, since)
-			since = tick.Add(-interval)
+			if a.sweepWatched(ctx, since) {
+				since = tick.Add(-interval)
+			}
 		}
 	}
 }
 
-func (a *App) sweepWatched(ctx context.Context, since time.Time) {
+func (a *App) sweepWatched(ctx context.Context, since time.Time) bool {
 	res, err := a.api.ListSessions(ctx, &pb.ListSessionsRequest{
 		UpdatedSince: api.Timestamp(since),
 	})
 	if err != nil {
-		a.log.WarnContext(ctx, "sweep: list sessions failed", "err", err)
-		return
+		a.log.WarnContext(ctx, "sweep: list sessions failed; the next sweep covers this window again", "err", err)
+		return false
 	}
+	complete := true
 	for _, view := range res.GetSessions() {
 		if view.GetState() == api.StateSuspended {
 			continue
 		}
 		m, err := a.loadMeta(ctx, view)
-		if err != nil || !m.Watching {
+		switch {
+		case errors.Is(err, errNoSlackState):
+			continue
+		case err != nil:
+			a.log.WarnContext(ctx, "sweep: could not read a session's thread; the next sweep covers it again",
+				"session", view.GetId(), "err", err)
+			complete = false
+			continue
+		case !m.Watching:
 			continue
 		}
-		a.renderWatchedEnding(ctx, view, m)
+		if !a.renderWatchedEnding(ctx, view, m) {
+			complete = false
+		}
 	}
+	return complete
 }
 
-func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m sessionMeta) {
+func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m sessionMeta) bool {
 	t := threadFromMeta(view, m)
 	if ok, _ := a.registerThread(t); !ok {
-		return
+		return true
 	}
 	defer a.unregisterThread(t)
 
@@ -61,7 +75,7 @@ func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m s
 	if err != nil {
 		a.log.WarnContext(ctx, "sweep: read a paused session's events failed",
 			"session", view.GetId(), "err", err)
-		return
+		return false
 	}
 
 	t.setState(api.StateSuspended)
@@ -78,6 +92,7 @@ func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m s
 	})
 	a.log.InfoContext(ctx, "sweep: rendered a paused session's ending",
 		"session", view.GetId(), "state", view.GetState(), "events", len(events))
+	return true
 }
 
 func (a *App) watchSuspended(ctx context.Context, t *thread, seq int64) {
