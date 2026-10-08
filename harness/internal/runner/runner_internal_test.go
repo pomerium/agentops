@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -66,5 +68,35 @@ func TestAReplacedStreamReturnsWhileItsSendIsBlocked(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the replaced stream waited for its blocked Send")
+	}
+}
+
+func TestALongStderrLineKeepsThePipeDraining(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	done := make(chan struct{})
+	go func() {
+		logStderr(slog.Default(), r, 0)
+		close(done)
+	}()
+	if _, err := w.Write(bytes.Repeat([]byte("x"), maxStderrLine+1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("\nnext diagnostic\n")); err != nil {
+		t.Fatalf("write after a long line: %v", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("the stderr reader stopped at a long line")
+	case <-time.After(100 * time.Millisecond):
+	}
+	_ = w.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stderr reader did not stop at EOF")
 	}
 }

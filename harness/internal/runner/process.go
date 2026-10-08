@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -94,11 +95,14 @@ const maxStderrLine = 1 << 16
 
 func logStderr(log *slog.Logger, f *os.File, pid int) {
 	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 4096), maxStderrLine)
-	for sc.Scan() {
-		if line := sc.Text(); line != "" {
+	r := bufio.NewReaderSize(f, maxStderrLine)
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if line := strings.TrimRight(string(chunk), "\r\n"); line != "" {
 			log.Debug("agent stderr", "pid", pid, "line", line)
+		}
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			return
 		}
 	}
 }
