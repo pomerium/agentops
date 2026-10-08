@@ -2,7 +2,10 @@ package harnessclient
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +144,52 @@ func TestAReplayStartLeftFromAnEarlierAgentIOIsNotForwarded(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the new AgentIO forwarded no state")
+	}
+}
+
+type droppedAttach struct {
+	agentlinkpb.AgentLinkService_AttachClient
+	release chan struct{}
+}
+
+func (s *droppedAttach) Recv() (*agentlinkpb.ManagerFrame, error) {
+	<-s.release
+	return nil, io.EOF
+}
+
+func (s *droppedAttach) Send(*agentlinkpb.SidecarFrame) error { return io.ErrClosedPipe }
+
+func attachEndWaiters() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "harnessclient.awaitAttachEnd(")
+}
+
+func TestATerminalStatusLeavesNoReceiverBehind(t *testing.T) {
+	before := attachEndWaiters()
+	stream := &droppedAttach{release: make(chan struct{})}
+	t.Cleanup(func() { close(stream.release) })
+	c := &Client{log: slog.New(slog.DiscardHandler), statusCh: make(chan *agentlinkpb.Status, 1)}
+	c.statusCh <- &agentlinkpb.Status{State: agentlinkpb.Status_STATE_ERROR, Reason: ReasonLocalFailure}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := c.serve(ctx, ctx, stream, time.Hour, time.Hour); err == nil {
+		t.Fatal("serve returned no error for a terminal status")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for attachEndWaiters() <= before {
+		if time.Now().After(deadline) {
+			t.Fatal("the terminal receiver never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for attachEndWaiters() > before {
+		if time.Now().After(deadline) {
+			t.Fatal("the terminal receiver outlived its canceled session")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

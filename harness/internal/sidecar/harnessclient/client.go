@@ -378,13 +378,28 @@ func (c *Client) heartbeatContract(ack *agentlinkpb.ManagerHelloAck) (time.Durat
 	return interval, missLimit, time.Duration(missLimit) * advertised
 }
 
+type recvResult struct {
+	frame *agentlinkpb.ManagerFrame
+	err   error
+}
+
+func awaitAttachEnd(ctx context.Context, recvCh <-chan recvResult, ended chan<- error) {
+	for {
+		select {
+		case r := <-recvCh:
+			if r.err != nil {
+				ended <- r.err
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLinkService_AttachClient,
 	interval, deadline time.Duration,
 ) error {
-	type recvResult struct {
-		frame *agentlinkpb.ManagerFrame
-		err   error
-	}
 	recvCh := make(chan recvResult, 1)
 	ended := make(chan error, 1)
 	go func() {
@@ -401,14 +416,7 @@ func (c *Client) serve(ctx, runCtx context.Context, stream agentlinkpb.AgentLink
 		}
 	}()
 	terminal := func(f *agentlinkpb.SidecarFrame) {
-		go func() {
-			for r := range recvCh {
-				if r.err != nil {
-					ended <- r.err
-					return
-				}
-			}
-		}()
+		go awaitAttachEnd(ctx, recvCh, ended)
 		sendTerminal(stream, f, ended)
 	}
 
