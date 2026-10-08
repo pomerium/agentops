@@ -350,7 +350,8 @@ func (a *App) promptThread(ctx context.Context, t *thread, text, triggerTS, mess
 
 func (a *App) sendTurn(ctx context.Context, t *thread, text, triggerTS, messageTS string) error {
 	a.clearIdleWarning(ctx, t, msgIdleKeptAlive)
-	content := withCatchup(a.catchup(ctx, t, triggerTS), text)
+	block, read := a.catchup(ctx, t, triggerTS)
+	content := withCatchup(block, text)
 	a.markBusy(ctx, t)
 	if _, err := a.api.Prompt(ctx, &pb.PromptRequest{
 		Ref: a.ref(t.sessionID), Content: content, IdempotencyKey: promptKey(t.channel, messageTS),
@@ -358,24 +359,26 @@ func (a *App) sendTurn(ctx context.Context, t *thread, text, triggerTS, messageT
 		a.clearBusy(ctx, t)
 		return err
 	}
-	a.advanceCursor(ctx, t, triggerTS)
+	if read {
+		a.advanceCursor(ctx, t, triggerTS)
+	}
 	return nil
 }
 
-func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) string {
+func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, bool) {
 	if !t.multiplayer() {
-		return ""
+		return "", true
 	}
 	cursor := t.meta().LastSeenTS
 	if cursor == "" {
 		a.tel.Debug(ctx, "no catch-up cursor yet; this turn carries no delta", "session", t.sessionID)
-		return ""
+		return "", true
 	}
 	replies, err := a.poster.ThreadReplies(ctx, t.channel, t.threadTS, cursor, transcriptFetchMax)
 	if err != nil {
-		a.log.WarnContext(ctx, "read the thread for a catch-up failed; the turn goes without one",
+		a.log.WarnContext(ctx, "read the thread for a catch-up failed; the turn goes without one and the next turn carries it",
 			"session", t.sessionID, "err", err)
-		return ""
+		return "", false
 	}
 	entries, truncated := capEntries(sessionTranscript(replies,
 		catchupCarry(cursor, beforeTS, a.botUserID, t.sessionID, t.ownerUserID)))
@@ -384,7 +387,7 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) string {
 		a.tel.Debug(ctx, "catching a session up with the thread",
 			"session", t.sessionID, "entries", len(entries), "truncated", truncated)
 	}
-	return block
+	return block, true
 }
 
 func (a *App) advanceCursor(ctx context.Context, t *thread, triggerTS string) {
