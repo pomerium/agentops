@@ -147,3 +147,14 @@ func TestStderrClosesWhenTheAgentExits(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestAPromptAfterTheSessionFinishedChangesNothing(t *testing.T) {
+	proc := &agentProc{cmd: &exec.Cmd{}, done: make(chan struct{})}
+	close(proc.done)
+	s := newSession(slog.Default(), []byte("A"), proc, time.Second, outboxMax)
+	s.finish()
+	s.prompt(&agentlinkpb.Prompt{TurnId: "late", TurnSeq: 1, Text: "hello"})
+	if st := s.state(); st.GetLastTurnSeq() != 0 || len(st.GetOutstandingTurnIds()) != 0 {
+		t.Fatalf("a finished session took a turn: %v", st)
+	}
+}

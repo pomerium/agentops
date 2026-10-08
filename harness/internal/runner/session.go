@@ -33,6 +33,7 @@ type session struct {
 	running     *agentlinkpb.Prompt
 	perms       []*permWait
 	wake        chan struct{}
+	finished    bool
 
 	done chan struct{}
 }
@@ -165,6 +166,7 @@ func (s *session) finish() {
 	s.mu.Lock()
 	queued := s.queue
 	s.queue = nil
+	s.finished = true
 	s.mu.Unlock()
 	for _, p := range queued {
 		s.emit(p.GetTurnId(), &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_TurnFinished{TurnFinished: &agentlinkpb.TurnFinished{
@@ -178,6 +180,11 @@ func (s *session) finish() {
 
 func (s *session) prompt(p *agentlinkpb.Prompt) {
 	s.mu.Lock()
+	if s.finished {
+		s.mu.Unlock()
+		s.log.Debug("agent-runner: ignoring a prompt after the agent exited", "turn_id", p.GetTurnId(), "turn_seq", p.GetTurnSeq())
+		return
+	}
 	if p.GetTurnSeq() <= s.lastTurnSeq {
 		s.mu.Unlock()
 		s.log.Debug("agent-runner: ignoring a prompt it already has", "turn_id", p.GetTurnId(), "turn_seq", p.GetTurnSeq())
