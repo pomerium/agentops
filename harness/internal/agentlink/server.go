@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -38,6 +39,7 @@ type options struct {
 	heartbeatMissLimit uint32
 	logger             *slog.Logger
 	now                func() time.Time
+	startupHold        bool
 }
 
 func WithHeartbeatInterval(d time.Duration) Option {
@@ -50,6 +52,8 @@ func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l 
 
 func WithNow(now func() time.Time) Option { return func(o *options) { o.now = now } }
 
+func WithStartupHold() Option { return func(o *options) { o.startupHold = true } }
+
 type Server struct {
 	agentlinkpb.UnimplementedAgentLinkServiceServer
 
@@ -58,6 +62,8 @@ type Server struct {
 	log      *slog.Logger
 	tel      *telemetry.Component
 	now      func() time.Time
+
+	holding atomic.Bool
 
 	mu   sync.Mutex
 	runs map[string]*attachedRun
@@ -85,12 +91,16 @@ func New(verifier *Verifier, opts ...Option) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{
+	s := &Server{
 		verifier: verifier, cfg: o, log: log, now: o.now,
 		tel:  telemetry.New(log, "harness", slog.LevelDebug),
 		runs: map[string]*attachedRun{},
-	}, nil
+	}
+	s.holding.Store(o.startupHold)
+	return s, nil
 }
+
+func (s *Server) EndStartupHold() { s.holding.Store(false) }
 
 func (s *Server) Register(gs *grpc.Server) {
 	agentlinkpb.RegisterAgentLinkServiceServer(gs, s)
@@ -175,6 +185,9 @@ func (s *Server) lookup(a *Assertion) (*attachedRun, error) {
 	run := s.runs[a.RunID]
 	s.mu.Unlock()
 	if run == nil {
+		if s.holding.Load() {
+			return nil, status.Errorf(codes.Unavailable, "the harness is starting; run %s is not expected yet", a.RunID)
+		}
 		return nil, status.Errorf(codes.NotFound, "no expectation for run %s", a.RunID)
 	}
 	if a.Executor != run.seal {

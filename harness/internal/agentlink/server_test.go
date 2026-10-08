@@ -84,16 +84,16 @@ var testSeal = agenticrun.Executor{
 	Namespace: testNamespace, ServiceAccount: testSA, PodName: testPod, PodUID: testPodUID,
 }
 
-func newTestLink(t *testing.T, hbInterval time.Duration, missLimit uint32) *testLink {
+func newTestLink(t *testing.T, hbInterval time.Duration, missLimit uint32, opts ...agentlink.Option) *testLink {
 	t.Helper()
 	idp := agentlinktest.NewIDP(t)
 	clk := &clock{t: time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)}
-	srv, err := agentlink.New(idp.Verifier(t),
+	srv, err := agentlink.New(idp.Verifier(t), append([]agentlink.Option{
 		agentlink.WithHeartbeatInterval(hbInterval),
 		agentlink.WithHeartbeatMissLimit(missLimit),
 		agentlink.WithLogger(testLogger(t)),
 		agentlink.WithNow(clk.now),
-	)
+	}, opts...)...)
 	if err != nil {
 		t.Fatalf("agentlink.New: %v", err)
 	}
@@ -159,6 +159,22 @@ func TestAttachUnknownRunIsNotFound(t *testing.T) {
 	_, _, err := g.attach(g.ctx(ctx, "no-such-run", nil), 1, false)
 	if codeOf(err) != codes.NotFound {
 		t.Fatalf("err = %v (code %s), want NotFound", err, codeOf(err))
+	}
+}
+
+func TestAnUnknownRunIsUnavailableUntilTheStartupHoldEnds(t *testing.T) {
+	g := newTestLink(t, time.Hour, 3, agentlink.WithStartupHold())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, _, err := g.attach(g.ctx(ctx, "no-such-run", nil), 1, false)
+	if codeOf(err) != codes.Unavailable {
+		t.Fatalf("during the hold: err = %v (code %s), want Unavailable", err, codeOf(err))
+	}
+	g.srv.EndStartupHold()
+	_, _, err = g.attach(g.ctx(ctx, "no-such-run", nil), 1, false)
+	if codeOf(err) != codes.NotFound {
+		t.Fatalf("after the hold: err = %v (code %s), want NotFound", err, codeOf(err))
 	}
 }
 
