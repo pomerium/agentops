@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -193,5 +194,76 @@ func TestTSBefore(t *testing.T) {
 		if got := tsBefore(in, time.Hour); got != want {
 			t.Errorf("tsBefore(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+type interruptedHistory struct {
+	harnessapipbconnect.HarnessAPIServiceClient
+	calls int
+}
+
+func (h *interruptedHistory) ListEvents(_ context.Context, r *pb.ListEventsRequest) (*pb.ListEventsResponse, error) {
+	h.calls++
+	if h.calls == 2 {
+		return nil, errors.New("connection lost")
+	}
+	all := []*pb.Event{
+		{Seq: 1, TurnId: "t1", Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{PartId: "t1.1", Text: "First finding. "}}},
+		{Seq: 2, TurnId: "t1", Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{PartId: "t1.2", Text: "Second finding.", Final: true}}},
+		{Seq: 3, TurnId: "t1", Payload: &pb.Event_TurnCompleted{TurnCompleted: &pb.TurnCompleted{}}},
+	}
+	out := &pb.ListEventsResponse{}
+	for _, ev := range all {
+		if ev.Seq > r.GetAfterSeq() {
+			out.Events = append(out.Events, ev)
+		}
+	}
+	if h.calls == 1 {
+		out.Events = out.Events[:1]
+	}
+	return out, nil
+}
+
+type historyPoster struct {
+	Poster
+	answer string
+}
+
+func (*historyPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	return "answer", nil
+}
+
+func (p *historyPoster) UpdateMessage(_ context.Context, channel, ts string, opts ...slack.MsgOption) (string, error) {
+	_, values, err := slack.UnsafeApplyMsgOptions("token", channel, "https://slack.example/", opts...)
+	if err != nil {
+		return "", err
+	}
+	if ts == "answer" {
+		p.answer = values.Get("text")
+	}
+	return ts, nil
+}
+
+func (*historyPoster) UpdateMessageDebounced(context.Context, string, string, ...slack.MsgOption) {}
+
+func (*historyPoster) AddReaction(context.Context, string, string, string) error { return nil }
+
+func (*historyPoster) RemoveReaction(context.Context, string, string, string) error { return nil }
+
+func TestARetriedCatchupKeepsTheAnswersEarlierText(t *testing.T) {
+	p := &historyPoster{}
+	a := New(&interruptedHistory{}, p, nil)
+	view := &pb.SessionView{Id: "s1", State: api.StateEnded, LastSeq: 3}
+	m := sessionMeta{ChannelID: "C1", ThreadTS: "1.0", UserID: "U1", Watching: true}
+	ctx := context.Background()
+	if a.renderMissed(ctx, view, m, false) {
+		t.Fatal("the second page should have failed")
+	}
+	m.LastSeq, m.AnswerTurn, m.AnswerTS = 1, "t1", "answer"
+	if !a.renderMissed(ctx, view, m, false) {
+		t.Fatal("the retry failed")
+	}
+	if !strings.Contains(p.answer, "First finding.") || !strings.Contains(p.answer, "Second finding.") {
+		t.Fatalf("the retry lost part of the answer: %q", p.answer)
 	}
 }
