@@ -24,10 +24,10 @@ type Map struct {
 	path string
 	log  *slog.Logger
 
-	mu      sync.RWMutex
-	byID    map[string]string
-	byDflt  string
-	loadErr error
+	mu     sync.RWMutex
+	byID   map[string]string
+	byDflt string
+	source string
 }
 
 func New(path string, log *slog.Logger) (*Map, error) {
@@ -68,17 +68,17 @@ func (m *Map) Watch(ctx context.Context, interval time.Duration) {
 }
 
 func (m *Map) reload() error {
-	raw, err := os.ReadFile(m.path)
-	if errors.Is(err, os.ErrNotExist) {
-		m.log.Warn("no channel map at the configured path; no Slack channel will start a session", "path", m.path)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read channel map %s: %w", m.path, err)
-	}
 	var doc file
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("parse channel map %s: %w", m.path, err)
+	raw, err := os.ReadFile(m.path)
+	missing := errors.Is(err, os.ErrNotExist)
+	switch {
+	case missing:
+	case err != nil:
+		return fmt.Errorf("read channel map %s: %w", m.path, err)
+	default:
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			return fmt.Errorf("parse channel map %s: %w", m.path, err)
+		}
 	}
 	next := make(map[string]string, len(doc.Channels))
 	for id, name := range doc.Channels {
@@ -87,11 +87,19 @@ func (m *Map) reload() error {
 		}
 		next[id] = name
 	}
+	source := "file"
+	if missing {
+		source = "none"
+	}
 	m.mu.Lock()
-	changed := doc.Default != m.byDflt || !maps.Equal(next, m.byID)
-	m.byID, m.byDflt = next, doc.Default
+	changed := doc.Default != m.byDflt || !maps.Equal(next, m.byID) || source != m.source
+	m.byID, m.byDflt, m.source = next, doc.Default, source
 	m.mu.Unlock()
-	if changed {
+	switch {
+	case !changed:
+	case missing:
+		m.log.Warn("no channel map at the configured path; no Slack channel will start a session", "path", m.path)
+	default:
 		m.log.Info("channel map loaded", "path", m.path, "channels", len(next), "default", doc.Default)
 	}
 	return nil
