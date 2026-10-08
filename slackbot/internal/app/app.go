@@ -73,6 +73,12 @@ type App struct {
 	mu      sync.Mutex
 	threads map[string]*thread
 	rooms   map[string]*room
+
+	permissionTokens sync.Map
+}
+
+type permissionChoice struct {
+	sessionID, requestID, optionID string
 }
 
 var _ gateway.App = (*App)(nil)
@@ -336,6 +342,10 @@ func (a *App) HandleInteraction(ctx context.Context, in gateway.Interaction) {
 
 func (a *App) handlePermissionClick(ctx context.Context, in gateway.Interaction) {
 	sessionID, requestID, optionID, ok := gateway.DecodePermissionValue(in.Value)
+	if c, found := a.permissionTokens.Load(in.Value); !ok && found {
+		choice := c.(permissionChoice)
+		sessionID, requestID, optionID, ok = choice.sessionID, choice.requestID, choice.optionID, true
+	}
 	if !ok {
 		a.log.WarnContext(ctx, "unreadable permission button value; ignoring the click",
 			"action", in.ActionID, "user", in.UserID)
