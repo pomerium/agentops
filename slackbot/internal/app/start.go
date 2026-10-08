@@ -136,8 +136,8 @@ func (a *App) adopt(ctx context.Context, view *pb.SessionView, atTS string) (*th
 	}
 	a.flipRoom(ctx, t, flipped, atTS)
 	after := view.GetLastSeq()
-	if m.Watching && m.LastSeq > 0 {
-		after = m.LastSeq
+	if m.Watching {
+		after = a.turnStartBefore(ctx, view.GetId(), m.LastSeq)
 	}
 	a.startConsumer(t, "", after)
 	return t, nil
