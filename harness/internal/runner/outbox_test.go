@@ -97,3 +97,29 @@ func TestAFullOutboxHoldsTheAgentUntilAnAck(t *testing.T) {
 		t.Fatal("an ack did not release the held append")
 	}
 }
+
+func TestAReleasedOutboxStopsHoldingTheAgent(t *testing.T) {
+	o := newOutbox(1)
+	o.append(thought("a"), false)
+	done := make(chan struct{})
+	go func() {
+		o.append(thought("b"), false)
+		o.append(thought("c"), false)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("append went past a full outbox")
+	case <-time.After(50 * time.Millisecond):
+	}
+	o.release()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("append still waits after release")
+	}
+	evs, err := o.after(context.Background(), 0)
+	if err != nil || len(evs) != 3 {
+		t.Fatalf("after(0) = %v, %v; want all three events", evs, err)
+	}
+}

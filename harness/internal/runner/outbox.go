@@ -23,6 +23,7 @@ type outbox struct {
 	max    int
 	last   uint64
 	acked  uint64
+	open   bool
 }
 
 func newOutbox(max int) *outbox {
@@ -34,7 +35,7 @@ func newOutbox(max int) *outbox {
 func (o *outbox) append(ev *agentlinkpb.AgentEvent, urgent bool) uint64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	for !urgent && o.size >= o.max {
+	for !urgent && !o.open && o.size >= o.max {
 		o.cond.Wait()
 	}
 	o.last++
@@ -43,6 +44,13 @@ func (o *outbox) append(ev *agentlinkpb.AgentEvent, urgent bool) uint64 {
 	o.size += proto.Size(ev)
 	o.cond.Broadcast()
 	return ev.Seq
+}
+
+func (o *outbox) release() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.open = true
+	o.cond.Broadcast()
 }
 
 func (o *outbox) ack(n uint64) {
