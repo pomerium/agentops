@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -31,6 +32,8 @@ type sessionMeta struct {
 
 	AnswerTurn string `json:"answer_turn,omitempty"`
 	AnswerTS   string `json:"answer_ts,omitempty"`
+
+	PermissionPrompts map[string]string `json:"permission_prompts,omitempty"`
 
 	statusText string
 }
@@ -123,6 +126,19 @@ func (t *thread) applyMeta(edit func(m *sessionMeta)) sessionMeta {
 	edit(&t.metaState)
 	t.metaState.Version = metaVersion
 	return t.metaState
+}
+
+func withPermissionPrompt(prompts map[string]string, requestID, ts string) map[string]string {
+	out := maps.Clone(prompts)
+	if ts == "" {
+		delete(out, requestID)
+		return out
+	}
+	if out == nil {
+		out = map[string]string{}
+	}
+	out[requestID] = ts
+	return out
 }
 
 const maxThreadRead = 3000
