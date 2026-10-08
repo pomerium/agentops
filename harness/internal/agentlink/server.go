@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -16,7 +17,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
-	"github.com/pomerium/agentops/harness/internal/agentio"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/telemetry"
 )
@@ -27,7 +27,6 @@ const (
 )
 
 const (
-	reasonResumeInvalid   = "agentio_resume_invalid"
 	reasonStreamMismatch  = "agentio_stream_mismatch"
 	reasonProtocol        = "protocol_violation"
 	reasonHeartbeatMissed = "heartbeat_missed"
@@ -40,6 +39,7 @@ type options struct {
 	heartbeatMissLimit uint32
 	logger             *slog.Logger
 	now                func() time.Time
+	startupHold        bool
 }
 
 func WithHeartbeatInterval(d time.Duration) Option {
@@ -52,6 +52,8 @@ func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l 
 
 func WithNow(now func() time.Time) Option { return func(o *options) { o.now = now } }
 
+func WithStartupHold() Option { return func(o *options) { o.startupHold = true } }
+
 type Server struct {
 	agentlinkpb.UnimplementedAgentLinkServiceServer
 
@@ -60,6 +62,8 @@ type Server struct {
 	log      *slog.Logger
 	tel      *telemetry.Component
 	now      func() time.Time
+
+	holding atomic.Bool
 
 	mu   sync.Mutex
 	runs map[string]*attachedRun
@@ -87,12 +91,16 @@ func New(verifier *Verifier, opts ...Option) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{
+	s := &Server{
 		verifier: verifier, cfg: o, log: log, now: o.now,
 		tel:  telemetry.New(log, "harness", slog.LevelDebug),
 		runs: map[string]*attachedRun{},
-	}, nil
+	}
+	s.holding.Store(o.startupHold)
+	return s, nil
 }
+
+func (s *Server) EndStartupHold() { s.holding.Store(false) }
 
 func (s *Server) Register(gs *grpc.Server) {
 	agentlinkpb.RegisterAgentLinkServiceServer(gs, s)
@@ -109,16 +117,23 @@ func (s *Server) Expect(runID string, seal agenticrun.Executor, cfg *agentlinkpb
 	if err := seal.Validate(); err != nil {
 		return nil, fmt.Errorf("harness expect: %w", err)
 	}
+	callbacks := newExpectCallbacks(opts)
+	streamID := callbacks.StreamID
+	if len(streamID) == 0 {
+		streamID = NewStreamID()
+	}
 	run := &attachedRun{
-		runID: runID, seal: seal, config: cfg, opts: newExpectCallbacks(opts), log: s.log,
+		runID: runID, seal: seal, config: cfg, opts: callbacks, log: s.log,
 		hbInterval: s.cfg.heartbeatInterval, hbMissLimit: s.cfg.heartbeatMissLimit,
-		io:       agentio.New(),
-		streamID: agentio.NewStreamID(),
-		ioTurn:   make(chan struct{}, 1),
-		attached: make(chan struct{}),
-		ready:    make(chan struct{}),
-		ioReady:  make(chan struct{}),
-		done:     make(chan struct{}),
+		streamID:  streamID,
+		inbox:     make(chan *agentlinkpb.AgentIOFrame, inboxSize),
+		ioTurn:    make(chan struct{}, 1),
+		outReady:  make(chan struct{}, 1),
+		attached:  make(chan struct{}),
+		ready:     make(chan struct{}),
+		done:      make(chan struct{}),
+		delivered: callbacks.ResumeAfter,
+		acked:     callbacks.ResumeAfter,
 	}
 	s.mu.Lock()
 	if _, dup := s.runs[runID]; dup {
@@ -170,6 +185,9 @@ func (s *Server) lookup(a *Assertion) (*attachedRun, error) {
 	run := s.runs[a.RunID]
 	s.mu.Unlock()
 	if run == nil {
+		if s.holding.Load() {
+			return nil, status.Errorf(codes.Unavailable, "the harness is starting; run %s is not expected yet", a.RunID)
+		}
 		return nil, status.Errorf(codes.NotFound, "no expectation for run %s", a.RunID)
 	}
 	if a.Executor != run.seal {
@@ -465,13 +483,6 @@ func (s *Server) handleSidecarFrame(ctx context.Context, run *attachedRun, f *ag
 			run.opts.OnError(reason, err)
 		}
 		return err
-	case f.GetExited() != nil:
-		code := f.GetExited().GetExitCode()
-		s.log.Info("harness: agent process exited", "run_id", run.runID, "exit_code", code)
-		if run.opts.OnAgentExit != nil {
-			run.opts.OnAgentExit(code)
-		}
-		return nil
 	case f.GetHello() != nil:
 		return status.Error(codes.FailedPrecondition, "a second Hello on one Attach stream")
 	default:

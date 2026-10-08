@@ -117,11 +117,15 @@ func Serve(t *testing.T, srv *agentlink.Server, assertion func() string) string 
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	t.Cleanup(ServeOn(lis, srv, assertion))
+	return lis.Addr().String()
+}
+
+func ServeOn(lis net.Listener, srv *agentlink.Server, assertion func() string) (stop func()) {
 	gs := grpc.NewServer(grpc.StreamInterceptor(stampAssertion(assertion)))
 	srv.Register(gs)
 	go func() { _ = gs.Serve(lis) }()
-	t.Cleanup(gs.Stop)
-	return lis.Addr().String()
+	return gs.Stop
 }
 
 func stampAssertion(assertion func() string) grpc.StreamServerInterceptor {

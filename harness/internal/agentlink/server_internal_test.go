@@ -11,13 +11,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/pomerium/agentops/harness/internal/agentio"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 )
 
 func TestClaimRejectsAForgottenRun(t *testing.T) {
 	run := &attachedRun{
-		runID: "forgotten", hbInterval: time.Hour, io: agentio.New(),
+		runID: "forgotten", hbInterval: time.Hour,
 		done: make(chan struct{}),
 	}
 	run.finish(errForgotten)
@@ -36,7 +35,7 @@ func TestReconnectAttachIsNotifiedAfterTheOldLoss(t *testing.T) {
 	entered, resume, released := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	events := make(chan string, 2)
 	run := &attachedRun{
-		runID: "reconnect", hbInterval: time.Hour, io: agentio.New(),
+		runID: "reconnect", hbInterval: time.Hour,
 		done: make(chan struct{}),
 		opts: ExpectCallbacks{
 			OnLost: func(error) {
@@ -100,7 +99,7 @@ func TestBlockedHelloAckDoesNotHoldAForgottenRun(t *testing.T) {
 	defer cancel()
 	stream := &blockedAttachSend{ctx: ctx, entered: make(chan struct{})}
 	run := &attachedRun{
-		runID: "blocked-send", hbInterval: time.Hour, hbMissLimit: 3, io: agentio.New(),
+		runID: "blocked-send", hbInterval: time.Hour, hbMissLimit: 3,
 		attached: make(chan struct{}), done: make(chan struct{}),
 	}
 	live := newAttachStream(time.Now())
@@ -128,7 +127,7 @@ func TestBlockedHelloAckDoesNotHoldAForgottenRun(t *testing.T) {
 func TestClaimRejectsAnUnsupportedProtocolVersion(t *testing.T) {
 	for _, version := range []uint32{0, ProtocolVersion + 1} {
 		run := &attachedRun{
-			runID: "wrong-version", hbInterval: time.Hour, io: agentio.New(),
+			runID: "wrong-version", hbInterval: time.Hour,
 			done: make(chan struct{}),
 		}
 		s := &Server{now: time.Now}
