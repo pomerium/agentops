@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"github.com/cenkalti/backoff/v7"
 	"github.com/slack-go/slack"
 
 	"github.com/pomerium/agentops/harness/api"
@@ -54,9 +56,9 @@ func (a *App) startConsumer(t *thread, ackTS string, afterSeq int64) {
 
 func (a *App) consume(ctx context.Context, t *thread, ackTS string, afterSeq int64) {
 	ctx = telemetry.With(ctx, "session_id", t.sessionID, "channel", t.channel, "thread_ts", t.threadTS)
-	sub, err := client.Subscribe(ctx, a.api, &pb.SubscribeRequest{
-		Ref: a.ref(t.sessionID), AfterSeq: afterSeq,
-	}, client.WithLogger(a.log))
+	defer a.unregisterThread(t)
+	defer a.drainBusy(context.WithoutCancel(ctx), t)
+	sub, err := a.subscribe(ctx, t, afterSeq)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
@@ -70,8 +72,6 @@ func (a *App) consume(ctx context.Context, t *thread, ackTS string, afterSeq int
 	if ackTS == "" {
 		ackTS = t.threadTS
 	}
-	defer a.unregisterThread(t)
-	defer a.drainBusy(context.WithoutCancel(ctx), t)
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,6 +86,31 @@ func (a *App) consume(ctx context.Context, t *thread, ackTS string, afterSeq int
 			a.renderEvent(ctx, t, ackTS, ev)
 		}
 	}
+}
+
+func (a *App) subscribe(ctx context.Context, t *thread, afterSeq int64) (*client.Subscription, error) {
+	policy := backoff.NewExponentialBackOff()
+	policy.InitialInterval = 500 * time.Millisecond
+	policy.MaxInterval = 30 * time.Second
+	return backoff.Retry(ctx, func() (*client.Subscription, error) {
+		sub, err := client.Subscribe(ctx, a.api, &pb.SubscribeRequest{
+			Ref: a.ref(t.sessionID), AfterSeq: afterSeq,
+		}, client.WithLogger(a.log))
+		switch {
+		case err == nil:
+			return sub, nil
+		case errors.Is(err, api.ErrNotFound), errors.Is(err, api.ErrForbidden), errors.Is(err, api.ErrInvalidArgument):
+			return nil, backoff.Permanent(err)
+		default:
+			return nil, err
+		}
+	},
+		backoff.WithBackOff(policy),
+		backoff.WithMaxElapsedTime(0),
+		backoff.WithNotify(func(err error, next time.Duration) {
+			a.log.WarnContext(ctx, "could not open this session's event stream; retrying",
+				"session", t.sessionID, "retry_in", next, "err", err)
+		}))
 }
 
 func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.Event) {
