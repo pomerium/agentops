@@ -12,6 +12,7 @@ import (
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 	"github.com/pomerium/agentops/harness/internal/telemetry"
@@ -24,7 +25,8 @@ type launchOpts struct {
 
 	agentPrompt string
 
-	turnID string
+	turnID  string
+	turnSeq uint64
 }
 
 func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts launchOpts) {
@@ -57,13 +59,13 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		return
 	}
 	if opts.agentPrompt != "" && opts.turnID == "" {
-		turnID, err := s.nextTurnID(ctx, sess.ID)
+		turnID, n, err := s.nextTurn(ctx, sess.ID)
 		if err != nil {
 			s.log.ErrorContext(ctx, "launch: could not allocate the opening turn", "err", err)
 			s.failLaunch(ctx, sess, opts, o, "", api.EndLaunchFailed, "the opening turn could not be allocated")
 			return
 		}
-		opts.turnID = turnID
+		opts.turnID, opts.turnSeq = turnID, uint64(n)
 	}
 	from := sess.Status
 	tmpl, promptAppendix, err := storedTemplate(sess)
@@ -185,9 +187,8 @@ func (s *Service) activateAndRun(
 	o *owner,
 ) *binding {
 	outcome := o.outcome
-	sink := newLogSink(s, sess.ID, s.cfg.permissionTimeout)
 
-	liveSess, err := s.launcher.Activate(ctx, sink, prepared, att)
+	liveSess, err := s.launcher.Activate(ctx, prepared, att)
 	if err != nil {
 		if errors.Is(err, sandbox.ErrResumeUnavailable) && opts.revive && !s.stopped(o) {
 			s.log.InfoContext(ctx, "this conversation could not be continued", "err", err)
@@ -211,35 +212,38 @@ func (s *Service) activateAndRun(
 		return nil
 	}
 
-	b := newBinding(sess.ID, prepared.ClaimName, liveSess, sink)
+	b := newBinding(sess.ID, prepared.ClaimName, liveSess, newLogSink(s, sess.ID, s.cfg.permissionTimeout))
+	b.runID = runID
 	defer close(b.ready)
 	if !prepared.LeaseUntil.IsZero() {
 		b.leaseUntil.Store(prepared.LeaseUntil.UnixNano())
 	}
-	var ticket uint64
-	opening := false
-	if opts.agentPrompt != "" {
-		ticket, opening = b.enter()
+	opening := opts.agentPrompt != ""
+	if opening {
+		b.enter(opts.turnID)
+		b.gated = true
 	}
 
 	if !s.register(o, b) {
-		if opening {
-			b.forfeit(ticket)
-		}
+		close(b.consumed)
 		_ = liveSess.Close()
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, "")
 		return nil
 	}
+	go s.consume(b)
 	ctx = context.WithoutCancel(ctx)
 	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching); err != nil {
+			return err
+		}
+		if err := s.store.UpdateSessionLink(ctx, sess.ID, encodeExecutor(prepared.Executor), string(liveSess.StreamID()), int64(liveSess.ReadySeq())); err != nil {
 			return err
 		}
 		return s.store.UpdateSessionACP(ctx, sess.ID, liveSess.ID(), api.StateRunning)
 	}) {
 		if opening {
 			s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: unrecorded}}})
-			b.forfeit(ticket)
+			b.leave(opts.turnID)
 		}
 		spec := stopSpec{end: api.EndLaunchFailed, detail: unrecorded}
 		if opts.revive {
@@ -248,6 +252,7 @@ func (s *Service) activateAndRun(
 		go s.stopOwned(ctx, sess.ID, o, spec)
 		return b
 	}
+	liveSess.Ack(liveSess.ReadySeq())
 
 	s.recordApproverFromRun(ctx, sess.ID, runID)
 
@@ -259,7 +264,8 @@ func (s *Service) activateAndRun(
 	}
 
 	if opening {
-		go s.runTurn(context.WithoutCancel(ctx), b, ticket, opts.turnID, opts.agentPrompt)
+		s.ungate(ctx, b, &agentlinkpb.Prompt{TurnId: opts.turnID, TurnSeq: opts.turnSeq, Text: opts.agentPrompt})
+		s.extendLease(ctx, b)
 	}
 	return b
 }
@@ -450,46 +456,7 @@ func (s *Service) reportAttachDelayed(ctx context.Context, sessionID, runID stri
 	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_LaunchStalled{LaunchStalled: &pb.LaunchStalled{Waited: durationpb.New(waited)}}})
 }
 
-func (s *Service) runTurn(ctx context.Context, b *binding, ticket uint64, turnID, text string) {
-	defer b.leave()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func(finished <-chan struct{}) {
-		select {
-		case <-b.done:
-			cancel()
-		case <-finished:
-		}
-	}(ctx.Done())
-
-	s.extendLease(ctx, b)
-
-	ctx = telemetry.With(ctx, "session_id", b.sessionID, "turn_id", turnID)
-	ctx, op := s.tel.Start(ctx, "runTurn", "chars", len(text))
-	defer op.Complete()
-
-	b.awaitTurn(ticket)
-	if ctx.Err() != nil {
-		s.emit(ctx, b.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: "the session stopped before this turn ran"}}})
-		return
-	}
-	b.sink.beginTurn(turnID)
-	defer b.sink.endTurn(ctx)
-
-	stop, err := b.session.Prompt(ctx, text)
-	if err != nil {
-		s.log.ErrorContext(ctx, "acp prompt failed", "session", b.sessionID, "err", err)
-
-		b.sink.endTurn(ctx)
-		s.emit(ctx, b.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: agentErrorReason(err)}}})
-		return
-	}
-	b.sink.endTurn(ctx)
-	s.emit(ctx, b.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_TurnCompleted{TurnCompleted: &pb.TurnCompleted{StopReason: string(stop)}}})
-}
-
-func agentErrorReason(err error) string {
-	msg := err.Error()
+func agentErrorReason(msg string) string {
 	if i := strings.IndexByte(msg, '\n'); i >= 0 {
 		msg = msg[:i]
 	}

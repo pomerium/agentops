@@ -58,7 +58,7 @@ func TestACanceledLaunchStillRecordsItsOutcome(t *testing.T) {
 	}
 }
 
-type refusedLaunchRead struct{ sessionstore.Sessions }
+type refusedLaunchRead struct{ Store }
 
 func (refusedLaunchRead) GetSession(context.Context, string) (sessionstore.Session, error) {
 	return sessionstore.Session{}, errors.New("the session could not be read")
@@ -72,7 +72,7 @@ func TestAReviveThatCannotReadItsSessionFailsItsTurn(t *testing.T) {
 	if !svc.claim("s1", o) {
 		t.Fatal("claim the revive")
 	}
-	svc.store = refusedLaunchRead{Sessions: st}
+	svc.store = refusedLaunchRead{Store: st}
 
 	svc.launch(launchCtx, o, "s1", launchOpts{revive: true, turnID: "t1", agentPrompt: "carry on"})
 

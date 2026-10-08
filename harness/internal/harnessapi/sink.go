@@ -3,17 +3,12 @@ package harnessapi
 import (
 	"context"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"google.golang.org/protobuf/types/known/structpb"
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
-	"github.com/pomerium/agentops/harness/internal/sandbox"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 )
 
 type logSink struct {
@@ -21,256 +16,92 @@ type logSink struct {
 	sessionID   string
 	permTimeout time.Duration
 
-	mu         sync.Mutex
-	turnID     string
-	part       int
-	buf        strings.Builder
-	thoughtBuf strings.Builder
-	toolTitle  map[string]string
-	waiters    map[string]permissionWaiter
+	mu      sync.Mutex
+	waiters map[string]*permissionWaiter
 }
 
 type permissionWaiter struct {
-	answer  chan permissionAnswer
+	turnID  string
 	options []string
+	timer   *time.Timer
 }
-
-type permissionAnswer struct {
-	decision sandbox.PermissionDecision
-	resolved *pb.PermissionResolved
-}
-
-var _ sandbox.EventSink = (*logSink)(nil)
 
 func newLogSink(svc *Service, sessionID string, permTimeout time.Duration) *logSink {
 	return &logSink{
 		svc:         svc,
 		sessionID:   sessionID,
 		permTimeout: permTimeout,
-		toolTitle:   map[string]string{},
-		waiters:     map[string]permissionWaiter{},
+		waiters:     map[string]*permissionWaiter{},
 	}
 }
 
-func (s *logSink) beginTurn(turnID string) {
+func (s *logSink) await(req *agentlinkpb.PermissionRequest, expire func(requestID string)) time.Time {
+	deadline := time.Now().Add(s.permTimeout)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.turnID = turnID
-	s.part = 0
-	s.buf.Reset()
-	s.thoughtBuf.Reset()
+	if _, ok := s.waiters[req.GetRequestId()]; ok {
+		return deadline
+	}
+	offered := make([]string, 0, len(req.GetOptions()))
+	for _, o := range req.GetOptions() {
+		offered = append(offered, o.GetId())
+	}
+	id := req.GetRequestId()
+	s.waiters[id] = &permissionWaiter{
+		turnID:  req.GetTurnId(),
+		options: offered,
+		timer:   time.AfterFunc(s.permTimeout, func() { expire(id) }),
+	}
+	return deadline
 }
 
-func (s *logSink) endTurn(ctx context.Context) {
-	s.flushThought(ctx)
-	s.mu.Lock()
-	seg := s.buf.String()
-	s.buf.Reset()
-	turnID, partID := s.turnID, s.nextPartLocked()
-	s.mu.Unlock()
-	if seg == "" {
-		return
-	}
-	s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{
-		PartId: partID, Text: seg, Final: true,
-	}}})
-}
-
-func (s *logSink) nextPartLocked() string {
-	s.part++
-	turn := s.turnID
-	if turn == "" {
-		turn = "t0"
-	}
-	return turn + "." + strconv.Itoa(s.part)
-}
-
-func (s *logSink) AgentMessage(ctx context.Context, text string) {
-	if text == "" {
-		return
-	}
-	s.flushThought(ctx)
-	s.mu.Lock()
-	s.buf.WriteString(text)
-	s.mu.Unlock()
-}
-
-func (s *logSink) AgentThought(_ context.Context, text string) {
-	if text == "" {
-		return
-	}
-	s.mu.Lock()
-	s.thoughtBuf.WriteString(text)
-	s.mu.Unlock()
-}
-
-func (s *logSink) flushThought(ctx context.Context) {
-	s.mu.Lock()
-	if s.thoughtBuf.Len() == 0 {
-		s.mu.Unlock()
-		return
-	}
-	text := s.thoughtBuf.String()
-	s.thoughtBuf.Reset()
-	turnID := s.turnID
-	s.mu.Unlock()
-	s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_AgentThought{AgentThought: &pb.AgentThought{Text: text}}})
-}
-
-func (s *logSink) ToolCall(ctx context.Context, ev sandbox.ToolCallEvent) {
-	s.flushThought(ctx)
-
-	s.mu.Lock()
-	title := ev.Title
-	if title == "" {
-		title = s.toolTitle[ev.ID]
-	}
-	if title != "" {
-		s.toolTitle[ev.ID] = title
-	}
-	seg := s.buf.String()
-	s.buf.Reset()
-	turnID := s.turnID
-	var partID string
-	if seg != "" {
-		partID = s.nextPartLocked()
-	}
-	s.mu.Unlock()
-
-	if seg != "" {
-		s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_AgentMessage{AgentMessage: &pb.AgentMessage{
-			PartId: partID, Text: seg, Final: false,
-		}}})
-	}
-	s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_ToolCall{ToolCall: &pb.ToolCall{
-		Id:        ev.ID,
-		Title:     title,
-		Kind:      ev.Kind,
-		Status:    api.NormalizeToolCallStatus(ev.Status),
-		ToolInput: toolInput(ev.RawInput),
-		Update:    ev.Update,
-	}}})
-}
-
-func toolInput(v any) *structpb.Value {
-	if v == nil {
-		return nil
-	}
-	out, err := structpb.NewValue(v)
-	if err != nil {
-		return nil
-	}
-	return out
-}
-
-func (s *logSink) Usage(ctx context.Context, ev sandbox.UsageEvent) {
-	s.mu.Lock()
-	turnID := s.turnID
-	s.mu.Unlock()
-	s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_Usage{Usage: &pb.Usage{
-		InputTokens:         ev.InputTokens,
-		OutputTokens:        ev.OutputTokens,
-		CachedInputTokens:   ev.CachedReadTokens,
-		CacheCreationTokens: ev.CachedWriteTokens,
-		ThoughtTokens:       ev.ThoughtTokens,
-		TotalTokens:         ev.TotalTokens,
-		CostUsd:             ev.CostUSD,
-		ContextWindow:       ev.ContextWindow,
-		ContextUsed:         ev.ContextUsed,
-	}}})
-}
-
-func (s *logSink) Permission(ctx context.Context, req sandbox.PermissionRequest) (sandbox.PermissionDecision, error) {
-	requestID := req.ToolCallID
-	ch := make(chan permissionAnswer, 1)
-	offered := make([]string, 0, len(req.Options))
-	for _, o := range req.Options {
-		offered = append(offered, o.ID)
-	}
-
-	s.mu.Lock()
-	s.waiters[requestID] = permissionWaiter{answer: ch, options: offered}
-	turnID := s.turnID
-	title := req.Title
-	if title == "" {
-		title = s.toolTitle[req.ToolCallID]
-	}
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.waiters, requestID)
-		s.mu.Unlock()
-	}()
-
-	options := make([]*pb.PermissionOption, 0, len(req.Options))
-	for _, o := range req.Options {
-		options = append(options, &pb.PermissionOption{Id: o.ID, Name: o.Name, Kind: o.Kind})
-	}
-	deadline := time.Now().Add(s.permTimeout)
-	s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_PermissionRequest{PermissionRequest: &pb.PermissionRequest{
-		RequestId:  requestID,
-		Summary:    title,
-		Options:    options,
-		Deadline:   timestamppb.New(deadline),
-		ToolCallId: req.ToolCallID,
-	}}})
-	resolved := func(r *pb.PermissionResolved) {
-		r.RequestId = requestID
-		s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: r}})
-	}
-
-	timer := time.NewTimer(s.permTimeout)
-	defer timer.Stop()
-	select {
-	case a := <-ch:
-		resolved(a.resolved)
-		return a.decision, nil
-	case <-timer.C:
-		resolved(unanswered(api.ResolutionExpired))
-		return sandbox.PermissionDecision{Cancelled: true}, nil
-	case <-ctx.Done():
-		resolved(unanswered(api.ResolutionSuperseded))
-		return sandbox.PermissionDecision{Cancelled: true}, ctx.Err()
-	}
-}
-
-func unanswered(why api.Resolution) *pb.PermissionResolved {
-	return &pb.PermissionResolved{Resolution: &pb.PermissionResolved_Unanswered{Unanswered: why}}
-}
-
-func (s *logSink) resolvePermission(requestID string, d sandbox.PermissionDecision) error {
+func (s *logSink) validate(requestID, optionID string) error {
 	s.mu.Lock()
 	w, ok := s.waiters[requestID]
 	s.mu.Unlock()
 	if !ok {
 		return api.Errorf(api.ErrUnknownRequest, "permission request %q is unknown or already resolved", requestID)
 	}
-	if !slices.Contains(w.options, d.OptionID) {
-		return api.Errorf(api.ErrInvalidArgument, "option %q was not offered by permission request %q", d.OptionID, requestID)
-	}
-	select {
-	case w.answer <- permissionAnswer{decision: d, resolved: &pb.PermissionResolved{
-		Resolution: &pb.PermissionResolved_OptionId{OptionId: d.OptionID},
-	}}:
-	default:
+	if !slices.Contains(w.options, optionID) {
+		return api.Errorf(api.ErrInvalidArgument, "option %q was not offered by permission request %q", optionID, requestID)
 	}
 	return nil
 }
 
-func (s *logSink) supersedeAll() {
+func (s *logSink) take(requestID string) (*permissionWaiter, bool) {
 	s.mu.Lock()
-	waiters := make([]chan permissionAnswer, 0, len(s.waiters))
-	for _, w := range s.waiters {
-		waiters = append(waiters, w.answer)
+	defer s.mu.Unlock()
+	w, ok := s.waiters[requestID]
+	if !ok {
+		return nil, false
 	}
-	s.mu.Unlock()
-	for _, ch := range waiters {
-		select {
-		case ch <- permissionAnswer{
-			decision: sandbox.PermissionDecision{Cancelled: true},
-			resolved: unanswered(api.ResolutionSuperseded),
-		}:
-		default:
+	delete(s.waiters, requestID)
+	w.timer.Stop()
+	return w, true
+}
+
+func (s *logSink) pending() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.waiters))
+	for id := range s.waiters {
+		out = append(out, id)
+	}
+	return out
+}
+
+func (s *logSink) supersedeAll(ctx context.Context) {
+	for _, id := range s.pending() {
+		w, ok := s.take(id)
+		if !ok {
+			continue
 		}
+		s.svc.emit(ctx, s.sessionID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
+			RequestId: id, Resolution: &pb.PermissionResolved_Unanswered{Unanswered: api.ResolutionSuperseded},
+		}}})
 	}
+}
+
+func unanswered(why api.Resolution) *pb.PermissionResolved {
+	return &pb.PermissionResolved{Resolution: &pb.PermissionResolved_Unanswered{Unanswered: why}}
 }

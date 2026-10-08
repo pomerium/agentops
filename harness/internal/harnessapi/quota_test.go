@@ -14,7 +14,6 @@ import (
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
-	"github.com/pomerium/agentops/harness/internal/sandbox"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
@@ -163,11 +162,11 @@ func TestRespondPermissionIsIdempotentPastTheSession(t *testing.T) {
 	defer sub.Close()
 	rec := record(t, sub)
 
-	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, _ string) (acp.StopReason, error) {
-		decision, err := sink.Permission(ctx, sandbox.PermissionRequest{
+	h.launcher.session.setScript(func(ctx context.Context, sink *fakeAgent, _ string) (acp.StopReason, error) {
+		decision, err := sink.Permission(ctx, permissionRequest{
 			ToolCallID: "tc-1",
 			Title:      "Write to main.go",
-			Options:    []sandbox.PermissionOption{{ID: "allow", Name: "Allow", Kind: "allow_once"}},
+			Options:    []permissionOption{{ID: "allow", Name: "Allow", Kind: "allow_once"}},
 		})
 		if err != nil {
 			return "", err
@@ -257,10 +256,10 @@ func TestUnofferedPermissionChoiceIsRefused(t *testing.T) {
 	defer sub.Close()
 	rec := record(t, sub)
 
-	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, _ string) (acp.StopReason, error) {
-		decision, err := sink.Permission(ctx, sandbox.PermissionRequest{
+	h.launcher.session.setScript(func(ctx context.Context, sink *fakeAgent, _ string) (acp.StopReason, error) {
+		decision, err := sink.Permission(ctx, permissionRequest{
 			ToolCallID: "tc-1",
-			Options:    []sandbox.PermissionOption{{ID: "allow", Name: "Allow", Kind: "allow_once"}},
+			Options:    []permissionOption{{ID: "allow", Name: "Allow", Kind: "allow_once"}},
 		})
 		if err != nil {
 			return "", err
@@ -293,14 +292,14 @@ func TestUnofferedPermissionChoiceIsRefused(t *testing.T) {
 }
 
 type listBarrier struct {
-	sessionstore.Sessions
+	harnessapi.Store
 	mu     sync.Mutex
 	calls  int
 	second chan struct{}
 }
 
 func (b *listBarrier) ListSessionsByClient(ctx context.Context, clientID string, liveOnly bool, since time.Time) ([]sessionstore.Session, error) {
-	rows, err := b.Sessions.ListSessionsByClient(ctx, clientID, liveOnly, since)
+	rows, err := b.Store.ListSessionsByClient(ctx, clientID, liveOnly, since)
 	b.mu.Lock()
 	b.calls++
 	call := b.calls
@@ -323,7 +322,7 @@ func TestConcurrentCreatesRespectTheLiveCap(t *testing.T) {
 	h.launcher.gate = make(chan struct{})
 	defer h.launcher.openGate()
 	bind(h, stubClient, []string{"deploy"}, &v1alpha1.ClientQuotas{MaxLiveSessions: 1})
-	barrier := &listBarrier{Sessions: h.store, second: make(chan struct{})}
+	barrier := &listBarrier{Store: h.store, second: make(chan struct{})}
 	svc := harnessapi.New(barrier, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
 		harnessapi.WithLogger(testLogger(t)))
 

@@ -13,7 +13,7 @@ import (
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
-func runningService(t *testing.T, l Launcher) (*Service, sessionstore.Sessions) {
+func runningService(t *testing.T, l Launcher) (*Service, Store) {
 	t.Helper()
 	st := openStore(t)
 	if err := st.CreateSession(context.Background(), sessionstore.Session{
@@ -140,8 +140,8 @@ func TestAStoppedBindingRunsNoMoreTurns(t *testing.T) {
 	b := svc.lookup("s1")
 	svc.stopSession(context.Background(), "s1", stopSpec{end: api.EndEnded})
 
-	if _, ok := b.enter(); ok {
-		b.leave()
+	if b.enter("t9") {
+		b.leave("t9")
 		t.Error("a stopped binding accepted another turn")
 	}
 }

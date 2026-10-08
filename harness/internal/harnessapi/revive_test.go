@@ -200,7 +200,7 @@ func suspendReason(rec *recorder) api.Reason {
 }
 
 type readBarrier struct {
-	sessionstore.Sessions
+	harnessapi.Store
 	mu      sync.Mutex
 	waiting int
 	arrived chan struct{}
@@ -208,7 +208,7 @@ type readBarrier struct {
 }
 
 func (b *readBarrier) GetSession(ctx context.Context, id string) (sessionstore.Session, error) {
-	sess, err := b.Sessions.GetSession(ctx, id)
+	sess, err := b.Store.GetSession(ctx, id)
 	b.mu.Lock()
 	hold := b.waiting > 0
 	if hold {
@@ -232,7 +232,7 @@ func TestConcurrentRevivesAcceptOneTurn(t *testing.T) {
 	h.launcher.gate = make(chan struct{})
 	defer h.launcher.openGate()
 	barrier := &readBarrier{
-		Sessions: h.store, waiting: 2,
+		Store: h.store, waiting: 2,
 		arrived: make(chan struct{}, 2), release: make(chan struct{}),
 	}
 	svc := harnessapi.New(barrier, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
@@ -318,7 +318,7 @@ func TestAnUnrecordedReviveFailsItsAcceptedTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
-	h.svc = harnessapi.New(failingACPStore{Sessions: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+	h.svc = harnessapi.New(failingACPStore{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
 		harnessapi.WithLogger(testLogger(t)))
 	sub, err := h.subscribe(ctx, &pb.SubscribeRequest{Ref: ref, AfterSeq: before.EventSeq})
 	if err != nil {
@@ -347,7 +347,7 @@ func TestAnUnrecordedReviveFailsItsAcceptedTurn(t *testing.T) {
 }
 
 type heldTurnSeq struct {
-	sessionstore.Sessions
+	harnessapi.Store
 	entered chan struct{}
 	release chan struct{}
 }
@@ -365,7 +365,7 @@ func TestAnEndAcceptedDuringAnAbandonedReviveStillEnds(t *testing.T) {
 	h.svc.SuspendForTest(ctx, ref.GetSessionId())
 	waitForStoredState(t, h, ref, api.StateSuspended)
 
-	held := heldTurnSeq{Sessions: h.store, entered: make(chan struct{}), release: make(chan struct{})}
+	held := heldTurnSeq{Store: h.store, entered: make(chan struct{}), release: make(chan struct{})}
 	h.svc = harnessapi.New(held, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
 		harnessapi.WithLogger(testLogger(t)))
 
