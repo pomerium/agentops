@@ -238,6 +238,31 @@ func TestAJoinCarriesTheEndOfALongAnswer(t *testing.T) {
 	}
 }
 
+func TestALongThreadStillCarriesAPeerAnswerFinishedAfterTheCursor(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	twoParticipants(t, f)
+
+	f.api.emit("sess-2", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "checking staging"})
+	f.poster.waitForPost(t, "checking staging")
+	before := len(f.api.promptRequests())
+	f.app.HandleMention(ctx, mentionIn(f, "U1", "what did staging say?"))
+	waitFor(t, "U1's turn", func() bool { return len(f.api.promptRequests()) > before })
+
+	f.api.emit("sess-2", "t1", &pb.AgentMessage{PartId: "t1.2", Text: "staging failed; do not promote", Final: true})
+	f.poster.waitForUpdate(t, "staging failed; do not promote")
+	f.poster.mu.Lock()
+	f.poster.tooLong = true
+	f.poster.mu.Unlock()
+
+	before = len(f.api.promptRequests())
+	f.app.HandleMention(ctx, mentionIn(f, "U1", "and now?"))
+	waitFor(t, "U1's next turn", func() bool { return len(f.api.promptRequests()) > before })
+	if got := f.api.promptRequests()[before].Content; !strings.Contains(got, "staging failed; do not promote") {
+		t.Fatalf("in a thread too long to read whole, the finished peer answer was lost:\n%s", got)
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

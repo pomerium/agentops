@@ -182,3 +182,16 @@ func TestAPermissionPromptIsKeptUntilItCloses(t *testing.T) {
 		t.Fatalf("a prompt Slack failed to close was forgotten: %d close attempts", p.updates)
 	}
 }
+
+func TestTSBefore(t *testing.T) {
+	for in, want := range map[string]string{
+		"1791496605.543209": "1791493005.543209",
+		"1791496605":        "1791493005.000000",
+		"168.2001":          "0.000000",
+		"not a ts":          "not a ts",
+	} {
+		if got := tsBefore(in, time.Hour); got != want {
+			t.Errorf("tsBefore(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
