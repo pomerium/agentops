@@ -10,6 +10,7 @@
 IMAGE         ?= agentops:dev
 HARNESS_IMAGE ?= agentops-agent:dev
 SIDECAR_IMAGE ?= agentops-sidecar:dev
+SLACKBOT_IMAGE ?= agentops-slackbot:dev
 
 # controller-gen, sqlc, and buf are declared as `tool` directives in go.mod,
 # so we run them via `go tool` to pin the exact versions the module depends on.
@@ -30,7 +31,7 @@ OVERLAY ?= dev
 HELM      ?= helm
 CHART_DIR ?= deploy/helm
 
-.PHONY: build test test-e2e vet generate generate-harness-api apistub sdk-generate sdk-generate-check sdk-test proto-lint tidy docker-build harness-build sidecar-build run kustomize deploy \
+.PHONY: build test test-e2e vet generate generate-harness-api apistub sdk-generate sdk-generate-check sdk-test proto-lint tidy docker-build harness-build sidecar-build slackbot-build run kustomize deploy \
         helm-sync-crds helm-lint helm-template helm-package
 
 ## build: compile all packages.
@@ -147,6 +148,10 @@ harness-build:
 ## sidecar-build: build the sandbox sidecar proxy image (sidecar binary + envoy).
 sidecar-build:
 	docker build -f Dockerfile.sidecar -t $(SIDECAR_IMAGE) .
+
+## slackbot-build: build the reference Slack bot image (Dockerfile.slackbot).
+slackbot-build:
+	docker build -f Dockerfile.slackbot -t $(SLACKBOT_IMAGE) .
 
 ## run: build and run the binary locally.
 run:
