@@ -105,8 +105,13 @@ LIMIT ?;
 
 -- name: UpdateSessionLink :execrows
 UPDATE sessions
-SET executor = ?, stream_id = ?, pod_seq = ?, updated_at = ?
-WHERE id = ?;
+SET executor = sqlc.arg(executor),
+    stream_id = sqlc.arg(stream_id),
+    pod_seq = CASE WHEN stream_id = sqlc.arg(stream_id)
+                   THEN MAX(pod_seq, CAST(sqlc.arg(pod_seq) AS INTEGER))
+                   ELSE CAST(sqlc.arg(pod_seq) AS INTEGER) END,
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id);
 
 -- name: AdvancePodSeq :execrows
 UPDATE sessions

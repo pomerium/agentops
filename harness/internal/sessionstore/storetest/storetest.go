@@ -48,6 +48,7 @@ func Run(t *testing.T, newDatabase func(t *testing.T) Opener) {
 		{"EventTimestampsKeepMilliseconds", testEventTimestampsKeepMilliseconds},
 		{"FinishSessionSavesTheEndWithItsEvents", testFinishSessionSavesTheEndWithItsEvents},
 		{"PodSeqOnlyMovesForward", testPodSeqOnlyMovesForward},
+		{"RelinkingTheSameStreamKeepsItsPodSeq", testRelinkingTheSameStreamKeepsItsPodSeq},
 		{"PodEventAndPodSeqAreOneWrite", testPodEventAndPodSeqAreOneWrite},
 		{"PodCommandsOutbox", testPodCommandsOutbox},
 	}
@@ -941,6 +942,23 @@ func testFinishSessionSavesTheEndWithItsEvents(t *testing.T, open Opener) {
 
 	_, err = s.FinishSession(ctx, "missing", api.StateEnded, nil)
 	wantErr(t, "FinishSession on an unknown session", err, sessionstore.ErrNotFound)
+}
+
+func testRelinkingTheSameStreamKeepsItsPodSeq(t *testing.T, open Opener) {
+	ctx := context.Background()
+	s := openStore(t, open)
+	create(t, s, sessionstore.Session{ID: "s1", ClientID: "stub", ConversationRef: "c1"})
+	must(t, s.UpdateSessionLink(ctx, "s1", "exec", "stream-1", 4))
+	_, err := s.AppendPodEvent(ctx, "s1", "x", "", time.Now(), nil, 6)
+	must(t, err)
+	must(t, s.UpdateSessionLink(ctx, "s1", "exec", "stream-1", 4))
+	if got := get(t, s, "s1").PodSeq; got != 6 {
+		t.Errorf("pod seq after linking the same stream at 4 = %d, want 6", got)
+	}
+	must(t, s.UpdateSessionLink(ctx, "s1", "exec", "stream-2", 1))
+	if got := get(t, s, "s1"); got.PodSeq != 1 || got.StreamID != "stream-2" {
+		t.Errorf("after linking a new stream at 1: stream %q pod seq %d, want stream-2 at 1", got.StreamID, got.PodSeq)
+	}
 }
 
 func testPodSeqOnlyMovesForward(t *testing.T, open Opener) {

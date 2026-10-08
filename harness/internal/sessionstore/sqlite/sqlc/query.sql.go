@@ -620,8 +620,13 @@ func (q *Queries) UpdateSessionApprover(ctx context.Context, arg UpdateSessionAp
 
 const updateSessionLink = `-- name: UpdateSessionLink :execrows
 UPDATE sessions
-SET executor = ?, stream_id = ?, pod_seq = ?, updated_at = ?
-WHERE id = ?
+SET executor = ?1,
+    stream_id = ?2,
+    pod_seq = CASE WHEN stream_id = ?2
+                   THEN MAX(pod_seq, CAST(?3 AS INTEGER))
+                   ELSE CAST(?3 AS INTEGER) END,
+    updated_at = ?4
+WHERE id = ?5
 `
 
 type UpdateSessionLinkParams struct {
