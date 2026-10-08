@@ -25,12 +25,13 @@ const maxMessageChars = 11000
 const maxTextChars = 3900
 
 type renderer struct {
-	mu      sync.Mutex
-	curTS   string
-	reacted bool
-	turnID  string
-	text    string
-	permTS  map[string]string
+	mu       sync.Mutex
+	curTS    string
+	reacted  bool
+	turnID   string
+	text     string
+	finished bool
+	permTS   map[string]string
 }
 
 func newRenderer() *renderer { return &renderer{permTS: map[string]string{}} }
@@ -45,6 +46,17 @@ func (r *renderer) beginTurn(turnID string) {
 	r.curTS = ""
 	r.reacted = false
 	r.text = ""
+	r.finished = false
+}
+
+func (r *renderer) finish(turnID string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.turnID != turnID || r.finished || r.text == "" {
+		return "", false
+	}
+	r.finished = true
+	return r.text, true
 }
 
 func (r *renderer) appendPart(part string) string {
@@ -155,6 +167,7 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 		t.render.beginTurn(ev.GetTurnId())
 		text := t.render.appendPart(p.AgentMessage.GetText())
 		if p.AgentMessage.GetFinal() {
+			t.render.finish(ev.GetTurnId())
 			a.showFinal(ctx, t, text)
 			return
 		}
@@ -184,10 +197,10 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 		a.closePermission(ctx, t, p.PermissionResolved)
 
 	case *pb.Event_TurnCompleted:
-		a.endTurn(ctx, t)
+		a.endTurn(ctx, t, ev.GetTurnId())
 
 	case *pb.Event_TurnFailed:
-		a.endTurn(ctx, t)
+		a.endTurn(ctx, t, ev.GetTurnId())
 		a.log.WarnContext(ctx, "turn failed", "session", t.sessionID, "turn_id", ev.GetTurnId(), "reason", p.TurnFailed.GetReason())
 		a.tellOwner(ctx, t, msgTurnFailed)
 
@@ -281,7 +294,10 @@ func endReaction(reason api.EndReason) string {
 	return reactionFailed
 }
 
-func (a *App) endTurn(ctx context.Context, t *thread) {
+func (a *App) endTurn(ctx context.Context, t *thread, turnID string) {
+	if text, ok := t.render.finish(turnID); ok {
+		a.showFinal(ctx, t, text)
+	}
 	a.clearBusy(ctx, t)
 	a.saveMeta(ctx, t, func(*sessionMeta) {})
 	t.render.mu.Lock()
