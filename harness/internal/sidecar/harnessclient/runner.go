@@ -1,20 +1,28 @@
 package harnessclient
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
+	"sync"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
-	"github.com/pomerium/agentops/harness/internal/agentio"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	runnerpb "github.com/pomerium/agentops/harness/internal/runner/pb"
 )
+
+var ErrNoAgent = errors.New("the runner has no agent session")
+
+const runnerFrameBuffer = 64
+
+const closeGrace = 2 * time.Second
 
 type UDSRunner struct {
 	socket string
@@ -38,7 +46,17 @@ func NewUDSRunner(socket string, log *slog.Logger) (*UDSRunner, error) {
 
 func (r *UDSRunner) Close() { _ = r.conn.Close() }
 
-func (r *UDSRunner) Spawn(ctx context.Context) (*AgentSession, error) {
+func (r *UDSRunner) Spawn(ctx context.Context, streamID []byte, params *agentlinkpb.SessionParams) (*AgentSession, error) {
+	return r.open(ctx, &runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Spawn{Spawn: &runnerpb.Spawn{
+		StreamId: streamID, Session: params,
+	}}})
+}
+
+func (r *UDSRunner) Join(ctx context.Context) (*AgentSession, error) {
+	return r.open(ctx, &runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Join{Join: &runnerpb.Join{}}})
+}
+
+func (r *UDSRunner) open(ctx context.Context, first *runnerpb.RunnerClientFrame) (*AgentSession, error) {
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	stopWatch := context.AfterFunc(ctx, cancel)
 	fail := func(err error) (*AgentSession, error) {
@@ -53,124 +71,70 @@ func (r *UDSRunner) Spawn(ctx context.Context) (*AgentSession, error) {
 	if err != nil {
 		return fail(fmt.Errorf("open runner stream: %w", err))
 	}
-	if err := stream.Send(&runnerpb.RunnerClientFrame{
-		Msg: &runnerpb.RunnerClientFrame_Spawn{Spawn: &runnerpb.Spawn{}},
-	}); err != nil {
-		return fail(fmt.Errorf("send spawn: %w", err))
+	if err := stream.Send(first); err != nil {
+		return fail(fmt.Errorf("send %T: %w", first.GetMsg(), err))
 	}
-	first, err := stream.Recv()
+	f, err := stream.Recv()
+	if status.Code(err) == codes.NotFound {
+		return fail(ErrNoAgent)
+	}
 	if err != nil {
-		return fail(fmt.Errorf("await agent start: %w", err))
+		return fail(fmt.Errorf("await the runner: %w", err))
 	}
-	started := first.GetStarted()
+	started := f.GetStarted()
 	if started == nil {
-		return fail(fmt.Errorf("first runner frame was %v, want Started", first))
+		return fail(fmt.Errorf("first runner frame was %v, want Started", f))
 	}
 	if !stopWatch() {
 		return fail(ctx.Err())
 	}
 
-	io := agentio.New()
-	exited := make(chan AgentExit, 1)
-	session := &AgentSession{IO: io, Exited: exited, PID: started.GetPid()}
-	session.Stop = func() {
-		cancel()
-	}
-
-	go r.readRunner(stream, io, exited)
-	go r.writeRunner(streamCtx, stream, io)
-	return session, nil
-}
-
-func (r *UDSRunner) readRunner(stream runnerpb.AgentRunnerService_RunClient, tunnel *agentio.Stream, exited chan<- AgentExit) {
-	stderr := &lineLog{log: r.log}
-	defer stderr.flush()
-	var written uint64
-	for {
-		frame, err := stream.Recv()
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				r.log.Warn("harness: runner stream ended", "err", err)
-			}
-			select {
-			case exited <- AgentExit{Code: -1, Output: written}:
-			default:
-			}
-			return
-		}
-		switch {
-		case frame.GetStdout() != nil:
-			n, err := tunnel.Outbound().Write(frame.GetStdout())
-			written += uint64(n)
+	frames := make(chan *runnerpb.RunnerServerFrame, runnerFrameBuffer)
+	lost := make(chan struct{})
+	go func() {
+		defer close(lost)
+		for {
+			f, err := stream.Recv()
 			if err != nil {
-				r.log.Debug("harness: tunnel closed while forwarding agent stdout", "err", err)
+				switch {
+				case streamCtx.Err() != nil:
+				case errors.Is(err, io.EOF):
+					r.log.Debug("harness: runner stream closed")
+				default:
+					r.log.Warn("harness: runner stream ended", "err", err)
+				}
 				return
 			}
-		case frame.GetStderr() != nil:
-			stderr.write(frame.GetStderr())
-		case frame.GetExited() != nil:
-			stderr.flush()
 			select {
-			case exited <- AgentExit{Code: frame.GetExited().GetExitCode(), Output: written}:
-			default:
-			}
-			return
-		}
-	}
-}
-
-func (r *UDSRunner) writeRunner(ctx context.Context, stream runnerpb.AgentRunnerService_RunClient, tunnel *agentio.Stream) {
-	buf := make([]byte, agentio.FrameMax)
-	for {
-		n, err := tunnel.Inbound().Read(buf)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			if err := stream.Send(&runnerpb.RunnerClientFrame{
-				Msg: &runnerpb.RunnerClientFrame_Stdin{Stdin: chunk},
-			}); err != nil {
-				r.log.Debug("harness: write to runner failed", "err", err)
+			case frames <- f:
+			case <-streamCtx.Done():
 				return
 			}
 		}
-		if err != nil {
-			return
-		}
-		if ctx.Err() != nil {
-			return
-		}
-	}
-}
-
-type lineLog struct {
-	log *slog.Logger
-	buf bytes.Buffer
-}
-
-const maxStderrLine = 1 << 16
-
-func (l *lineLog) write(p []byte) {
-	l.buf.Write(p)
-	for {
-		line, err := l.buf.ReadString('\n')
-		if err != nil {
-			if len(line) > maxStderrLine {
-				l.log.Debug("agent stderr", "line", line[:maxStderrLine]+"…(truncated)")
-				l.buf.Reset()
-				return
-			}
-			l.buf.WriteString(line)
-			return
-		}
-		if t := strings.TrimRight(line, "\r\n"); t != "" {
-			l.log.Debug("agent stderr", "line", t)
-		}
-	}
-}
-
-func (l *lineLog) flush() {
-	if t := strings.TrimRight(l.buf.String(), "\r\n"); t != "" {
-		l.log.Debug("agent stderr", "line", t)
-	}
-	l.buf.Reset()
+	}()
+	var mu sync.Mutex
+	var closeOnce sync.Once
+	return &AgentSession{
+		StreamID: started.GetStreamId(),
+		PID:      started.GetPid(),
+		Frames:   frames,
+		Lost:     lost,
+		Send: func(f *runnerpb.RunnerClientFrame) error {
+			mu.Lock()
+			defer mu.Unlock()
+			return stream.Send(f)
+		},
+		Close: func() {
+			closeOnce.Do(func() {
+				mu.Lock()
+				_ = stream.CloseSend()
+				mu.Unlock()
+				select {
+				case <-lost:
+				case <-time.After(closeGrace):
+				}
+				cancel()
+			})
+		},
+	}, nil
 }

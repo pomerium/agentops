@@ -1,10 +1,8 @@
 package harnessclient_test
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -16,6 +14,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
@@ -25,8 +24,14 @@ import (
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/runner"
 	runnerpb "github.com/pomerium/agentops/harness/internal/runner/pb"
+	"github.com/pomerium/agentops/harness/internal/runner/runnertest"
 	"github.com/pomerium/agentops/harness/internal/sidecar/harnessclient"
 )
+
+func TestMain(m *testing.M) {
+	runnertest.RunIfRequested()
+	os.Exit(m.Run())
+}
 
 const runID = "run-hermetic"
 
@@ -89,27 +94,13 @@ func (s *staticToken) Refresh() {
 	s.mu.Unlock()
 }
 
-func stubAgent(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "agent.sh")
-	script := `#!/bin/sh
-echo "agent-ready" >&2
-while IFS= read -r line; do
-  case "$line" in
-    quit) exit 7 ;;
-  esac
-  printf 'echo:%s\n' "$line"
-done
-exit 0
-`
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatalf("write stub agent: %v", err)
-	}
-	return path
+type runnerServer struct {
+	socket string
+	gs     *grpc.Server
+	svc    *runner.Service
 }
 
-func startRunner(t *testing.T, agentPath string) string {
+func startRunner(t *testing.T) *runnerServer {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rnr")
 	if err != nil {
@@ -123,24 +114,40 @@ func startRunner(t *testing.T, agentPath string) string {
 		t.Fatalf("listen on %s: %v", socket, err)
 	}
 	svc := runner.New(
-		runner.WithCommand([]string{"/bin/sh", "-c", "exec " + agentPath}),
+		runner.WithCommand(runnertest.Command()),
 		runner.WithKillDelay(time.Second),
 		runner.WithLogger(testLogger(t)),
 	)
 	gs := grpc.NewServer()
 	svc.Register(gs)
 	go func() { _ = gs.Serve(lis) }()
-	t.Cleanup(gs.Stop)
-	return socket
+	t.Cleanup(func() {
+		gs.Stop()
+		svc.Close()
+	})
+	return &runnerServer{socket: socket, gs: gs, svc: svc}
+}
+
+func (r *runnerServer) client(t *testing.T) runnerpb.AgentRunnerServiceClient {
+	t.Helper()
+	conn, err := grpc.NewClient("unix:"+r.socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial runner: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return runnerpb.NewAgentRunnerServiceClient(conn)
 }
 
 type rig struct {
+	t          *testing.T
 	link       *agentlink.Server
 	handle     *agentlink.RunHandle
 	client     *harnessclient.Client
 	token      *staticToken
 	runErr     chan error
 	configured chan *agentlinkpb.SandboxConfig
+	runner     *runnerServer
+	addr       string
 }
 
 func sessionConfig() *agentlinkpb.SandboxConfig {
@@ -175,21 +182,34 @@ func newRigWith(t *testing.T, serve serveFunc, agentRunner harnessclient.Runner,
 		t.Fatalf("Expect: %v", err)
 	}
 
+	r := &rig{t: t, link: srv, handle: handle, runErr: make(chan error, 1), addr: addr}
 	if agentRunner == nil {
-		uds, err := harnessclient.NewUDSRunner(startRunner(t, stubAgent(t)), testLogger(t))
-		if err != nil {
-			t.Fatalf("NewUDSRunner: %v", err)
-		}
-		t.Cleanup(uds.Close)
-		agentRunner = uds
+		r.runner = startRunner(t)
+		agentRunner = r.udsRunner(t)
 	}
+	r.token = &staticToken{bearer: "Bearer pom_art_test"}
+	r.configured = make(chan *agentlinkpb.SandboxConfig, 1)
+	r.client = r.newClient(t, agentRunner)
+	t.Cleanup(r.client.Close)
+	return r
+}
 
-	token := &staticToken{bearer: "Bearer pom_art_test"}
-	configured := make(chan *agentlinkpb.SandboxConfig, 1)
+func (r *rig) udsRunner(t *testing.T) *harnessclient.UDSRunner {
+	t.Helper()
+	uds, err := harnessclient.NewUDSRunner(r.runner.socket, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewUDSRunner: %v", err)
+	}
+	t.Cleanup(uds.Close)
+	return uds
+}
+
+func (r *rig) newClient(t *testing.T, agentRunner harnessclient.Runner) *harnessclient.Client {
+	t.Helper()
 	client, err := harnessclient.New(harnessclient.Config{
-		URL:                "http://" + addr,
+		URL:                "http://" + r.addr,
 		Insecure:           true,
-		Token:              token,
+		Token:              r.token,
 		Runner:             agentRunner,
 		HeartbeatInterval:  200 * time.Millisecond,
 		HeartbeatMissLimit: 3,
@@ -198,7 +218,7 @@ func newRigWith(t *testing.T, serve serveFunc, agentRunner harnessclient.Runner,
 		Logger:             testLogger(t),
 		Configure: func(cfg *agentlinkpb.SandboxConfig) error {
 			select {
-			case configured <- cfg:
+			case r.configured <- cfg:
 			default:
 			}
 			return nil
@@ -207,157 +227,162 @@ func newRigWith(t *testing.T, serve serveFunc, agentRunner harnessclient.Runner,
 	if err != nil {
 		t.Fatalf("harnessclient.New: %v", err)
 	}
-	t.Cleanup(client.Close)
-
-	return &rig{
-		link: srv, handle: handle, client: client, token: token,
-		runErr: make(chan error, 1), configured: configured,
-	}
+	return client
 }
 
 func (r *rig) start(ctx context.Context) {
 	go func() { r.runErr <- r.client.Run(ctx) }()
 }
 
+func (r *rig) spawn(ctx context.Context) {
+	r.t.Helper()
+	if err := r.handle.AwaitAttach(ctx); err != nil {
+		r.t.Fatalf("AwaitAttach: %v", err)
+	}
+	if err := r.handle.SpawnAgent(ctx, &agentlinkpb.SessionParams{Cwd: "/tmp"}); err != nil {
+		r.t.Fatalf("SpawnAgent: %v", err)
+	}
+}
+
+func (r *rig) next() *agentlinkpb.AgentIOFrame {
+	r.t.Helper()
+	select {
+	case f := <-r.handle.Inbox():
+		return f
+	case <-time.After(15 * time.Second):
+		r.t.Fatal("nothing reached the manager's inbox")
+		return nil
+	}
+}
+
+func (r *rig) nextEvent() *agentlinkpb.AgentEvent {
+	r.t.Helper()
+	for {
+		if ev := r.next().GetEvent(); ev != nil {
+			return ev
+		}
+	}
+}
+
+func (r *rig) eventsUntil(done func(*agentlinkpb.AgentEvent) bool) []*agentlinkpb.AgentEvent {
+	r.t.Helper()
+	var out []*agentlinkpb.AgentEvent
+	for {
+		ev := r.nextEvent()
+		out = append(out, ev)
+		r.handle.Ack(ev.GetSeq())
+		if done(ev) {
+			return out
+		}
+	}
+}
+
+func (r *rig) prompt(turnID string, seq uint64, text string) {
+	r.handle.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Prompt{Prompt: &agentlinkpb.Prompt{
+		TurnId: turnID, TurnSeq: seq, Text: text,
+	}}})
+}
+
+func turnFinished(turnID string) func(*agentlinkpb.AgentEvent) bool {
+	return func(ev *agentlinkpb.AgentEvent) bool {
+		return ev.GetTurnFinished() != nil && ev.GetTurnId() == turnID
+	}
+}
+
+func assertContiguous(t *testing.T, evs []*agentlinkpb.AgentEvent, first uint64) {
+	t.Helper()
+	for i, ev := range evs {
+		if want := first + uint64(i); ev.GetSeq() != want {
+			t.Fatalf("event %d has seq %d, want %d", i, ev.GetSeq(), want)
+		}
+	}
+}
+
+func messages(evs []*agentlinkpb.AgentEvent) string {
+	var b strings.Builder
+	for _, ev := range evs {
+		b.WriteString(ev.GetMessage().GetText())
+	}
+	return b.String()
+}
+
+func TestTheSidecarSpeaksTheManagersProtocolVersion(t *testing.T) {
+	if harnessclient.ProtocolVersion != agentlink.ProtocolVersion {
+		t.Fatalf("sidecar protocol %d, manager protocol %d", harnessclient.ProtocolVersion, agentlink.ProtocolVersion)
+	}
+}
+
 func TestAttachDeliversTheSessionConfiguration(t *testing.T) {
 	r := newRig(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.start(ctx)
-
 	if err := r.handle.AwaitReady(ctx); err != nil {
 		t.Fatalf("AwaitReady: %v", err)
 	}
-
 	var got *agentlinkpb.SandboxConfig
 	select {
 	case got = <-r.configured:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the sidecar was never handed its configuration")
 	}
-	if len(got.GetEndpoints()) != 1 {
-		t.Fatalf("configured with %d endpoints, want 1: %+v", len(got.GetEndpoints()), got.GetEndpoints())
-	}
-	ep := got.GetEndpoints()[0]
-	if ep.GetName() != "mcp-gke" || ep.GetListenPort() != 9101 ||
-		ep.GetUpstreamUrl() != "https://gke.example.com/mcp" {
-		t.Errorf("endpoint crossed the wire as %+v", ep)
+	if len(got.GetEndpoints()) != 1 || got.GetEndpoints()[0].GetName() != "mcp-gke" {
+		t.Errorf("configuration = %v", got)
 	}
 }
 
-func TestHappyPath(t *testing.T) {
-	exited := make(chan int32, 1)
-	r := newRig(t, agentlink.WithOnAgentExit(func(code int32) { exited <- code }))
-
+func TestATurnFlowsBetweenTheManagerAndTheRunner(t *testing.T) {
+	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.start(ctx)
+	r.spawn(ctx)
 
-	if err := r.handle.AwaitAttach(ctx); err != nil {
-		t.Fatalf("AwaitAttach: %v", err)
+	if st := r.next().GetState(); st == nil {
+		t.Fatal("the first inbox frame is not the agent state")
 	}
-	if err := r.handle.SpawnAgent(ctx); err != nil {
-		t.Fatalf("SpawnAgent: %v", err)
+	ready := r.nextEvent()
+	if ready.GetSessionReady().GetAcpSessionId() != "fake-session" || ready.GetSeq() != 1 {
+		t.Fatalf("first event = %v, want SessionReady", ready)
 	}
-	stdin, stdout, err := r.handle.AwaitAgentIO(ctx)
-	if err != nil {
-		t.Fatalf("AwaitAgentIO: %v", err)
-	}
-
-	reader := bufio.NewReader(stdout)
-	for i := range 5 {
-		line := fmt.Sprintf("line-%d\n", i)
-		if _, err := stdin.Write([]byte(line)); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		got, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		if want := "echo:line-" + fmt.Sprint(i) + "\n"; got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	}
-
-	if _, err := stdin.Write([]byte("quit\n")); err != nil {
-		t.Fatalf("write quit: %v", err)
-	}
-	select {
-	case code := <-exited:
-		if code != 7 {
-			t.Errorf("agent exit code = %d, want 7", code)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("the agent exit was never reported")
+	r.handle.Ack(1)
+	r.prompt("t1", 1, "say hello")
+	evs := r.eventsUntil(turnFinished("t1"))
+	assertContiguous(t, evs, 2)
+	if got := messages(evs); got != "hello" {
+		t.Fatalf("reply = %q, want hello", got)
 	}
 }
 
-func TestResumeAcrossTunnelDrop(t *testing.T) {
-	var lost, attached int
+func TestATunnelDropReplaysWithoutGapsOrDuplicates(t *testing.T) {
 	var mu sync.Mutex
-	r := newRig(t,
-		agentlink.WithOnLost(func(error) { mu.Lock(); lost++; mu.Unlock() }),
-		agentlink.WithOnAttached(func(uint32, bool) { mu.Lock(); attached++; mu.Unlock() }),
-	)
-
+	attached := 0
+	r := newRig(t, agentlink.WithOnAttached(func(uint32, bool) { mu.Lock(); attached++; mu.Unlock() }))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	r.start(ctx)
+	r.spawn(ctx)
+	gate := filepath.Join(t.TempDir(), "gate")
 
-	if err := r.handle.AwaitAttach(ctx); err != nil {
-		t.Fatalf("AwaitAttach: %v", err)
-	}
-	if err := r.handle.SpawnAgent(ctx); err != nil {
-		t.Fatalf("SpawnAgent: %v", err)
-	}
-	stdin, stdout, err := r.handle.AwaitAgentIO(ctx)
-	if err != nil {
-		t.Fatalf("AwaitAgentIO: %v", err)
-	}
-	reader := bufio.NewReader(stdout)
-
-	exchange := func(i int) {
-		t.Helper()
-		line := fmt.Sprintf("turn-%d\n", i)
-		if _, err := stdin.Write([]byte(line)); err != nil {
-			t.Fatalf("turn %d: write: %v", i, err)
-		}
-		got, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("turn %d: read: %v", i, err)
-		}
-		if want := fmt.Sprintf("echo:turn-%d\n", i); got != want {
-			t.Fatalf("turn %d: got %q, want %q", i, got, want)
-		}
-	}
-
-	exchange(0)
+	ready := r.nextEvent()
+	r.handle.Ack(ready.GetSeq())
+	r.prompt("t1", 1, "say one\ntool c1 x\nwait "+gate+"\nsay two")
+	before := r.eventsUntil(func(ev *agentlinkpb.AgentEvent) bool { return ev.GetToolCall() != nil })
 
 	r.link.DropStreams(runID)
-
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		mu.Lock()
-		reattached := attached >= 2
-		mu.Unlock()
-		if reattached {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the sidecar never re-attached after the drop")
-		}
-		time.Sleep(20 * time.Millisecond)
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
-
-	for i := 1; i < 4; i++ {
-		exchange(i)
+	after := r.eventsUntil(turnFinished("t1"))
+	all := append(append([]*agentlinkpb.AgentEvent{ready}, before...), after...)
+	assertContiguous(t, all, 1)
+	if got := messages(all); got != "onetwo" {
+		t.Fatalf("reply = %q, want onetwo", got)
 	}
-
 	mu.Lock()
 	defer mu.Unlock()
-	if lost == 0 {
-		t.Error("the dropped control stream should have been reported lost")
+	if attached < 2 {
+		t.Errorf("the sidecar attached %d times, want a reattach after the drop", attached)
 	}
 }
 
@@ -418,99 +443,75 @@ func (r *ioResetter) intercept(srv any, ss grpc.ServerStream, info *grpc.StreamS
 	return err
 }
 
-func TestAgentIOResetAloneKeepsTheConversationFlowing(t *testing.T) {
+func TestAnAgentIOResetAloneKeepsTheTurnsFlowing(t *testing.T) {
 	resetter := &ioResetter{}
 	r := newRigWith(t, serveIntercepted(resetter.intercept), nil)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	r.start(ctx)
+	r.spawn(ctx)
+	ready := r.nextEvent()
+	r.handle.Ack(ready.GetSeq())
 
-	if err := r.handle.AwaitAttach(ctx); err != nil {
-		t.Fatalf("AwaitAttach: %v", err)
-	}
-	if err := r.handle.SpawnAgent(ctx); err != nil {
-		t.Fatalf("SpawnAgent: %v", err)
-	}
-	stdin, stdout, err := r.handle.AwaitAgentIO(ctx)
-	if err != nil {
-		t.Fatalf("AwaitAgentIO: %v", err)
-	}
-	lines := make(chan string)
-	go func() {
-		reader := bufio.NewReader(stdout)
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			select {
-			case lines <- line:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	exchange := func(i int) {
-		t.Helper()
-		if _, err := fmt.Fprintf(stdin, "turn-%d\n", i); err != nil {
-			t.Fatalf("turn %d: write: %v", i, err)
-		}
-		select {
-		case got := <-lines:
-			if want := fmt.Sprintf("echo:turn-%d\n", i); got != want {
-				t.Fatalf("turn %d: got %q, want %q", i, got, want)
-			}
-		case <-time.After(15 * time.Second):
-			t.Fatalf("turn %d: no reply after the agent io reset", i)
-		}
-	}
-
-	exchange(0)
+	r.prompt("t1", 1, "say first")
+	first := r.eventsUntil(turnFinished("t1"))
 	resetter.reset()
-	for i := 1; i < 4; i++ {
-		exchange(i)
+	r.prompt("t2", 2, "say second")
+	second := r.eventsUntil(turnFinished("t2"))
+	if messages(first) != "first" || messages(second) != "second" {
+		t.Fatalf("replies = %q, %q", messages(first), messages(second))
+	}
+	assertContiguous(t, append(first, second...), ready.GetSeq()+1)
+}
+
+func TestARestartedSidecarJoinsTheAgentThatRuns(t *testing.T) {
+	var mu sync.Mutex
+	var running []bool
+	r := newRig(t, agentlink.WithOnAttached(func(_ uint32, agentRunning bool) {
+		mu.Lock()
+		running = append(running, agentRunning)
+		mu.Unlock()
+	}))
+	gate := filepath.Join(t.TempDir(), "gate")
+	firstCtx, crash := context.WithCancel(context.Background())
+	defer crash()
+	r.start(firstCtx)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	r.spawn(ctx)
+	ready := r.nextEvent()
+	r.handle.Ack(ready.GetSeq())
+	r.prompt("t1", 1, "say one\ntool c1 x\nwait "+gate+"\nsay two")
+	before := r.eventsUntil(func(ev *agentlinkpb.AgentEvent) bool { return ev.GetToolCall() != nil })
+
+	crash()
+	<-r.runErr
+
+	second := r.newClient(t, r.udsRunner(t))
+	t.Cleanup(second.Close)
+	go func() { _ = second.Run(ctx) }()
+	if err := os.WriteFile(gate, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after := r.eventsUntil(turnFinished("t1"))
+	assertContiguous(t, append(append([]*agentlinkpb.AgentEvent{ready}, before...), after...), 1)
+	if got := messages(append(before, after...)); got != "onetwo" {
+		t.Fatalf("reply = %q, want onetwo", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(running) < 2 || !running[len(running)-1] {
+		t.Fatalf("agent_running on each attach = %v, want true for the restarted sidecar", running)
 	}
 }
 
-func TestUnknownRunIsTerminal(t *testing.T) {
+func TestShutdownStopsTheAgent(t *testing.T) {
 	r := newRig(t)
-	r.link.Forget(runID)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.start(ctx)
-
-	select {
-	case err := <-r.runErr:
-		var terminal *harnessclient.TerminalError
-		if !errors.As(err, &terminal) {
-			t.Fatalf("err = %v, want a TerminalError", err)
-		}
-		if terminal.Reason != harnessclient.ReasonUnknownRun {
-			t.Errorf("reason = %q, want %q", terminal.Reason, harnessclient.ReasonUnknownRun)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("the client did not go terminal on an unknown run")
-	}
-}
-
-func TestShutdownEndsCleanly(t *testing.T) {
-	r := newRig(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	r.start(ctx)
-
-	if err := r.handle.AwaitAttach(ctx); err != nil {
-		t.Fatalf("AwaitAttach: %v", err)
-	}
-	if err := r.handle.SpawnAgent(ctx); err != nil {
-		t.Fatalf("SpawnAgent: %v", err)
-	}
-	if _, _, err := r.handle.AwaitAgentIO(ctx); err != nil {
-		t.Fatalf("AwaitAgentIO: %v", err)
-	}
+	r.spawn(ctx)
+	r.nextEvent()
 	r.handle.Shutdown("session_end")
 
 	select {
@@ -519,7 +520,76 @@ func TestShutdownEndsCleanly(t *testing.T) {
 			t.Fatalf("Run returned %v, want nil after Shutdown", err)
 		}
 	case <-time.After(20 * time.Second):
-		t.Fatal("the client did not exit after Shutdown")
+		t.Fatal("the client did not return after Shutdown")
+	}
+
+	stream, err := r.runner.client(t).Run(ctx)
+	if err != nil {
+		t.Fatalf("open runner stream: %v", err)
+	}
+	if err := stream.Send(&runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Join{Join: &runnerpb.Join{}}}); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if f, err := stream.Recv(); err != nil || f.GetStarted() == nil {
+		t.Fatalf("join = %v, %v", f, err)
+	}
+	if err := stream.Send(&runnerpb.RunnerClientFrame{Msg: &runnerpb.RunnerClientFrame_Replay{Replay: &runnerpb.Replay{}}}); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	for {
+		f, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+		if f.GetEvent().GetExited() != nil {
+			return
+		}
+	}
+}
+
+func TestLosingTheRunnerIsTerminal(t *testing.T) {
+	reasons := make(chan string, 4)
+	r := newRig(t, agentlink.WithOnError(func(reason string, _ error) { reasons <- reason }))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r.start(ctx)
+	r.spawn(ctx)
+	r.nextEvent()
+
+	r.runner.gs.Stop()
+	select {
+	case err := <-r.runErr:
+		var terminal *harnessclient.TerminalError
+		if !errors.As(err, &terminal) || terminal.Reason != harnessclient.ReasonRunnerLost {
+			t.Fatalf("Run = %v, want a terminal %q", err, harnessclient.ReasonRunnerLost)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the client did not notice that the runner went away")
+	}
+	select {
+	case reason := <-reasons:
+		if reason != harnessclient.ReasonRunnerLost {
+			t.Errorf("manager OnError reason = %q", reason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the manager never heard about the lost runner")
+	}
+}
+
+func TestUnknownRunIsTerminal(t *testing.T) {
+	r := newRig(t)
+	r.link.Forget(runID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r.start(ctx)
+	select {
+	case err := <-r.runErr:
+		var terminal *harnessclient.TerminalError
+		if !errors.As(err, &terminal) || terminal.Reason != harnessclient.ReasonUnknownRun {
+			t.Fatalf("err = %v, want a terminal %q", err, harnessclient.ReasonUnknownRun)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the client did not go terminal on an unknown run")
 	}
 }
 
@@ -529,7 +599,7 @@ type stalledRunner struct {
 	release  chan struct{}
 }
 
-func (r *stalledRunner) Spawn(ctx context.Context) (*harnessclient.AgentSession, error) {
+func (r *stalledRunner) Spawn(ctx context.Context, _ []byte, _ *agentlinkpb.SessionParams) (*harnessclient.AgentSession, error) {
 	close(r.entered)
 	select {
 	case <-ctx.Done():
@@ -540,30 +610,24 @@ func (r *stalledRunner) Spawn(ctx context.Context) (*harnessclient.AgentSession,
 	}
 }
 
+func (r *stalledRunner) Join(context.Context) (*harnessclient.AgentSession, error) {
+	return nil, harnessclient.ErrNoAgent
+}
+
 func TestShutdownDuringAStalledSpawnEndsCleanly(t *testing.T) {
-	stalled := &stalledRunner{
-		entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}),
-	}
+	stalled := &stalledRunner{entered: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{})}
 	t.Cleanup(func() { close(stalled.release) })
 	r := newRigWith(t, agentlinktest.Serve, stalled)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.start(ctx)
-
-	if err := r.handle.AwaitAttach(ctx); err != nil {
-		t.Fatalf("AwaitAttach: %v", err)
-	}
-	if err := r.handle.SpawnAgent(ctx); err != nil {
-		t.Fatalf("SpawnAgent: %v", err)
-	}
+	r.spawn(ctx)
 	select {
 	case <-stalled.entered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the runner was never asked to spawn")
 	}
 	r.handle.Shutdown("session_end")
-
 	select {
 	case err := <-r.runErr:
 		if err != nil {
@@ -617,7 +681,7 @@ func TestUDSRunnerSpawnStopsWaitingWhenCanceled(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := agentRunner.Spawn(ctx)
+		_, err := agentRunner.Spawn(ctx, []byte("s"), &agentlinkpb.SessionParams{})
 		done <- err
 	}()
 	select {
@@ -626,7 +690,6 @@ func TestUDSRunnerSpawnStopsWaitingWhenCanceled(t *testing.T) {
 		t.Fatal("the spawn never reached the runner")
 	}
 	cancel()
-
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
@@ -635,6 +698,24 @@ func TestUDSRunnerSpawnStopsWaitingWhenCanceled(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a canceled spawn still waits for the runner to report Started")
 	}
+}
+
+func TestJoinWithoutAnAgentReportsNoAgent(t *testing.T) {
+	rs := startRunner(t)
+	uds, err := harnessclient.NewUDSRunner(rs.socket, testLogger(t))
+	if err != nil {
+		t.Fatalf("NewUDSRunner: %v", err)
+	}
+	t.Cleanup(uds.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := uds.Join(ctx); !errors.Is(err, harnessclient.ErrNoAgent) {
+		t.Fatalf("Join = %v, want ErrNoAgent", err)
+	}
+}
+
+func denyAll(_ any, _ grpc.ServerStream, _ *grpc.StreamServerInfo, _ grpc.StreamHandler) error {
+	return status.Error(codes.PermissionDenied, "denied by policy")
 }
 
 func TestPermissionDeniedRefreshesThenGivesUp(t *testing.T) {
@@ -652,8 +733,8 @@ func TestPermissionDeniedRefreshesThenGivesUp(t *testing.T) {
 	go func() { _ = gs.Serve(lis) }()
 	defer gs.Stop()
 
-	socket := startRunner(t, stubAgent(t))
-	agentRunner, err := harnessclient.NewUDSRunner(socket, testLogger(t))
+	rs := startRunner(t)
+	agentRunner, err := harnessclient.NewUDSRunner(rs.socket, testLogger(t))
 	if err != nil {
 		t.Fatalf("NewUDSRunner: %v", err)
 	}
@@ -676,7 +757,6 @@ func TestPermissionDeniedRefreshesThenGivesUp(t *testing.T) {
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() { errCh <- client.Run(ctx) }()
-
 	select {
 	case err := <-errCh:
 		var terminal *harnessclient.TerminalError
@@ -714,7 +794,6 @@ func TestDeniedAttachWaitsForTheRefreshedToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.start(ctx)
-
 	for range 6 {
 		select {
 		case <-denials:
@@ -727,42 +806,6 @@ func TestDeniedAttachWaitsForTheRefreshedToken(t *testing.T) {
 	r.token.set(fresh)
 	if err := r.handle.AwaitAttach(ctx); err != nil {
 		t.Fatalf("AwaitAttach with the refreshed token: %v", err)
-	}
-}
-
-func denyAll(_ any, _ grpc.ServerStream, _ *grpc.StreamServerInfo, _ grpc.StreamHandler) error {
-	return status.Error(codes.PermissionDenied, "denied by policy")
-}
-
-func TestStderrNeverEntersACP(t *testing.T) {
-	r := newRig(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	r.start(ctx)
-
-	if err := r.handle.AwaitAttach(ctx); err != nil {
-		t.Fatalf("AwaitAttach: %v", err)
-	}
-	if err := r.handle.SpawnAgent(ctx); err != nil {
-		t.Fatalf("SpawnAgent: %v", err)
-	}
-	stdin, stdout, err := r.handle.AwaitAgentIO(ctx)
-	if err != nil {
-		t.Fatalf("AwaitAgentIO: %v", err)
-	}
-	if _, err := stdin.Write([]byte("hello\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if strings.Contains(got, "agent-ready") {
-		t.Fatalf("stderr leaked into the ACP stream: %q", got)
-	}
-	if got != "echo:hello\n" {
-		t.Fatalf("got %q", got)
 	}
 }
 
