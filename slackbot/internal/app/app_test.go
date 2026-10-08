@@ -403,6 +403,25 @@ func TestATurnEndRecordsHowFarTheThreadGot(t *testing.T) {
 	})
 }
 
+func TestAFailedLaunchMarksTheRequestFailed(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+
+	f.api.setState("sess-1", api.StatePending, api.StateEnded, noReason)
+	f.api.emit("sess-1", "", &pb.SessionEnded{Reason: api.EndPrepareFailed})
+	f.poster.waitForPost(t, "couldn't get a workspace ready")
+
+	waitFor(t, "the failure reaction", func() bool {
+		for _, r := range f.poster.reactionsOn(threadRoot, "x") {
+			if r.add {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
