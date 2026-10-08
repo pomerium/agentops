@@ -29,6 +29,9 @@ type sessionMeta struct {
 	Watching bool  `json:"watching,omitempty"`
 	LastSeq  int64 `json:"last_seq,omitempty"`
 
+	AnswerTurn string `json:"answer_turn,omitempty"`
+	AnswerTS   string `json:"answer_ts,omitempty"`
+
 	statusText string
 }
 
