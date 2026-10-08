@@ -245,8 +245,36 @@ func (a *App) followAgain(ctx context.Context, view *pb.SessionView) bool {
 	if ok, _ := a.registerThread(t); !ok {
 		return false
 	}
-	a.startConsumer(t, "", m.LastSeq)
+	after := a.turnStartBefore(ctx, view.GetId(), m.LastSeq)
+	a.startConsumer(t, "", after)
 	a.log.InfoContext(ctx, "startup reconcile: following a live session again",
-		"session", view.GetId(), "state", view.GetState(), "after_seq", m.LastSeq)
+		"session", view.GetId(), "state", view.GetState(), "after_seq", after)
 	return true
+}
+
+func (a *App) turnStartBefore(ctx context.Context, sessionID string, cursor int64) int64 {
+	boundary, inTurn, after := int64(0), false, int64(0)
+	for after < cursor {
+		res, err := a.api.ListEvents(ctx, &pb.ListEventsRequest{Ref: a.ref(sessionID), AfterSeq: after})
+		if err != nil {
+			a.log.WarnContext(ctx, "startup reconcile: could not read a session's history; resuming from its saved cursor",
+				"session", sessionID, "err", err)
+			return cursor
+		}
+		events := res.GetEvents()
+		if len(events) == 0 {
+			break
+		}
+		for _, ev := range events {
+			if ev.GetSeq() > cursor {
+				return boundary
+			}
+			var atBoundary bool
+			if atBoundary, inTurn = turnBoundary(ev, inTurn); atBoundary {
+				boundary = ev.GetSeq()
+			}
+			after = ev.GetSeq()
+		}
+	}
+	return boundary
 }
