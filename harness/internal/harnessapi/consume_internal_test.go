@@ -523,3 +523,37 @@ func TestAPermissionThatIsNeverRecordedIsNotAnswerable(t *testing.T) {
 		t.Errorf("pending requests = %v, want none for a request that was never recorded", got)
 	}
 }
+
+func TestAReplayDoesNotReopenAnAnsweredPermission(t *testing.T) {
+	ctx := apiserver.WithClientID(context.Background(), "client")
+	svc, st := runningService(t, quietLauncher{})
+	svc.templates = anyClient{}
+	b := svc.lookup("s1")
+	live := &decisionLog{}
+	b.session = live
+	b.sink.permTimeout = time.Hour
+	req := &agentlinkpb.PermissionRequest{
+		RequestId: "request", TurnId: "t1", Options: []*agentlinkpb.PermissionOption{{Id: "allow"}},
+	}
+	b.sink.await(req, b.sink.deadline(), func(id string) { svc.expirePermission(context.Background(), b, id) })
+	answered := make(chan error, 1)
+	svc.store = commandsHook{Store: st, hook: func() {
+		go func() {
+			_, err := svc.RespondPermission(ctx, &pb.RespondPermissionRequest{
+				Ref: &pb.SessionRef{SessionId: "s1"}, RequestId: "request", OptionId: "allow",
+			})
+			answered <- err
+		}()
+		time.Sleep(100 * time.Millisecond)
+	}}
+
+	svc.reconcileState(ctx, b, &agentlinkpb.AgentState{PendingPermissions: []*agentlinkpb.PermissionRequest{req}})
+	if err := <-answered; err != nil {
+		t.Fatalf("RespondPermission: %v", err)
+	}
+	svc.expirePermission(ctx, b, "request")
+
+	if got := live.sent(); len(got) != 1 || got[0].GetOptionId() != "allow" || got[0].GetCancelled() {
+		t.Fatalf("decisions sent = %v, want only the accepted choice", got)
+	}
+}

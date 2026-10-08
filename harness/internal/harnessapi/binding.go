@@ -28,6 +28,8 @@ type binding struct {
 	closed bool
 	turns  []string
 
+	permMu sync.Mutex
+
 	sendMu  sync.Mutex
 	gated   bool
 	syncing bool

@@ -219,8 +219,12 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 	b.sendMu.Unlock()
 	var cmds []sessionstore.PodCommand
 	err := s.whileBound(ctx, b, func(ctx context.Context) error {
+		b.permMu.Lock()
 		var err error
 		cmds, err = s.store.ListPodCommands(ctx, b.sessionID)
+		if err != nil {
+			b.permMu.Unlock()
+		}
 		return err
 	}, func(err error, wait time.Duration) {
 		s.log.WarnContext(ctx, "could not read the commands the agent may not have; new turns wait",
@@ -230,6 +234,7 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 		s.log.WarnContext(ctx, "gave up reading the commands the agent may not have", "session", b.sessionID, "err", err)
 		return
 	}
+	defer b.permMu.Unlock()
 	b.sendMu.Lock()
 	outstanding := slices.Clone(st.GetOutstandingTurnIds())
 	pending := map[string]*agentlinkpb.PermissionRequest{}
@@ -341,6 +346,8 @@ func (s *Service) saveDecision(ctx context.Context, b *binding, turnID, requestI
 }
 
 func (s *Service) expirePermission(ctx context.Context, b *binding, requestID string) {
+	b.permMu.Lock()
+	defer b.permMu.Unlock()
 	w, ok := b.sink.take(requestID)
 	if !ok {
 		return

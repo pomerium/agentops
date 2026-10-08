@@ -390,6 +390,8 @@ func (s *Service) RespondPermission(ctx context.Context, req *pb.RespondPermissi
 	if b == nil {
 		return nil, api.Errorf(api.ErrUnknownRequest, "session %s is not live", sess.ID)
 	}
+	b.permMu.Lock()
+	defer b.permMu.Unlock()
 	if err := b.sink.validate(req.GetRequestId(), req.GetOptionId()); err != nil {
 		return nil, err
 	}
