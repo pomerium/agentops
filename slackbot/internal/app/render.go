@@ -191,6 +191,10 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 }
 
 func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.StateChanged) {
+	if p.GetNew() == api.StateEnded {
+		from := p.GetOld()
+		t.endedFrom.Store(&from)
+	}
 	t.setState(p.GetNew())
 	switch p.GetNew() {
 	case api.StateAwaitingApproval:
@@ -224,8 +228,12 @@ func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.St
 
 func (a *App) renderEnded(ctx context.Context, t *thread, ackTS string, p *pb.SessionEnded) {
 	a.clearIdleWarning(ctx, t, msgIdleClosed)
-	if t.currentState() == api.StateRunning || t.currentState() == api.StatePending ||
-		t.currentState() == api.StateLaunching || t.currentState() == api.StateAwaitingApproval {
+	from := t.currentState()
+	if f := t.endedFrom.Load(); f != nil {
+		from = *f
+	}
+	switch from {
+	case api.StateRunning, api.StatePending, api.StateLaunching, api.StateAwaitingApproval:
 		a.swapReaction(ctx, t.channel, ackTS, reactionStarting, endReaction(p.GetReason()))
 	}
 	t.setState(api.StateEnded)
