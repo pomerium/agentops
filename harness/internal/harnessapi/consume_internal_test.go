@@ -659,3 +659,38 @@ func TestClosingBindingCancelsPodWrite(t *testing.T) {
 		t.Fatal("closed binding did not cancel its stalled pod write")
 	}
 }
+
+func TestAReconnectClosesAPermissionTheRunnerNoLongerWaitsFor(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	if !svc.handleEvent(ctx, b, permissionEvent(2, "request")) {
+		t.Fatal("the request was not recorded")
+	}
+
+	svc.reconcileState(ctx, b, &agentlinkpb.AgentState{})
+
+	evs, err := svc.events.History(ctx, "s1", 0, 100)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	var resolved *pb.PermissionResolved
+	for _, ev := range evs {
+		if r := ev.GetPermissionResolved(); r.GetRequestId() == "request" {
+			resolved = r
+		}
+	}
+	if resolved.GetUnanswered() != api.ResolutionSuperseded {
+		t.Errorf("resolution of a request the runner dropped = %v, want %v", resolved, api.ResolutionSuperseded)
+	}
+	if b.sink.has("request") {
+		t.Error("the request is still answerable")
+	}
+	cmds, err := st.ListPodCommands(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListPodCommands: %v", err)
+	}
+	if len(cmds) != 0 {
+		t.Errorf("saved commands = %v, want none for a closed request", cmds)
+	}
+}

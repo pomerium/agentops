@@ -309,8 +309,18 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 		waiting[req.GetRequestId()] = true
 	}
 	for _, id := range b.sink.pending() {
-		if !waiting[id] {
-			b.sink.take(id)
+		if waiting[id] {
+			continue
+		}
+		w, ok := b.sink.take(id)
+		if !ok {
+			continue
+		}
+		s.emit(ctx, b.sessionID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
+			RequestId: id, Resolution: unanswered(api.ResolutionSuperseded).GetResolution(),
+		}}})
+		if err := s.store.DeletePodCommand(ctx, b.sessionID, commandPermission, id); err != nil {
+			s.log.WarnContext(ctx, "could not clear the decision of a request the agent dropped", "session", b.sessionID, "request_id", id, "err", err)
 		}
 	}
 }
