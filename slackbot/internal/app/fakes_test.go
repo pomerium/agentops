@@ -600,7 +600,7 @@ func (p *fakePoster) ThreadReplies(_ context.Context, _, threadTS, since string,
 		p.failReads--
 		return nil, errors.New("slack is unavailable")
 	}
-	if p.tooLong && since == "" {
+	if p.tooLong && since == "" && max <= 3000 {
 		return nil, errors.New("the thread has more replies than one read covers")
 	}
 	out := append([]slack.Message(nil), p.replies...)

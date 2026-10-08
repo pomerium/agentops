@@ -478,6 +478,23 @@ func TestAPausedSessionInAVeryLongThreadCanContinue(t *testing.T) {
 	}
 }
 
+func TestAPausedSessionWithNoKnownStartInAVeryLongThreadCanContinue(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+	f.poster.mu.Lock()
+	f.poster.tooLong = true
+	f.poster.mu.Unlock()
+
+	for range 2 {
+		f.app.HandleMention(context.Background(), mentionIn(f, "U1", "continue"))
+	}
+	if len(f.api.promptRequests()) == 0 {
+		t.Fatal("a long thread kept the paused session from continuing")
+	}
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
