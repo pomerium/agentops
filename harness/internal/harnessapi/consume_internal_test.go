@@ -229,3 +229,69 @@ func TestShutdownStopsThePermissionTimers(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+type flakyCommands struct {
+	Store
+	failures atomic.Int32
+}
+
+func (s *flakyCommands) ListPodCommands(ctx context.Context, sessionID string) ([]sessionstore.PodCommand, error) {
+	if s.failures.Load() > 0 {
+		s.failures.Add(-1)
+		return nil, errors.New("database unavailable")
+	}
+	return s.Store.ListPodCommands(ctx, sessionID)
+}
+
+func TestAFailedOutboxReadHoldsNewTurnsUntilTheReplayIsDone(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	older, n, err := svc.nextTurn(ctx, "s1")
+	if err != nil {
+		t.Fatalf("nextTurn: %v", err)
+	}
+	b.enter(older)
+	svc.sendPrompt(ctx, b, older, uint64(n), "first")
+
+	live := &promptProbe{}
+	b.session = live
+	sess, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	commands := &flakyCommands{Store: st}
+	commands.failures.Store(3)
+	svc.store = commands
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.reconcileState(ctx, b, &agentlinkpb.AgentState{})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for commands.failures.Load() == 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("the outbox was never read")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	newer, err := svc.startTurn(ctx, sess, "second")
+	if err != nil {
+		t.Fatalf("startTurn: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the replay never finished")
+	}
+
+	if got, want := live.acceptedTurns(), []string{older, newer}; !slices.Equal(got, want) {
+		t.Errorf("turns the agent accepted = %v, want %v", got, want)
+	}
+	for _, id := range []string{older, newer} {
+		if !slices.Contains(b.outstanding(), id) {
+			t.Errorf("outstanding = %v, want it to keep %s", b.outstanding(), id)
+		}
+	}
+}

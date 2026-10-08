@@ -1,7 +1,6 @@
 package harnessapi
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -161,6 +160,19 @@ func (s *Service) advancePod(ctx context.Context, b *binding, seq uint64) bool {
 }
 
 func (s *Service) recordPod(ctx context.Context, b *binding, seq uint64, record func(ctx context.Context) error) bool {
+	err := s.whileBound(ctx, b, record, func(err error, wait time.Duration) {
+		s.log.WarnContext(ctx, "could not record an agent event; retrying before the ack",
+			"session", b.sessionID, "seq", seq, "retry_in", wait, "err", err)
+	})
+	if err != nil {
+		s.log.WarnContext(ctx, "an agent event was not recorded and stays unacked; the pod sends it again on the next stream",
+			"session", b.sessionID, "seq", seq, "err", err)
+		return false
+	}
+	return true
+}
+
+func (s *Service) whileBound(ctx context.Context, b *binding, op func(ctx context.Context) error, notify backoff.Notify) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -175,29 +187,33 @@ func (s *Service) recordPod(ctx context.Context, b *binding, seq uint64, record 
 	policy.InitialInterval = podRetryInitial
 	policy.MaxInterval = podRetryMax
 	_, err := backoff.Retry(ctx, func() (struct{}, error) {
-		err := record(ctx)
+		err := op(ctx)
 		if errors.Is(err, sessionstore.ErrNotFound) {
 			return struct{}{}, backoff.Permanent(err)
 		}
 		return struct{}{}, err
-	}, backoff.WithBackOff(policy), backoff.WithMaxElapsedTime(0), backoff.WithNotify(func(err error, wait time.Duration) {
-		s.log.WarnContext(ctx, "could not record an agent event; retrying before the ack",
-			"session", b.sessionID, "seq", seq, "retry_in", wait, "err", err)
-	}))
-	if err != nil {
-		s.log.WarnContext(ctx, "an agent event was not recorded and stays unacked; the pod sends it again on the next stream",
-			"session", b.sessionID, "seq", seq, "err", err)
-		return false
-	}
-	return true
+	}, backoff.WithBackOff(policy), backoff.WithMaxElapsedTime(0), backoff.WithNotify(notify))
+	return err
 }
 
 func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkpb.AgentState) {
 	b.sendMu.Lock()
-	cmds, err := s.store.ListPodCommands(ctx, b.sessionID)
+	b.syncing = true
+	b.sendMu.Unlock()
+	var cmds []sessionstore.PodCommand
+	err := s.whileBound(ctx, b, func(ctx context.Context) error {
+		var err error
+		cmds, err = s.store.ListPodCommands(ctx, b.sessionID)
+		return err
+	}, func(err error, wait time.Duration) {
+		s.log.WarnContext(ctx, "could not read the commands the agent may not have; new turns wait",
+			"session", b.sessionID, "retry_in", wait, "err", err)
+	})
 	if err != nil {
-		s.log.WarnContext(ctx, "could not read the commands the agent may not have", "session", b.sessionID, "err", err)
+		s.log.WarnContext(ctx, "gave up reading the commands the agent may not have", "session", b.sessionID, "err", err)
+		return
 	}
+	b.sendMu.Lock()
 	outstanding := slices.Clone(st.GetOutstandingTurnIds())
 	pending := map[string]*agentlinkpb.PermissionRequest{}
 	for _, req := range st.GetPendingPermissions() {
@@ -230,7 +246,6 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 		}
 	}
 
-	slices.SortFunc(resend, func(x, y *agentlinkpb.Prompt) int { return cmp.Compare(x.GetTurnSeq(), y.GetTurnSeq()) })
 	for _, p := range resend {
 		outstanding = append(outstanding, p.GetTurnId())
 	}
@@ -240,12 +255,14 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 		}
 	}
 	b.setOutstanding(outstanding)
-	if !b.gated {
-		for _, p := range resend {
+	for _, p := range resend {
+		if !slices.ContainsFunc(b.held, func(h *agentlinkpb.Prompt) bool { return h.GetTurnId() == p.GetTurnId() }) {
 			s.log.InfoContext(ctx, "sending a turn the agent did not receive", "session", b.sessionID, "turn_id", p.GetTurnId())
-			b.session.Prompt(p.GetTurnId(), p.GetTurnSeq(), p.GetText())
+			b.held = append(b.held, p)
 		}
 	}
+	b.syncing = false
+	b.release()
 	b.sendMu.Unlock()
 
 	for _, req := range pending {
@@ -271,11 +288,8 @@ func (s *Service) dropCommand(ctx context.Context, c sessionstore.PodCommand) {
 func (s *Service) sendPrompt(ctx context.Context, b *binding, turnID string, turnSeq uint64, text string) {
 	p := &agentlinkpb.Prompt{TurnId: turnID, TurnSeq: turnSeq, Text: text}
 	defer func() {
-		if b.gated {
-			b.held = append(b.held, p)
-			return
-		}
-		b.session.Prompt(turnID, turnSeq, text)
+		b.held = append(b.held, p)
+		b.release()
 	}()
 	payload, err := proto.Marshal(p)
 	if err == nil {
@@ -293,11 +307,7 @@ func (s *Service) ungate(b *binding) {
 	b.sendMu.Lock()
 	defer b.sendMu.Unlock()
 	b.gated = false
-	slices.SortFunc(b.held, func(x, y *agentlinkpb.Prompt) int { return cmp.Compare(x.GetTurnSeq(), y.GetTurnSeq()) })
-	for _, p := range b.held {
-		b.session.Prompt(p.GetTurnId(), p.GetTurnSeq(), p.GetText())
-	}
-	b.held = nil
+	b.release()
 }
 
 func (s *Service) decide(ctx context.Context, b *binding, turnID, requestID, optionID string, cancelled bool) {

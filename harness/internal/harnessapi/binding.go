@@ -1,6 +1,7 @@
 package harnessapi
 
 import (
+	"cmp"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -27,9 +28,10 @@ type binding struct {
 	closed bool
 	turns  []string
 
-	sendMu sync.Mutex
-	gated  bool
-	held   []*agentlinkpb.Prompt
+	sendMu  sync.Mutex
+	gated   bool
+	syncing bool
+	held    []*agentlinkpb.Prompt
 
 	lastActivity atomic.Int64
 
@@ -50,6 +52,17 @@ func newBinding(sessionID, claimName string, session LiveSession, sink *logSink)
 	}
 	b.touch()
 	return b
+}
+
+func (b *binding) release() {
+	if b.gated || b.syncing {
+		return
+	}
+	slices.SortFunc(b.held, func(x, y *agentlinkpb.Prompt) int { return cmp.Compare(x.GetTurnSeq(), y.GetTurnSeq()) })
+	for _, p := range b.held {
+		b.session.Prompt(p.GetTurnId(), p.GetTurnSeq(), p.GetText())
+	}
+	b.held = nil
 }
 
 func (b *binding) touch() {
