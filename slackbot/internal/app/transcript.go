@@ -232,14 +232,20 @@ func labelFor(role string) string {
 	}
 }
 
+const threadStartCursor = "0"
+
 func composeJoinPrompt(entries []transcriptEntry, flags carryoverFlags, request string) string {
 	if request == "" {
 		return ""
 	}
+	return withCatchup(composeJoinBlock(entries, flags.truncated), request)
+}
+
+func composeJoinBlock(entries []transcriptEntry, truncated bool) string {
 	if len(entries) == 0 {
-		return request
+		return ""
 	}
-	return joinFraming + "\n\n" + quoteConversation(entries, flags.truncated) + "\n\nThe request: " + request
+	return joinFraming + "\n\n" + quoteConversation(entries, truncated)
 }
 
 func composeCatchupBlock(entries []transcriptEntry, truncated bool) string {

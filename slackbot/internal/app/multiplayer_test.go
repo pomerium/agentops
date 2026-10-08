@@ -192,6 +192,36 @@ func TestACatchupInAThreadTooLongToReadWholeStillCarriesNewMessages(t *testing.T
 	}
 }
 
+func TestABareJoinsFirstRequestCarriesTheThreadSoFar(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	liveThread(t, f)
+	f.humanSaid("U9", "staging must stay stopped")
+
+	f.app.HandleMention(ctx, mentionIn(f, "U2", ""))
+	f.poster.waitForPost(t, "joined with their own agent")
+	f.api.setState("sess-2", api.StatePending, api.StateRunning, noReason)
+	waitForState(t, f, "sess-2", api.StateRunning)
+	if got := f.api.createRequests()[1].InitialPrompt; got != "" {
+		t.Fatalf("a bare join started a turn: %q", got)
+	}
+
+	f.app.HandleMention(ctx, mentionIn(f, "U2", "what should we do?"))
+	waitFor(t, "the first request", func() bool { return len(f.api.promptRequests()) == 1 })
+	got := f.api.promptRequests()[0].Content
+	for _, want := range []string{"You are joining a Slack thread", "staging must stay stopped", "The request: what should we do?"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the first request after a bare join is missing %q:\n%s", want, got)
+		}
+	}
+
+	f.app.HandleMention(ctx, mentionIn(f, "U2", "and then?"))
+	waitFor(t, "the second request", func() bool { return len(f.api.promptRequests()) == 2 })
+	if got := f.api.promptRequests()[1].Content; strings.Contains(got, "staging must stay stopped") {
+		t.Errorf("the second request carried the thread again:\n%s", got)
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
