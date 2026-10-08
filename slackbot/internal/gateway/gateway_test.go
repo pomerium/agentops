@@ -508,3 +508,56 @@ func TestALongPermissionOptionNameFitsItsButton(t *testing.T) {
 		t.Fatalf("the button label has %d characters; Slack rejects more than 75", n)
 	}
 }
+
+type blockedApp struct {
+	fakeApp
+	started, release chan struct{}
+}
+
+func (a *blockedApp) HandleMention(context.Context, gateway.MentionInvocation) {
+	close(a.started)
+	<-a.release
+}
+
+func TestWaitHoldsUntilAcknowledgedActionsFinish(t *testing.T) {
+	app := &blockedApp{started: make(chan struct{}), release: make(chan struct{})}
+	srv := newServer(app)
+	body := []byte(`{"type":"event_callback","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","text":"<@U0BOT> ship it","ts":"1700000000.0001"}}`)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, signedRequest(t, "/slack/events", "application/json", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	<-app.started
+
+	waited := make(chan error, 1)
+	go func() { waited <- srv.Wait(context.Background()) }()
+	select {
+	case <-waited:
+		t.Fatal("Wait returned while an acknowledged mention was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(app.release)
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after the mention finished")
+	}
+}
+
+func TestWaitGivesUpAtItsDeadline(t *testing.T) {
+	app := &blockedApp{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(app.release)
+	srv := newServer(app)
+	body := []byte(`{"type":"event_callback","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","text":"<@U0BOT> ship it","ts":"1700000000.0001"}}`)
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), signedRequest(t, "/slack/events", "application/json", body))
+	<-app.started
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := srv.Wait(ctx); err == nil {
+		t.Fatal("Wait returned no error with an action still running past its deadline")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -65,6 +66,7 @@ type Server struct {
 	app           App
 	log           *slog.Logger
 	tel           *telemetry.Component
+	inflight      sync.WaitGroup
 }
 
 func New(signingSecret string, app App, opts ...Option) *Server {
@@ -74,6 +76,28 @@ func New(signingSecret string, app App, opts ...Option) *Server {
 	}
 	s.tel = telemetry.New(s.log, "gateway", slog.LevelDebug)
 	return s
+}
+
+func (s *Server) dispatch(action func()) {
+	s.inflight.Add(1)
+	go func() {
+		defer s.inflight.Done()
+		action()
+	}()
+}
+
+func (s *Server) Wait(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -214,7 +238,7 @@ func (s *Server) handleMessageEvent(ctx context.Context, event slackevents.Event
 		}
 		s.tel.Debug(ctx, "dispatching app mention", "user", in.UserID, "channel", in.ChannelID,
 			"thread_ts", in.ThreadTS, "origin_thread_ts", in.OriginThreadTS)
-		go s.app.HandleMention(context.WithoutCancel(ctx), in)
+		s.dispatch(func() { s.app.HandleMention(context.WithoutCancel(ctx), in) })
 		return
 	}
 
@@ -229,7 +253,7 @@ func (s *Server) handleMessageEvent(ctx context.Context, event slackevents.Event
 		}
 		s.tel.Debug(ctx, "dispatching thread message",
 			"user", tm.UserID, "channel", tm.ChannelID, "thread_ts", tm.ThreadTS)
-		go s.app.HandleMessage(context.WithoutCancel(ctx), tm)
+		s.dispatch(func() { s.app.HandleMessage(context.WithoutCancel(ctx), tm) })
 		return
 	}
 
@@ -278,7 +302,7 @@ func (s *Server) handleInteractivity(w http.ResponseWriter, r *http.Request) {
 			Value:       action.Value,
 			ResponseURL: cb.ResponseURL,
 		}
-		go s.app.HandleInteraction(context.WithoutCancel(r.Context()), in)
+		s.dispatch(func() { s.app.HandleInteraction(context.WithoutCancel(r.Context()), in) })
 	}
 	w.WriteHeader(http.StatusOK)
 }
