@@ -178,7 +178,10 @@ func run(log *slog.Logger) error {
 	}
 	defer stopAgentLink()
 
-	<-api.ReconcileOnStartup(ctx)
+	if !awaitReconcile(ctx, api.ReconcileOnStartup(ctx)) {
+		log.Info("shutting down during startup reconcile")
+		return nil
+	}
 	linkSrv.EndStartupHold()
 	go runSweeper(ctx, api)
 
@@ -191,6 +194,15 @@ func run(log *slog.Logger) error {
 	<-ctx.Done()
 	log.Info("shutting down")
 	return nil
+}
+
+func awaitReconcile(ctx context.Context, reconciled <-chan struct{}) bool {
+	select {
+	case <-reconciled:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func serveClientAPI(ctx context.Context, cfg config.Config, impl *harnessapi.Service,

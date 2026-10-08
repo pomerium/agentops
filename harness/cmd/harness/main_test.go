@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,4 +34,23 @@ func TestServeClientAPI_OccupiedPort(t *testing.T) {
 			assert.ErrorContains(t, err, occupied.Addr().String())
 		})
 	}
+}
+
+func TestShutdownDuringAStalledReconcileDoesNotWaitForIt(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	stalled := make(chan struct{})
+	done := make(chan bool, 1)
+	go func() { done <- awaitReconcile(ctx, stalled) }()
+	cancel()
+	select {
+	case finished := <-done:
+		assert.False(t, finished)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the startup wait ignored the shutdown")
+	}
+
+	reconciled := make(chan struct{})
+	close(reconciled)
+	assert.True(t, awaitReconcile(context.Background(), reconciled))
 }
