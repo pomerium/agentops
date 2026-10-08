@@ -342,3 +342,48 @@ func TestARetriedFinalAnswerPostsTheMissingBeginning(t *testing.T) {
 		t.Fatalf("only %d of the answer's two pieces reached Slack", p.accepted)
 	}
 }
+
+type replayApprovalAPI struct {
+	harnessapipbconnect.HarnessAPIServiceClient
+	ends int
+}
+
+func (c *replayApprovalAPI) EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
+	c.ends++
+	return &pb.EndSessionResponse{}, nil
+}
+
+type replayApprovalPoster struct {
+	Poster
+	dms int
+}
+
+func (p *replayApprovalPoster) PostDM(context.Context, string, ...slack.MsgOption) (string, string, error) {
+	p.dms++
+	return "", "", errors.New("connection lost")
+}
+
+func (*replayApprovalPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	return "status", nil
+}
+
+func TestAReplayedApprovalRequestDoesNotTouchARunningSession(t *testing.T) {
+	c := &replayApprovalAPI{}
+	p := &replayApprovalPoster{}
+	a := New(c, p, nil)
+	th := threadFromMeta(&pb.SessionView{Id: "s1", State: api.StateRunning, LastSeq: 3},
+		sessionMeta{ChannelID: "C1", ThreadTS: "1.0", TeamID: "T1", UserID: "U1"})
+	th.threadLink = "https://slack.example/thread"
+	th.replayThrough = 3
+	ctx := context.Background()
+
+	a.renderEvent(ctx, th, "", &pb.Event{Seq: 1, Payload: &pb.Event_StateChanged{
+		StateChanged: &pb.StateChanged{Old: api.StateLaunching, New: api.StateAwaitingApproval},
+	}})
+	a.renderEvent(ctx, th, "", &pb.Event{Seq: 2, Payload: &pb.Event_ApprovalRequired{
+		ApprovalRequired: &pb.ApprovalRequired{ApprovalUrl: "https://approval.example/run"},
+	}})
+	if c.ends != 0 || p.dms != 0 {
+		t.Fatalf("replaying an old approval request sent %d DMs and ended the running session %d times", p.dms, c.ends)
+	}
+}
