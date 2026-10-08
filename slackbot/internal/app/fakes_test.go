@@ -475,6 +475,14 @@ func (p *fakePoster) PostMessage(_ context.Context, channelID string, opts ...sl
 	return ts, nil
 }
 
+func (p *fakePoster) PostDM(ctx context.Context, userID string, opts ...slack.MsgOption) (string, string, error) {
+	ts, err := p.PostMessage(ctx, userID, opts...)
+	if err != nil {
+		return "", "", err
+	}
+	return "D" + userID, ts, nil
+}
+
 func botMessage(ts, threadTS, text string, meta slack.SlackMetadata) slack.Message {
 	m := slack.Message{}
 	m.BotID = "B1"
@@ -497,6 +505,9 @@ func (p *fakePoster) PostEphemeral(_ context.Context, channelID, userID string, 
 func (p *fakePoster) UpdateMessage(_ context.Context, channelID, ts string, opts ...slack.MsgOption) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if strings.HasPrefix(channelID, "U") {
+		return "", errors.New("message_not_found")
+	}
 	sent := renderOptions(channelID, opts)
 	p.updates = append(p.updates, updateRecord{
 		channel: channelID, ts: ts, text: sent.text, meta: sent.meta, blocks: sent.blocks,

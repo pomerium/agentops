@@ -187,6 +187,20 @@ func TestApprovalIsDeliveredByDM(t *testing.T) {
 	}
 }
 
+func TestTheApprovalDMSaysApprovedOnceTheSessionRuns(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+	f.api.emit("sess-1", "", &pb.ApprovalRequired{ApprovalUrl: "https://pom.example/approve?run_id=run-1"})
+	dm := f.poster.waitForPost(t, "Approve it and I'll start")
+
+	f.api.setState("sess-1", api.StatePending, api.StateRunning, noReason)
+	done := f.poster.waitForUpdate(t, "Approved")
+	if done.ts != dm.ts || done.channel != "DU1" {
+		t.Errorf("the approval DM was edited as %s/%s, want %s in the DM channel DU1", done.channel, done.ts, dm.ts)
+	}
+}
+
 func TestPlainReplyFromANonParticipantIsDiscussion(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

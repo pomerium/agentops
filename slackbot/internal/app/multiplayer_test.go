@@ -416,9 +416,9 @@ func TestMultiplayerIdleWarningGoesToDM(t *testing.T) {
 	}
 
 	f.app.HandleMention(ctx, mentionIn(f, "U2", "still here"))
-	waitFor(t, "the idle warning to be withdrawn", func() bool {
+	waitFor(t, "the idle warning to be withdrawn in its DM channel", func() bool {
 		for _, u := range f.poster.updatesTo(warning.ts) {
-			if strings.Contains(u.text, "Never mind") {
+			if strings.Contains(u.text, "Never mind") && u.channel == "DU2" {
 				return true
 			}
 		}
