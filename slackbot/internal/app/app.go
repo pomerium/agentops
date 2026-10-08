@@ -268,7 +268,13 @@ func (a *App) hintNoLiveSession(ctx context.Context, in gateway.ThreadMessage) {
 	}
 	var m sessionMeta
 	if sess.GetState() == api.StateSuspended {
-		m, _ = a.loadMeta(ctx, sess)
+		var err error
+		m, err = a.loadMeta(ctx, sess)
+		if err != nil && !errors.Is(err, errNoSlackState) {
+			a.log.WarnContext(ctx, "could not read a paused session's thread; leaving the plain reply alone",
+				"session", sess.GetId(), "err", err)
+			return
+		}
 	}
 	switch {
 	case sess.GetState() == api.StateSuspended && !m.Multiplayer:
