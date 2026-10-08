@@ -117,9 +117,9 @@ type Client struct {
 	statusCh   chan *agentlinkpb.Status
 	ioSlot     chan struct{}
 	configured sync.Once
-	joined     sync.Once
 
 	mu      sync.Mutex
+	joined  bool
 	agent   *AgentSession
 	spawn   *pendingSpawn
 	stopped bool
@@ -204,28 +204,34 @@ func (c *Client) Fail(reason string) {
 	}
 }
 
-func (c *Client) joinRunningAgent(ctx context.Context) {
-	c.joined.Do(func() {
-		ctx, cancel := context.WithTimeout(ctx, joinTimeout)
-		defer cancel()
-		ag, err := c.cfg.Runner.Join(ctx)
-		switch {
-		case err == nil:
-			if c.adopt(ag) {
-				c.log.Info("harness: joined the agent session that the runner holds", "pid", ag.PID)
-			} else {
-				ag.Close()
-			}
-		case errors.Is(err, ErrNoAgent):
-		default:
-			c.log.Debug("harness: could not ask the runner for an agent session", "err", err)
+func (c *Client) joinRunningAgent(ctx context.Context) error {
+	c.mu.Lock()
+	joined := c.joined
+	c.mu.Unlock()
+	if joined {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, joinTimeout)
+	defer cancel()
+	ag, err := c.cfg.Runner.Join(ctx)
+	switch {
+	case err == nil:
+		if c.adopt(ag) {
+			c.log.Info("harness: joined the agent session that the runner holds", "pid", ag.PID)
+		} else {
+			ag.Close()
 		}
-	})
+	case errors.Is(err, ErrNoAgent):
+	default:
+		return fmt.Errorf("ask the runner for its agent session: %v", err)
+	}
+	c.mu.Lock()
+	c.joined = true
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *Client) Run(ctx context.Context) error {
-	c.joinRunningAgent(ctx)
-
 	policy := backoff.NewExponentialBackOff()
 	policy.InitialInterval = c.cfg.BaseBackoff
 	policy.MaxInterval = c.cfg.MaxBackoff
@@ -236,6 +242,12 @@ func (c *Client) Run(ctx context.Context) error {
 	var attempt uint32
 
 	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		if err := c.joinRunningAgent(ctx); err != nil {
+			if ctx.Err() != nil {
+				return struct{}{}, backoff.Permanent(ctx.Err())
+			}
+			return struct{}{}, err
+		}
 		attempt++
 		bearer := c.cfg.Token.Bearer()
 		err := c.session(ctx, attempt, bearer)

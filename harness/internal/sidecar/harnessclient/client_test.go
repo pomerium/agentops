@@ -824,3 +824,50 @@ func TestAnIdleLinkWaitsForTheManagersAdvertisedHeartbeat(t *testing.T) {
 	case <-time.After(1500 * time.Millisecond):
 	}
 }
+
+type flakyJoin struct {
+	harnessclient.Runner
+	mu       sync.Mutex
+	failures int
+}
+
+func (r *flakyJoin) Join(ctx context.Context) (*harnessclient.AgentSession, error) {
+	r.mu.Lock()
+	fail := r.failures > 0
+	if fail {
+		r.failures--
+	}
+	r.mu.Unlock()
+	if fail {
+		return nil, status.Error(codes.Unavailable, "the runner is restarting")
+	}
+	return r.Runner.Join(ctx)
+}
+
+func TestARestartedSidecarRetriesAJoinThatFailsBeforeItAttaches(t *testing.T) {
+	running := make(chan bool, 8)
+	r := newRig(t, agentlink.WithOnAttached(func(_ uint32, agentRunning bool) { running <- agentRunning }))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	firstCtx, crash := context.WithCancel(ctx)
+	defer crash()
+	r.start(firstCtx)
+	r.spawn(ctx)
+	r.nextEvent()
+	<-running
+
+	crash()
+	<-r.runErr
+
+	second := r.newClient(t, &flakyJoin{Runner: r.udsRunner(t), failures: 2})
+	t.Cleanup(second.Close)
+	go func() { _ = second.Run(ctx) }()
+	select {
+	case agentRunning := <-running:
+		if !agentRunning {
+			t.Fatal("the restarted sidecar reported no agent after a Join that failed for a moment")
+		}
+	case <-ctx.Done():
+		t.Fatal("the restarted sidecar never attached")
+	}
+}
