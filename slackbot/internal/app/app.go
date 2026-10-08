@@ -378,7 +378,7 @@ func (a *App) sendTurn(ctx context.Context, t *thread, text, triggerTS, messageT
 		return err
 	}
 	if read {
-		a.advanceCursor(ctx, t, triggerTS)
+		a.advanceCursor(ctx, t, cmp.Or(triggerTS, messageTS))
 	}
 	return nil
 }
@@ -438,10 +438,11 @@ func tsBefore(ts string, d time.Duration) string {
 }
 
 func (a *App) advanceCursor(ctx context.Context, t *thread, triggerTS string) {
-	if triggerTS == "" || !t.multiplayer() {
+	if triggerTS == "" || t.meta().LastSeenTS >= triggerTS {
 		return
 	}
-	if t.meta().LastSeenTS >= triggerTS {
+	if !t.multiplayer() {
+		t.applyMeta(func(m *sessionMeta) { m.LastSeenTS = triggerTS })
 		return
 	}
 	a.saveMeta(ctx, t, func(m *sessionMeta) { m.LastSeenTS = triggerTS })
