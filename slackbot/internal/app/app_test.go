@@ -2,10 +2,12 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -280,6 +282,40 @@ func TestAPermissionChoiceWithAVeryLongIDStillReachesTheHarness(t *testing.T) {
 	if got := f.api.permissionResponses()[0].GetOptionId(); got != long {
 		t.Fatalf("the harness got option %.20q…, want the long option ID", got)
 	}
+}
+
+type promptFailingPoster struct {
+	*fakePoster
+	failed atomic.Bool
+}
+
+func (p *promptFailingPoster) PostMessage(ctx context.Context, channel string, opts ...slack.MsgOption) (string, error) {
+	if sent := renderOptions(channel, opts); sent.text == "" && sent.threadTS != "" && p.failed.CompareAndSwap(false, true) {
+		return "", errors.New("connection lost")
+	}
+	return p.fakePoster.PostMessage(ctx, channel, opts...)
+}
+
+func TestAPermissionPromptSlackRejectedIsPostedAgain(t *testing.T) {
+	f := newFixture(t)
+	p := &promptFailingPoster{fakePoster: f.poster}
+	f.app = slackapp.New(f.api.serve(t), p, f.resolver, slackapp.WithBotUserID("UBOT"), slackapp.WithHomeTeamID("T1"))
+	t.Cleanup(f.app.Shutdown)
+	liveThread(t, f)
+
+	f.api.emit("sess-1", "t1", &pb.PermissionRequest{RequestId: "r1", Summary: "Run a command",
+		Options: []*pb.PermissionOption{{Id: "allow", Name: "Allow", Kind: "allow_once"}}})
+	waitFor(t, "the permission prompt to be posted after Slack rejected it once", func() bool {
+		if !p.failed.Load() {
+			return false
+		}
+		for _, post := range f.poster.allPosts() {
+			if post.text == "" && post.threadTS == threadRoot {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func TestPermissionClickIsOwnerOnly(t *testing.T) {
