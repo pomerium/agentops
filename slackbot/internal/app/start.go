@@ -49,6 +49,7 @@ func (a *App) startSession(ctx context.Context, spec startSpec) *thread {
 		threadLink:  spec.threadLink,
 	}
 	t.setState(api.StatePending)
+	t.openingTurn.Store(strings.TrimSpace(spec.agentPrompt) != "")
 	ok, flipped := a.registerThread(t)
 	if !ok {
 		a.tel.Debug(ctx, "this person already has a session in this thread; not starting a second one")

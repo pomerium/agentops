@@ -170,6 +170,9 @@ func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.St
 	case api.StateAwaitingApproval:
 		a.editStatus(ctx, t, msgStatusAwaitingApproval)
 	case api.StateRunning:
+		if t.openingTurn.CompareAndSwap(true, false) {
+			a.markBusy(ctx, t)
+		}
 		a.swapReaction(ctx, t.channel, ackTS, reactionStarting, reactionReady)
 		a.editStatus(ctx, t, readyStatusFor(t.busy.Load() > 0))
 		a.updateApprovalDM(ctx, t)
