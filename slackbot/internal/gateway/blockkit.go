@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"unicode/utf8"
+
 	"github.com/slack-go/slack"
 
 	"github.com/pomerium/agentops/slackbot/internal/mdsplit"
@@ -30,10 +32,11 @@ type PermissionChoice struct {
 }
 
 func PermissionBlocks(sessionID, toolCallID, ownerUserID, title string, choices []PermissionChoice) []slack.Block {
-	prompt := ":lock: The agent needs permission to: *" + title + "*"
+	head, tail := ":lock: The agent needs permission to: *", "*"
 	if ownerUserID != "" {
-		prompt = ":lock: <@" + ownerUserID + ">, the agent needs your permission to: *" + title + "*"
+		head = ":lock: <@" + ownerUserID + ">, the agent needs your permission to: *"
 	}
+	prompt := head + clip(title, MaxSectionChars-utf8.RuneCountInString(head+tail)) + tail
 	section := slack.NewSectionBlock(
 		slack.NewTextBlockObject(slack.MarkdownType, prompt, false, false),
 		nil, nil,
@@ -53,6 +56,14 @@ func PermissionBlocks(sessionID, toolCallID, ownerUserID, title string, choices 
 		elements = append(elements, btn)
 	}
 	return []slack.Block{section, slack.NewActionBlock("acp_permission_actions", elements...)}
+}
+
+func clip(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:max(limit-1, 0)]) + "…"
 }
 
 func isAllowKind(kind string) bool {

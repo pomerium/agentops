@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/slack-go/slack"
 
@@ -472,5 +473,22 @@ func TestAnInteractionPayloadOutsideTheSignedBodyIsRejected(t *testing.T) {
 				t.Fatalf("an unsigned payload was dispatched: %+v", app.interactions)
 			}
 		})
+	}
+}
+
+func TestALongPermissionTitleFitsTheSection(t *testing.T) {
+	for _, owner := range []string{"", "U0123456789ABCDEF"} {
+		blocks := gateway.PermissionBlocks("sess-1", "call-2", owner, strings.Repeat("x", 3000),
+			[]gateway.PermissionChoice{{OptionID: "allow", Name: "Allow", Kind: "allow_once"}})
+		section, ok := blocks[0].(*slack.SectionBlock)
+		if !ok || section.Text == nil {
+			t.Fatalf("first block is not a section block: %T", blocks[0])
+		}
+		if n := utf8.RuneCountInString(section.Text.Text); n > 3000 {
+			t.Errorf("owner %q: the permission section has %d characters; Slack rejects more than 3000", owner, n)
+		}
+		if !strings.Contains(section.Text.Text, "xxx…*") {
+			t.Errorf("owner %q: a cut title must say it was cut: %.80s", owner, section.Text.Text)
+		}
 	}
 }
