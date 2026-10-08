@@ -445,6 +445,22 @@ func TestAFailedStateReadDoesNotTurnDiscussionIntoATurn(t *testing.T) {
 	}
 }
 
+func TestAPausedOwnersReplyAfterAJoinIsDiscussion(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+
+	f.app.HandleMention(ctx, mentionIn(f, "U2", "check staging"))
+	f.poster.waitForPost(t, "joined with their own agent")
+	f.app.HandleMessage(ctx, replyIn(f, "U1", "this is discussion, not a request"))
+
+	if n := len(f.api.promptRequests()); n != 0 {
+		t.Fatalf("a plain reply in a thread someone joined started %d turns", n)
+	}
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
