@@ -4,24 +4,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
-	"github.com/pomerium/agentops/harness/internal/agentio"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 )
 
-const ProtocolVersion uint32 = 1
+const ProtocolVersion uint32 = 2
+
+const inboxSize = 256
 
 type ExpectCallbacks struct {
-	OnAttached  func(attempt uint32, agentRunning bool)
-	OnLost      func(cause error)
-	OnError     func(reason string, cause error)
-	OnAgentExit func(exitCode int32)
+	OnAttached func(attempt uint32, agentRunning bool)
+	OnLost     func(cause error)
+	OnError    func(reason string, cause error)
+
+	StreamID    []byte
+	ResumeAfter uint64
 }
 
 type ExpectOption func(*ExpectCallbacks)
@@ -36,9 +38,9 @@ func WithOnError(f func(reason string, cause error)) ExpectOption {
 	return func(o *ExpectCallbacks) { o.OnError = f }
 }
 
-func WithOnAgentExit(f func(exitCode int32)) ExpectOption {
-	return func(o *ExpectCallbacks) { o.OnAgentExit = f }
-}
+func WithStreamID(id []byte) ExpectOption { return func(o *ExpectCallbacks) { o.StreamID = id } }
+
+func WithResumeAfter(seq uint64) ExpectOption { return func(o *ExpectCallbacks) { o.ResumeAfter = seq } }
 
 func newExpectCallbacks(opts []ExpectOption) ExpectCallbacks {
 	var o ExpectCallbacks
@@ -111,27 +113,29 @@ type attachedRun struct {
 	hbInterval  time.Duration
 	hbMissLimit uint32
 
-	io       *agentio.Stream
 	streamID []byte
+	inbox    chan *agentlinkpb.AgentIOFrame
 	ioTurn   chan struct{}
+	outReady chan struct{}
 
 	attached chan struct{}
 	ready    chan struct{}
-	ioReady  chan struct{}
 	done     chan struct{}
 
 	attachedOnce sync.Once
 	readyOnce    sync.Once
-	ioReadyOnce  sync.Once
 	doneOnce     sync.Once
 
 	notifyMu sync.Mutex
 
-	mu       sync.Mutex
-	live     *attachStream
-	ioStream *ioClaim
-	attempts uint32
-	err      error
+	mu        sync.Mutex
+	live      *attachStream
+	ioStream  *ioClaim
+	attempts  uint32
+	err       error
+	delivered uint64
+	acked     uint64
+	commands  []*agentlinkpb.AgentIOFrame
 }
 
 type ioClaim struct {
@@ -206,7 +210,46 @@ func (r *attachedRun) markAttached() { r.attachedOnce.Do(func() { close(r.attach
 
 func (r *attachedRun) markReady() { r.readyOnce.Do(func() { close(r.ready) }) }
 
-func (r *attachedRun) markIOReady() { r.ioReadyOnce.Do(func() { close(r.ioReady) }) }
+func (r *attachedRun) signalOut() {
+	select {
+	case r.outReady <- struct{}{}:
+	default:
+	}
+}
+
+func (r *attachedRun) deliveredSeq() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.delivered
+}
+
+func (r *attachedRun) setDelivered(seq uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if seq > r.delivered {
+		r.delivered = seq
+	}
+}
+
+func (r *attachedRun) ackedSeq() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.acked
+}
+
+func (r *attachedRun) takeCommands() []*agentlinkpb.AgentIOFrame {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.commands
+	r.commands = nil
+	return out
+}
+
+func (r *attachedRun) requeue(frames []*agentlinkpb.AgentIOFrame) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commands = append(append([]*agentlinkpb.AgentIOFrame(nil), frames...), r.commands...)
+}
 
 func (r *attachedRun) finish(cause error) {
 	r.doneOnce.Do(func() {
@@ -220,7 +263,6 @@ func (r *attachedRun) finish(cause error) {
 			live.close(cause)
 		}
 		ioStream.close()
-		r.io.Close(cause)
 	})
 }
 
@@ -268,25 +310,34 @@ func (h *RunHandle) AwaitReady(ctx context.Context) error {
 	}
 }
 
-func (h *RunHandle) SpawnAgent(ctx context.Context) error {
+func (h *RunHandle) StreamID() []byte { return h.run.streamID }
+
+func (h *RunHandle) SpawnAgent(ctx context.Context, params *agentlinkpb.SessionParams) error {
 	live := h.run.current()
 	if live == nil {
 		return fmt.Errorf("spawn agent for run %s: no live attach", h.run.runID)
 	}
 	return live.dispatch(ctx, &agentlinkpb.ManagerFrame{
-		Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{StreamId: h.run.streamID}},
+		Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{StreamId: h.run.streamID, Session: params}},
 	})
 }
 
-func (h *RunHandle) AwaitAgentIO(ctx context.Context) (io.Writer, io.Reader, error) {
-	select {
-	case <-h.run.ioReady:
-		return h.run.io.Outbound(), h.run.io.Inbound(), nil
-	case <-h.run.done:
-		return nil, nil, h.terminalErr()
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+func (h *RunHandle) Inbox() <-chan *agentlinkpb.AgentIOFrame { return h.run.inbox }
+
+func (h *RunHandle) Ack(seq uint64) {
+	h.run.mu.Lock()
+	if seq > h.run.acked {
+		h.run.acked = seq
 	}
+	h.run.mu.Unlock()
+	h.run.signalOut()
+}
+
+func (h *RunHandle) Send(f *agentlinkpb.AgentIOFrame) {
+	h.run.mu.Lock()
+	h.run.commands = append(h.run.commands, f)
+	h.run.mu.Unlock()
+	h.run.signalOut()
 }
 
 func (h *RunHandle) Shutdown(reason string) {

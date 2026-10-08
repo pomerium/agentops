@@ -16,7 +16,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
-	"github.com/pomerium/agentops/harness/internal/agentio"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/telemetry"
 )
@@ -27,7 +26,6 @@ const (
 )
 
 const (
-	reasonResumeInvalid   = "agentio_resume_invalid"
 	reasonStreamMismatch  = "agentio_stream_mismatch"
 	reasonProtocol        = "protocol_violation"
 	reasonHeartbeatMissed = "heartbeat_missed"
@@ -109,16 +107,23 @@ func (s *Server) Expect(runID string, seal agenticrun.Executor, cfg *agentlinkpb
 	if err := seal.Validate(); err != nil {
 		return nil, fmt.Errorf("harness expect: %w", err)
 	}
+	callbacks := newExpectCallbacks(opts)
+	streamID := callbacks.StreamID
+	if len(streamID) == 0 {
+		streamID = NewStreamID()
+	}
 	run := &attachedRun{
-		runID: runID, seal: seal, config: cfg, opts: newExpectCallbacks(opts), log: s.log,
+		runID: runID, seal: seal, config: cfg, opts: callbacks, log: s.log,
 		hbInterval: s.cfg.heartbeatInterval, hbMissLimit: s.cfg.heartbeatMissLimit,
-		io:       agentio.New(),
-		streamID: agentio.NewStreamID(),
-		ioTurn:   make(chan struct{}, 1),
-		attached: make(chan struct{}),
-		ready:    make(chan struct{}),
-		ioReady:  make(chan struct{}),
-		done:     make(chan struct{}),
+		streamID:  streamID,
+		inbox:     make(chan *agentlinkpb.AgentIOFrame, inboxSize),
+		ioTurn:    make(chan struct{}, 1),
+		outReady:  make(chan struct{}, 1),
+		attached:  make(chan struct{}),
+		ready:     make(chan struct{}),
+		done:      make(chan struct{}),
+		delivered: callbacks.ResumeAfter,
+		acked:     callbacks.ResumeAfter,
 	}
 	s.mu.Lock()
 	if _, dup := s.runs[runID]; dup {
@@ -465,13 +470,6 @@ func (s *Server) handleSidecarFrame(ctx context.Context, run *attachedRun, f *ag
 			run.opts.OnError(reason, err)
 		}
 		return err
-	case f.GetExited() != nil:
-		code := f.GetExited().GetExitCode()
-		s.log.Info("harness: agent process exited", "run_id", run.runID, "exit_code", code)
-		if run.opts.OnAgentExit != nil {
-			run.opts.OnAgentExit(code)
-		}
-		return nil
 	case f.GetHello() != nil:
 		return status.Error(codes.FailedPrecondition, "a second Hello on one Attach stream")
 	default:
