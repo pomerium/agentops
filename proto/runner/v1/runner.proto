@@ -2,55 +2,79 @@ syntax = "proto3";
 
 package runner.v1;
 
+import "agentlink/v1/agentlink.proto";
+
 option go_package = "github.com/pomerium/agentops/harness/internal/runner/pb;runnerpb";
 
-// AgentRunnerService starts the agent process and connects its stdio.
+// AgentRunnerService runs the agent and is the ACP client of the agent.
 //
 // The agent-runner serves this service. It is PID 1 of the agent container.
 // It listens on a unix socket in the pod. The sidecar is its only client. The
-// kernel delivers the bytes on the socket in order and without loss, so frames
-// have no sequence numbers or acks.
+// sidecar passes the session frames between this service and the AgentIO
+// stream of the manager.
+//
+// The runner has one agent session at most. The session continues when the
+// stream closes, and a new stream can join it. The runner stops the agent only
+// when it gets Stop, or when the agent exits.
 service AgentRunnerService {
-  // Run starts one agent and connects its stdio to the stream. The runner runs
-  // one agent at a time. While an agent runs, it refuses a second Run.
-  //
-  // When the stream closes, the runner sends TERM to the agent. After 10
-  // seconds, it sends KILL.
+  // Run starts or joins the agent session. One stream is live at a time. A new
+  // stream replaces the old one.
   rpc Run(stream RunnerClientFrame) returns (stream RunnerServerFrame);
 }
 
 message RunnerClientFrame {
   oneof msg {
-    // The first frame. The runner then runs
-    // `/bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'`.
+    // The first frame, if the agent does not run yet. The runner runs
+    // `/bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'`, and then it opens the
+    // ACP session. If a session with the same stream_id runs, Spawn joins it.
+    // If a session with a different stream_id runs, the stream fails with
+    // ALREADY_EXISTS.
     Spawn spawn = 1;
-    bytes stdin = 2;
-    // Sends a signal to the process group of the agent.
-    Signal signal = 3;
+    // The first frame, to join the session that runs. If there is no session,
+    // the stream fails with NOT_FOUND.
+    Join join = 4;
+    // Starts the events. The runner sends ReplayStart, then the events after
+    // Replay.after, and then each new event. Before Replay, the runner sends no
+    // events. Send Replay again after each new AgentIO stream.
+    Replay replay = 5;
+    agentlink.v1.AgentIOAck ack = 6;
+    agentlink.v1.Prompt prompt = 7;
+    agentlink.v1.PermissionDecision permission = 8;
+    // Stops the agent: TERM, then KILL after 10 seconds. The runner then sends
+    // AgentExited as the last event.
+    Stop stop = 9;
   }
+  reserved 2, 3;
 }
 
 message RunnerServerFrame {
   oneof msg {
-    Started started = 1;
-    bytes stdout = 2; // ACP bytes
-    // The sidecar writes stderr to its log. It does not mix stderr into ACP.
-    bytes stderr = 3;
-    // The last frame. The runner sends all output of the agent before it.
-    Exited exited = 4;
+    Started started = 1; // the first frame, after Spawn or Join
+    ReplayStart replay_start = 5; // the first frame after each Replay
+    agentlink.v1.AgentEvent event = 6;
   }
+  reserved 2, 3, 4;
 }
 
-message Spawn {}
-
-message Signal {
-  int32 signum = 1;
+message Spawn {
+  bytes stream_id = 1;
+  agentlink.v1.SessionParams session = 2;
 }
+
+message Join {}
+
+message Replay {
+  // The last event that the manager consumed.
+  uint64 after = 1;
+}
+
+message Stop {}
 
 message Started {
   int64 pid = 1;
+  bytes stream_id = 2;
 }
 
-message Exited {
-  int32 exit_code = 1;
+message ReplayStart {
+  agentlink.v1.AgentState state = 1;
 }

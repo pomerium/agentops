@@ -21,10 +21,14 @@ service AgentLinkService {
   // backoff.
   rpc Attach(stream SidecarFrame) returns (stream ManagerFrame);
 
-  // AgentIO carries the ACP bytes between the manager and the stdio of the
-  // agent. The sidecar opens it after SpawnAgent. After a drop, the sidecar
-  // opens it again and both sides resume. A run has one live AgentIO stream. A
-  // new stream replaces the old one.
+  // AgentIO carries the agent session between the manager and the runner. The
+  // runner is the ACP client of the agent. It sends events, and the manager
+  // sends commands. The sidecar passes the frames through without a change.
+  //
+  // The sidecar opens AgentIO after SpawnAgent. After a drop, the sidecar opens
+  // it again, and the runner sends again the events that the manager did not
+  // consume. A run has one live AgentIO stream. A new stream replaces the old
+  // one.
   rpc AgentIO(stream AgentIOFrame) returns (stream AgentIOFrame);
 }
 
@@ -32,17 +36,18 @@ message SidecarFrame {
   oneof msg {
     SidecarHello hello = 1; // first frame of each stream, sent once
     Status status = 2; // state changes and heartbeats
-    AgentExited exited = 3; // the agent process stopped
   }
+  reserved 3;
 }
 
 message ManagerFrame {
   oneof msg {
     ManagerHelloAck hello_ack = 1; // first frame of each stream, sent once
     SpawnAgent spawn = 2; // start the agent
-    // Ends the session. The sidecar stops the agent and envoy. Then it waits
-    // until the pod is deleted. It does not exit, because the kubelet restarts
-    // a container that exits. The manager deletes the pod.
+    // Ends the session. The sidecar tells the runner to stop the agent, and it
+    // stops envoy. Then it waits until the pod is deleted. It does not exit,
+    // because the kubelet restarts a container that exits. The manager deletes
+    // the pod.
     Shutdown shutdown = 3;
     Heartbeat heartbeat = 4; // the manager is alive
   }
@@ -51,13 +56,12 @@ message ManagerFrame {
 message Heartbeat {}
 
 message SidecarHello {
-  uint32 protocol_version = 1; // 1 is the only version
-  // Counts the Attach streams since the pod started. The first is 1. Use it
-  // only for logs and metrics.
+  uint32 protocol_version = 1; // 2 is the only version
+  // Counts the Attach streams since the sidecar started. The first is 1. Use
+  // it only for logs and metrics.
   uint32 attempt = 2;
-  // True on a new Attach stream if the sidecar has an agent and has not yet
-  // sent AgentExited for it. An agent that stops during a drop stays "running"
-  // until the sidecar sends AgentExited on the new stream.
+  // True if the runner has an agent session. It stays true after the agent
+  // exits. The manager learns about the exit from the AgentExited event.
   bool agent_running = 3;
 }
 
@@ -105,64 +109,205 @@ message Status {
   }
   State state = 1;
   // Set on STATE_ERROR. Examples: envoy_exited, runner_unreachable,
-  // token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch.
+  // runner_lost, token_terminal:<reason>, agentio_stream_mismatch.
   string reason = 2;
 }
 
-// AgentExited tells the manager that the agent process stopped. The sidecar
-// sends it after the manager acks all output of the agent.
-message AgentExited {
-  int32 exit_code = 1;
+// SpawnAgent starts the agent. The runner starts the agent process, and then
+// it opens the ACP session with these parameters. The sidecar starts one
+// agent at most.
+message SpawnAgent {
+  // The ID of the agent session. The manager makes a new random ID for each
+  // run. Each AgentIOOpen must contain it.
+  bytes stream_id = 1;
+  SessionParams session = 2;
 }
 
-// SpawnAgent starts the agent through the runner. The sidecar starts one agent
-// at most.
-message SpawnAgent {
-  // The ID of the AgentIO byte stream. The manager makes a new random ID for
-  // each run. Each AgentIOOpen must contain it.
-  bytes stream_id = 1;
+// SessionParams are the parameters of the ACP session.
+message SessionParams {
+  string cwd = 1;
+  // The MCP servers of the session. Each is an HTTP server on a loopback
+  // address that envoy serves.
+  repeated McpServer mcp_servers = 2;
+  // The runner adds this text to the system prompt of the agent.
+  string system_prompt = 3;
+  // The values of the session config options, by option ID. If the agent does
+  // not offer an option, the session fails.
+  map<string, string> config = 4;
+  // If set, the runner resumes this ACP session and does not start a new one.
+  string resume_session_id = 5;
+}
+
+message McpServer {
+  string name = 1;
+  string url = 2;
 }
 
 message Shutdown {
   string reason = 1;
 }
 
-// AgentIOFrame carries the ACP bytes. Both directions use the same rules.
+// AgentIOFrame carries the agent session.
 //
-// Each side counts the bytes that it sends. The first byte is 1. Each side
-// acks the bytes that it gets from its peer. A sender keeps the bytes that the
-// peer did not ack. It keeps at most 8 MiB plus one frame. When it has that
-// many, it stops until the peer acks. If a receiver gets more, it ends the
-// stream with a protocol error.
+// The runner numbers its events. The first event is 1. The manager acks each
+// event after it records the event. The runner keeps the events that the
+// manager did not ack. It keeps at most 8 MiB of them. When it has that many,
+// the agent waits until the manager acks.
 //
-// On each open, each side sends Open with the last byte that it consumed. The
-// peer then sends again all bytes after that byte. If the peer no longer has
-// them, the stream ends with an error. A frame carries at most 64 KiB.
+// The first frame of each side is Open. The manager sends in Open the last
+// event that it consumed. The runner then sends AgentState, and after it the
+// events after that one. Then it sends new events as they occur.
+//
+// Commands do not have numbers. The runner ignores a command that it already
+// has, so the manager can send a command again after a drop.
 message AgentIOFrame {
   oneof msg {
     AgentIOOpen open = 1; // first frame of each side, sent once
-    AgentIOData data = 2;
-    AgentIOAck ack = 3;
+    AgentIOAck ack = 3; // manager to runner
+    AgentEvent event = 4; // runner to manager
+    AgentState state = 5; // runner to manager, once after the Opens
+    Prompt prompt = 6; // manager to runner
+    PermissionDecision permission = 7; // manager to runner
   }
+  reserved 2;
 }
 
 message AgentIOOpen {
-  // The last byte of the peer that this side consumed. The peer sends again
-  // from the byte after it.
+  // From the manager: the last event that the manager consumed. From the
+  // sidecar: zero.
   uint64 consumed = 1;
-  // Must be equal to SpawnAgent.stream_id. If it is different, the offsets are
-  // for a different stream, and the stream ends with an error.
+  // Must be equal to SpawnAgent.stream_id. If it is different, the stream is
+  // for a different agent session, and it ends with an error.
   bytes stream_id = 2;
 }
 
-message AgentIOData {
-  uint64 seq = 1; // the number of the last byte in payload
-  bytes payload = 2;
+message AgentIOAck {
+  // The last event that the manager recorded. It is cumulative.
+  uint64 consumed = 1;
 }
 
-message AgentIOAck {
-  // The last byte that this side consumed. It is cumulative. Each side acks
-  // after each 512 KiB of new bytes, and at least every 500 ms while new bytes
-  // arrive.
-  uint64 consumed = 1;
+// AgentState is the state of the agent session when the stream opens.
+message AgentState {
+  // The highest Prompt.turn_seq that the runner received.
+  uint64 last_turn_seq = 1;
+  // The turns that have not finished, in the order that they run. The first
+  // one can be running.
+  repeated string outstanding_turn_ids = 2;
+  // The permission requests that wait for a decision.
+  repeated PermissionRequest pending_permissions = 3;
+}
+
+// AgentEvent is one event of the agent session.
+message AgentEvent {
+  uint64 seq = 1; // 1 for the first event, then each next number
+  string turn_id = 2; // empty if the event is not part of a turn
+  oneof payload {
+    SessionReady session_ready = 10;
+    SessionFailed session_failed = 11;
+    AgentMessage message = 12;
+    AgentThought thought = 13;
+    ToolCall tool_call = 14;
+    Usage usage = 15;
+    PermissionRequest permission_request = 16;
+    TurnFinished turn_finished = 17;
+    AgentExited exited = 18;
+  }
+}
+
+// SessionReady is the first event after SpawnAgent when the ACP session opens.
+message SessionReady {
+  string acp_session_id = 1;
+  // True if the agent can resume this session later.
+  bool resumable = 2;
+}
+
+// SessionFailed is the first event after SpawnAgent when the ACP session does
+// not open. The runner then stops the agent.
+message SessionFailed {
+  string reason = 1;
+  // True if the session did not open because the agent cannot resume
+  // SessionParams.resume_session_id.
+  bool resume_unavailable = 2;
+}
+
+// AgentMessage is one part of the reply of the agent. A tool call or the end
+// of the turn ends a part.
+message AgentMessage {
+  string part_id = 1; // the turn ID, a period, and the part number
+  string text = 2;
+  bool final = 3; // true for the last part of the turn
+}
+
+// AgentThought is the reasoning text of the agent before its next reply or
+// tool call.
+message AgentThought {
+  string text = 1;
+}
+
+message ToolCall {
+  string id = 1;
+  // If empty on an update, the title is the one from an earlier event.
+  string title = 2;
+  string kind = 3;
+  string status = 4;
+  bytes raw_input = 5; // JSON; empty if the agent did not send an input
+  bool update = 6; // true if this changes an earlier tool call
+}
+
+message Usage {
+  int64 input_tokens = 1;
+  int64 output_tokens = 2;
+  int64 cached_read_tokens = 3;
+  int64 cached_write_tokens = 4;
+  int64 thought_tokens = 5;
+  int64 total_tokens = 6;
+  int64 context_window = 7;
+  int64 context_used = 8;
+  double cost_usd = 9;
+}
+
+// PermissionRequest asks for a decision about a tool call. The agent waits
+// until the runner gets a PermissionDecision with the same request_id.
+message PermissionRequest {
+  string request_id = 1;
+  string tool_call_id = 2;
+  string summary = 3;
+  repeated PermissionOption options = 4;
+  string turn_id = 5;
+}
+
+message PermissionOption {
+  string id = 1;
+  string name = 2;
+  string kind = 3;
+}
+
+// TurnFinished ends a turn. It is the last event of the turn.
+message TurnFinished {
+  string stop_reason = 1; // set if the turn completed
+  string error = 2; // set if the turn failed
+}
+
+// AgentExited is the last event of the agent session. The agent process
+// stopped.
+message AgentExited {
+  int32 exit_code = 1;
+}
+
+// Prompt adds a turn. The runner runs the turns in the order of turn_seq, one
+// at a time.
+message Prompt {
+  string turn_id = 1;
+  // Increases with each turn of the session. The runner ignores a Prompt with
+  // a turn_seq that is not more than AgentState.last_turn_seq.
+  uint64 turn_seq = 2;
+  string text = 3;
+}
+
+// PermissionDecision answers a PermissionRequest. The runner ignores a
+// decision for a request that does not wait.
+message PermissionDecision {
+  string request_id = 1;
+  string option_id = 2; // one of the offered options, if not cancelled
+  bool cancelled = 3;
 }

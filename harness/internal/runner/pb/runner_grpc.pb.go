@@ -26,18 +26,19 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// AgentRunnerService starts the agent process and connects its stdio.
+// AgentRunnerService runs the agent and is the ACP client of the agent.
 //
 // The agent-runner serves this service. It is PID 1 of the agent container.
 // It listens on a unix socket in the pod. The sidecar is its only client. The
-// kernel delivers the bytes on the socket in order and without loss, so frames
-// have no sequence numbers or acks.
+// sidecar passes the session frames between this service and the AgentIO
+// stream of the manager.
+//
+// The runner has one agent session at most. The session continues when the
+// stream closes, and a new stream can join it. The runner stops the agent only
+// when it gets Stop, or when the agent exits.
 type AgentRunnerServiceClient interface {
-	// Run starts one agent and connects its stdio to the stream. The runner runs
-	// one agent at a time. While an agent runs, it refuses a second Run.
-	//
-	// When the stream closes, the runner sends TERM to the agent. After 10
-	// seconds, it sends KILL.
+	// Run starts or joins the agent session. One stream is live at a time. A new
+	// stream replaces the old one.
 	Run(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunnerClientFrame, RunnerServerFrame], error)
 }
 
@@ -66,18 +67,19 @@ type AgentRunnerService_RunClient = grpc.BidiStreamingClient[RunnerClientFrame, 
 // All implementations must embed UnimplementedAgentRunnerServiceServer
 // for forward compatibility.
 //
-// AgentRunnerService starts the agent process and connects its stdio.
+// AgentRunnerService runs the agent and is the ACP client of the agent.
 //
 // The agent-runner serves this service. It is PID 1 of the agent container.
 // It listens on a unix socket in the pod. The sidecar is its only client. The
-// kernel delivers the bytes on the socket in order and without loss, so frames
-// have no sequence numbers or acks.
+// sidecar passes the session frames between this service and the AgentIO
+// stream of the manager.
+//
+// The runner has one agent session at most. The session continues when the
+// stream closes, and a new stream can join it. The runner stops the agent only
+// when it gets Stop, or when the agent exits.
 type AgentRunnerServiceServer interface {
-	// Run starts one agent and connects its stdio to the stream. The runner runs
-	// one agent at a time. While an agent runs, it refuses a second Run.
-	//
-	// When the stream closes, the runner sends TERM to the agent. After 10
-	// seconds, it sends KILL.
+	// Run starts or joins the agent session. One stream is live at a time. A new
+	// stream replaces the old one.
 	Run(grpc.BidiStreamingServer[RunnerClientFrame, RunnerServerFrame]) error
 	mustEmbedUnimplementedAgentRunnerServiceServer()
 }

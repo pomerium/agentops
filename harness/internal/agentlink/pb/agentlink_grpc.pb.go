@@ -43,10 +43,14 @@ type AgentLinkServiceClient interface {
 	// directives. After a drop, the sidecar opens a new Attach stream with
 	// backoff.
 	Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SidecarFrame, ManagerFrame], error)
-	// AgentIO carries the ACP bytes between the manager and the stdio of the
-	// agent. The sidecar opens it after SpawnAgent. After a drop, the sidecar
-	// opens it again and both sides resume. A run has one live AgentIO stream. A
-	// new stream replaces the old one.
+	// AgentIO carries the agent session between the manager and the runner. The
+	// runner is the ACP client of the agent. It sends events, and the manager
+	// sends commands. The sidecar passes the frames through without a change.
+	//
+	// The sidecar opens AgentIO after SpawnAgent. After a drop, the sidecar opens
+	// it again, and the runner sends again the events that the manager did not
+	// consume. A run has one live AgentIO stream. A new stream replaces the old
+	// one.
 	AgentIO(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentIOFrame, AgentIOFrame], error)
 }
 
@@ -104,10 +108,14 @@ type AgentLinkServiceServer interface {
 	// directives. After a drop, the sidecar opens a new Attach stream with
 	// backoff.
 	Attach(grpc.BidiStreamingServer[SidecarFrame, ManagerFrame]) error
-	// AgentIO carries the ACP bytes between the manager and the stdio of the
-	// agent. The sidecar opens it after SpawnAgent. After a drop, the sidecar
-	// opens it again and both sides resume. A run has one live AgentIO stream. A
-	// new stream replaces the old one.
+	// AgentIO carries the agent session between the manager and the runner. The
+	// runner is the ACP client of the agent. It sends events, and the manager
+	// sends commands. The sidecar passes the frames through without a change.
+	//
+	// The sidecar opens AgentIO after SpawnAgent. After a drop, the sidecar opens
+	// it again, and the runner sends again the events that the manager did not
+	// consume. A run has one live AgentIO stream. A new stream replaces the old
+	// one.
 	AgentIO(grpc.BidiStreamingServer[AgentIOFrame, AgentIOFrame]) error
 	mustEmbedUnimplementedAgentLinkServiceServer()
 }

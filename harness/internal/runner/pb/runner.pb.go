@@ -7,6 +7,7 @@
 package runnerpb
 
 import (
+	pb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -26,8 +27,12 @@ type RunnerClientFrame struct {
 	// Types that are valid to be assigned to Msg:
 	//
 	//	*RunnerClientFrame_Spawn
-	//	*RunnerClientFrame_Stdin
-	//	*RunnerClientFrame_Signal
+	//	*RunnerClientFrame_Join
+	//	*RunnerClientFrame_Replay
+	//	*RunnerClientFrame_Ack
+	//	*RunnerClientFrame_Prompt
+	//	*RunnerClientFrame_Permission
+	//	*RunnerClientFrame_Stop
 	Msg           isRunnerClientFrame_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -79,19 +84,55 @@ func (x *RunnerClientFrame) GetSpawn() *Spawn {
 	return nil
 }
 
-func (x *RunnerClientFrame) GetStdin() []byte {
+func (x *RunnerClientFrame) GetJoin() *Join {
 	if x != nil {
-		if x, ok := x.Msg.(*RunnerClientFrame_Stdin); ok {
-			return x.Stdin
+		if x, ok := x.Msg.(*RunnerClientFrame_Join); ok {
+			return x.Join
 		}
 	}
 	return nil
 }
 
-func (x *RunnerClientFrame) GetSignal() *Signal {
+func (x *RunnerClientFrame) GetReplay() *Replay {
 	if x != nil {
-		if x, ok := x.Msg.(*RunnerClientFrame_Signal); ok {
-			return x.Signal
+		if x, ok := x.Msg.(*RunnerClientFrame_Replay); ok {
+			return x.Replay
+		}
+	}
+	return nil
+}
+
+func (x *RunnerClientFrame) GetAck() *pb.AgentIOAck {
+	if x != nil {
+		if x, ok := x.Msg.(*RunnerClientFrame_Ack); ok {
+			return x.Ack
+		}
+	}
+	return nil
+}
+
+func (x *RunnerClientFrame) GetPrompt() *pb.Prompt {
+	if x != nil {
+		if x, ok := x.Msg.(*RunnerClientFrame_Prompt); ok {
+			return x.Prompt
+		}
+	}
+	return nil
+}
+
+func (x *RunnerClientFrame) GetPermission() *pb.PermissionDecision {
+	if x != nil {
+		if x, ok := x.Msg.(*RunnerClientFrame_Permission); ok {
+			return x.Permission
+		}
+	}
+	return nil
+}
+
+func (x *RunnerClientFrame) GetStop() *Stop {
+	if x != nil {
+		if x, ok := x.Msg.(*RunnerClientFrame_Stop); ok {
+			return x.Stop
 		}
 	}
 	return nil
@@ -102,34 +143,66 @@ type isRunnerClientFrame_Msg interface {
 }
 
 type RunnerClientFrame_Spawn struct {
-	// The first frame. The runner then runs
-	// `/bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'`.
+	// The first frame, if the agent does not run yet. The runner runs
+	// `/bin/sh -lc 'exec ${ACP_AGENT_CMD:-acp-agent}'`, and then it opens the
+	// ACP session. If a session with the same stream_id runs, Spawn joins it.
+	// If a session with a different stream_id runs, the stream fails with
+	// ALREADY_EXISTS.
 	Spawn *Spawn `protobuf:"bytes,1,opt,name=spawn,proto3,oneof"`
 }
 
-type RunnerClientFrame_Stdin struct {
-	Stdin []byte `protobuf:"bytes,2,opt,name=stdin,proto3,oneof"`
+type RunnerClientFrame_Join struct {
+	// The first frame, to join the session that runs. If there is no session,
+	// the stream fails with NOT_FOUND.
+	Join *Join `protobuf:"bytes,4,opt,name=join,proto3,oneof"`
 }
 
-type RunnerClientFrame_Signal struct {
-	// Sends a signal to the process group of the agent.
-	Signal *Signal `protobuf:"bytes,3,opt,name=signal,proto3,oneof"`
+type RunnerClientFrame_Replay struct {
+	// Starts the events. The runner sends ReplayStart, then the events after
+	// Replay.after, and then each new event. Before Replay, the runner sends no
+	// events. Send Replay again after each new AgentIO stream.
+	Replay *Replay `protobuf:"bytes,5,opt,name=replay,proto3,oneof"`
+}
+
+type RunnerClientFrame_Ack struct {
+	Ack *pb.AgentIOAck `protobuf:"bytes,6,opt,name=ack,proto3,oneof"`
+}
+
+type RunnerClientFrame_Prompt struct {
+	Prompt *pb.Prompt `protobuf:"bytes,7,opt,name=prompt,proto3,oneof"`
+}
+
+type RunnerClientFrame_Permission struct {
+	Permission *pb.PermissionDecision `protobuf:"bytes,8,opt,name=permission,proto3,oneof"`
+}
+
+type RunnerClientFrame_Stop struct {
+	// Stops the agent: TERM, then KILL after 10 seconds. The runner then sends
+	// AgentExited as the last event.
+	Stop *Stop `protobuf:"bytes,9,opt,name=stop,proto3,oneof"`
 }
 
 func (*RunnerClientFrame_Spawn) isRunnerClientFrame_Msg() {}
 
-func (*RunnerClientFrame_Stdin) isRunnerClientFrame_Msg() {}
+func (*RunnerClientFrame_Join) isRunnerClientFrame_Msg() {}
 
-func (*RunnerClientFrame_Signal) isRunnerClientFrame_Msg() {}
+func (*RunnerClientFrame_Replay) isRunnerClientFrame_Msg() {}
+
+func (*RunnerClientFrame_Ack) isRunnerClientFrame_Msg() {}
+
+func (*RunnerClientFrame_Prompt) isRunnerClientFrame_Msg() {}
+
+func (*RunnerClientFrame_Permission) isRunnerClientFrame_Msg() {}
+
+func (*RunnerClientFrame_Stop) isRunnerClientFrame_Msg() {}
 
 type RunnerServerFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
 	//
 	//	*RunnerServerFrame_Started
-	//	*RunnerServerFrame_Stdout
-	//	*RunnerServerFrame_Stderr
-	//	*RunnerServerFrame_Exited
+	//	*RunnerServerFrame_ReplayStart
+	//	*RunnerServerFrame_Event
 	Msg           isRunnerServerFrame_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -181,28 +254,19 @@ func (x *RunnerServerFrame) GetStarted() *Started {
 	return nil
 }
 
-func (x *RunnerServerFrame) GetStdout() []byte {
+func (x *RunnerServerFrame) GetReplayStart() *ReplayStart {
 	if x != nil {
-		if x, ok := x.Msg.(*RunnerServerFrame_Stdout); ok {
-			return x.Stdout
+		if x, ok := x.Msg.(*RunnerServerFrame_ReplayStart); ok {
+			return x.ReplayStart
 		}
 	}
 	return nil
 }
 
-func (x *RunnerServerFrame) GetStderr() []byte {
+func (x *RunnerServerFrame) GetEvent() *pb.AgentEvent {
 	if x != nil {
-		if x, ok := x.Msg.(*RunnerServerFrame_Stderr); ok {
-			return x.Stderr
-		}
-	}
-	return nil
-}
-
-func (x *RunnerServerFrame) GetExited() *Exited {
-	if x != nil {
-		if x, ok := x.Msg.(*RunnerServerFrame_Exited); ok {
-			return x.Exited
+		if x, ok := x.Msg.(*RunnerServerFrame_Event); ok {
+			return x.Event
 		}
 	}
 	return nil
@@ -213,33 +277,27 @@ type isRunnerServerFrame_Msg interface {
 }
 
 type RunnerServerFrame_Started struct {
-	Started *Started `protobuf:"bytes,1,opt,name=started,proto3,oneof"`
+	Started *Started `protobuf:"bytes,1,opt,name=started,proto3,oneof"` // the first frame, after Spawn or Join
 }
 
-type RunnerServerFrame_Stdout struct {
-	Stdout []byte `protobuf:"bytes,2,opt,name=stdout,proto3,oneof"` // ACP bytes
+type RunnerServerFrame_ReplayStart struct {
+	ReplayStart *ReplayStart `protobuf:"bytes,5,opt,name=replay_start,json=replayStart,proto3,oneof"` // the first frame after each Replay
 }
 
-type RunnerServerFrame_Stderr struct {
-	// The sidecar writes stderr to its log. It does not mix stderr into ACP.
-	Stderr []byte `protobuf:"bytes,3,opt,name=stderr,proto3,oneof"`
-}
-
-type RunnerServerFrame_Exited struct {
-	// The last frame. The runner sends all output of the agent before it.
-	Exited *Exited `protobuf:"bytes,4,opt,name=exited,proto3,oneof"`
+type RunnerServerFrame_Event struct {
+	Event *pb.AgentEvent `protobuf:"bytes,6,opt,name=event,proto3,oneof"`
 }
 
 func (*RunnerServerFrame_Started) isRunnerServerFrame_Msg() {}
 
-func (*RunnerServerFrame_Stdout) isRunnerServerFrame_Msg() {}
+func (*RunnerServerFrame_ReplayStart) isRunnerServerFrame_Msg() {}
 
-func (*RunnerServerFrame_Stderr) isRunnerServerFrame_Msg() {}
-
-func (*RunnerServerFrame_Exited) isRunnerServerFrame_Msg() {}
+func (*RunnerServerFrame_Event) isRunnerServerFrame_Msg() {}
 
 type Spawn struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	StreamId      []byte                 `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	Session       *pb.SessionParams      `protobuf:"bytes,2,opt,name=session,proto3" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -274,27 +332,40 @@ func (*Spawn) Descriptor() ([]byte, []int) {
 	return file_runner_v1_runner_proto_rawDescGZIP(), []int{2}
 }
 
-type Signal struct {
+func (x *Spawn) GetStreamId() []byte {
+	if x != nil {
+		return x.StreamId
+	}
+	return nil
+}
+
+func (x *Spawn) GetSession() *pb.SessionParams {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
+type Join struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Signum        int32                  `protobuf:"varint,1,opt,name=signum,proto3" json:"signum,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Signal) Reset() {
-	*x = Signal{}
+func (x *Join) Reset() {
+	*x = Join{}
 	mi := &file_runner_v1_runner_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Signal) String() string {
+func (x *Join) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Signal) ProtoMessage() {}
+func (*Join) ProtoMessage() {}
 
-func (x *Signal) ProtoReflect() protoreflect.Message {
+func (x *Join) ProtoReflect() protoreflect.Message {
 	mi := &file_runner_v1_runner_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -306,28 +377,103 @@ func (x *Signal) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Signal.ProtoReflect.Descriptor instead.
-func (*Signal) Descriptor() ([]byte, []int) {
+// Deprecated: Use Join.ProtoReflect.Descriptor instead.
+func (*Join) Descriptor() ([]byte, []int) {
 	return file_runner_v1_runner_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *Signal) GetSignum() int32 {
+type Replay struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The last event that the manager consumed.
+	After         uint64 `protobuf:"varint,1,opt,name=after,proto3" json:"after,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Replay) Reset() {
+	*x = Replay{}
+	mi := &file_runner_v1_runner_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Replay) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Replay) ProtoMessage() {}
+
+func (x *Replay) ProtoReflect() protoreflect.Message {
+	mi := &file_runner_v1_runner_proto_msgTypes[4]
 	if x != nil {
-		return x.Signum
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Replay.ProtoReflect.Descriptor instead.
+func (*Replay) Descriptor() ([]byte, []int) {
+	return file_runner_v1_runner_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Replay) GetAfter() uint64 {
+	if x != nil {
+		return x.After
 	}
 	return 0
+}
+
+type Stop struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Stop) Reset() {
+	*x = Stop{}
+	mi := &file_runner_v1_runner_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Stop) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Stop) ProtoMessage() {}
+
+func (x *Stop) ProtoReflect() protoreflect.Message {
+	mi := &file_runner_v1_runner_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Stop.ProtoReflect.Descriptor instead.
+func (*Stop) Descriptor() ([]byte, []int) {
+	return file_runner_v1_runner_proto_rawDescGZIP(), []int{5}
 }
 
 type Started struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Pid           int64                  `protobuf:"varint,1,opt,name=pid,proto3" json:"pid,omitempty"`
+	StreamId      []byte                 `protobuf:"bytes,2,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Started) Reset() {
 	*x = Started{}
-	mi := &file_runner_v1_runner_proto_msgTypes[4]
+	mi := &file_runner_v1_runner_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -339,7 +485,7 @@ func (x *Started) String() string {
 func (*Started) ProtoMessage() {}
 
 func (x *Started) ProtoReflect() protoreflect.Message {
-	mi := &file_runner_v1_runner_proto_msgTypes[4]
+	mi := &file_runner_v1_runner_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -352,7 +498,7 @@ func (x *Started) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Started.ProtoReflect.Descriptor instead.
 func (*Started) Descriptor() ([]byte, []int) {
-	return file_runner_v1_runner_proto_rawDescGZIP(), []int{4}
+	return file_runner_v1_runner_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Started) GetPid() int64 {
@@ -362,28 +508,35 @@ func (x *Started) GetPid() int64 {
 	return 0
 }
 
-type Exited struct {
+func (x *Started) GetStreamId() []byte {
+	if x != nil {
+		return x.StreamId
+	}
+	return nil
+}
+
+type ReplayStart struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	State         *pb.AgentState         `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Exited) Reset() {
-	*x = Exited{}
-	mi := &file_runner_v1_runner_proto_msgTypes[5]
+func (x *ReplayStart) Reset() {
+	*x = ReplayStart{}
+	mi := &file_runner_v1_runner_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Exited) String() string {
+func (x *ReplayStart) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Exited) ProtoMessage() {}
+func (*ReplayStart) ProtoMessage() {}
 
-func (x *Exited) ProtoReflect() protoreflect.Message {
-	mi := &file_runner_v1_runner_proto_msgTypes[5]
+func (x *ReplayStart) ProtoReflect() protoreflect.Message {
+	mi := &file_runner_v1_runner_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -394,41 +547,51 @@ func (x *Exited) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Exited.ProtoReflect.Descriptor instead.
-func (*Exited) Descriptor() ([]byte, []int) {
-	return file_runner_v1_runner_proto_rawDescGZIP(), []int{5}
+// Deprecated: Use ReplayStart.ProtoReflect.Descriptor instead.
+func (*ReplayStart) Descriptor() ([]byte, []int) {
+	return file_runner_v1_runner_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *Exited) GetExitCode() int32 {
+func (x *ReplayStart) GetState() *pb.AgentState {
 	if x != nil {
-		return x.ExitCode
+		return x.State
 	}
-	return 0
+	return nil
 }
 
 var File_runner_v1_runner_proto protoreflect.FileDescriptor
 
 const file_runner_v1_runner_proto_rawDesc = "" +
 	"\n" +
-	"\x16runner/v1/runner.proto\x12\trunner.v1\"\x89\x01\n" +
+	"\x16runner/v1/runner.proto\x12\trunner.v1\x1a\x1cagentlink/v1/agentlink.proto\"\xed\x02\n" +
 	"\x11RunnerClientFrame\x12(\n" +
-	"\x05spawn\x18\x01 \x01(\v2\x10.runner.v1.SpawnH\x00R\x05spawn\x12\x16\n" +
-	"\x05stdin\x18\x02 \x01(\fH\x00R\x05stdin\x12+\n" +
-	"\x06signal\x18\x03 \x01(\v2\x11.runner.v1.SignalH\x00R\x06signalB\x05\n" +
-	"\x03msg\"\xab\x01\n" +
+	"\x05spawn\x18\x01 \x01(\v2\x10.runner.v1.SpawnH\x00R\x05spawn\x12%\n" +
+	"\x04join\x18\x04 \x01(\v2\x0f.runner.v1.JoinH\x00R\x04join\x12+\n" +
+	"\x06replay\x18\x05 \x01(\v2\x11.runner.v1.ReplayH\x00R\x06replay\x12,\n" +
+	"\x03ack\x18\x06 \x01(\v2\x18.agentlink.v1.AgentIOAckH\x00R\x03ack\x12.\n" +
+	"\x06prompt\x18\a \x01(\v2\x14.agentlink.v1.PromptH\x00R\x06prompt\x12B\n" +
+	"\n" +
+	"permission\x18\b \x01(\v2 .agentlink.v1.PermissionDecisionH\x00R\n" +
+	"permission\x12%\n" +
+	"\x04stop\x18\t \x01(\v2\x0f.runner.v1.StopH\x00R\x04stopB\x05\n" +
+	"\x03msgJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04\"\xcb\x01\n" +
 	"\x11RunnerServerFrame\x12.\n" +
-	"\astarted\x18\x01 \x01(\v2\x12.runner.v1.StartedH\x00R\astarted\x12\x18\n" +
-	"\x06stdout\x18\x02 \x01(\fH\x00R\x06stdout\x12\x18\n" +
-	"\x06stderr\x18\x03 \x01(\fH\x00R\x06stderr\x12+\n" +
-	"\x06exited\x18\x04 \x01(\v2\x11.runner.v1.ExitedH\x00R\x06exitedB\x05\n" +
-	"\x03msg\"\a\n" +
-	"\x05Spawn\" \n" +
-	"\x06Signal\x12\x16\n" +
-	"\x06signum\x18\x01 \x01(\x05R\x06signum\"\x1b\n" +
+	"\astarted\x18\x01 \x01(\v2\x12.runner.v1.StartedH\x00R\astarted\x12;\n" +
+	"\freplay_start\x18\x05 \x01(\v2\x16.runner.v1.ReplayStartH\x00R\vreplayStart\x120\n" +
+	"\x05event\x18\x06 \x01(\v2\x18.agentlink.v1.AgentEventH\x00R\x05eventB\x05\n" +
+	"\x03msgJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05\"[\n" +
+	"\x05Spawn\x12\x1b\n" +
+	"\tstream_id\x18\x01 \x01(\fR\bstreamId\x125\n" +
+	"\asession\x18\x02 \x01(\v2\x1b.agentlink.v1.SessionParamsR\asession\"\x06\n" +
+	"\x04Join\"\x1e\n" +
+	"\x06Replay\x12\x14\n" +
+	"\x05after\x18\x01 \x01(\x04R\x05after\"\x06\n" +
+	"\x04Stop\"8\n" +
 	"\aStarted\x12\x10\n" +
-	"\x03pid\x18\x01 \x01(\x03R\x03pid\"%\n" +
-	"\x06Exited\x12\x1b\n" +
-	"\texit_code\x18\x01 \x01(\x05R\bexitCode2[\n" +
+	"\x03pid\x18\x01 \x01(\x03R\x03pid\x12\x1b\n" +
+	"\tstream_id\x18\x02 \x01(\fR\bstreamId\"=\n" +
+	"\vReplayStart\x12.\n" +
+	"\x05state\x18\x01 \x01(\v2\x18.agentlink.v1.AgentStateR\x05state2[\n" +
 	"\x12AgentRunnerService\x12E\n" +
 	"\x03Run\x12\x1c.runner.v1.RunnerClientFrame\x1a\x1c.runner.v1.RunnerServerFrame(\x010\x01BBZ@github.com/pomerium/agentops/harness/internal/runner/pb;runnerpbb\x06proto3"
 
@@ -444,27 +607,43 @@ func file_runner_v1_runner_proto_rawDescGZIP() []byte {
 	return file_runner_v1_runner_proto_rawDescData
 }
 
-var file_runner_v1_runner_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_runner_v1_runner_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_runner_v1_runner_proto_goTypes = []any{
-	(*RunnerClientFrame)(nil), // 0: runner.v1.RunnerClientFrame
-	(*RunnerServerFrame)(nil), // 1: runner.v1.RunnerServerFrame
-	(*Spawn)(nil),             // 2: runner.v1.Spawn
-	(*Signal)(nil),            // 3: runner.v1.Signal
-	(*Started)(nil),           // 4: runner.v1.Started
-	(*Exited)(nil),            // 5: runner.v1.Exited
+	(*RunnerClientFrame)(nil),     // 0: runner.v1.RunnerClientFrame
+	(*RunnerServerFrame)(nil),     // 1: runner.v1.RunnerServerFrame
+	(*Spawn)(nil),                 // 2: runner.v1.Spawn
+	(*Join)(nil),                  // 3: runner.v1.Join
+	(*Replay)(nil),                // 4: runner.v1.Replay
+	(*Stop)(nil),                  // 5: runner.v1.Stop
+	(*Started)(nil),               // 6: runner.v1.Started
+	(*ReplayStart)(nil),           // 7: runner.v1.ReplayStart
+	(*pb.AgentIOAck)(nil),         // 8: agentlink.v1.AgentIOAck
+	(*pb.Prompt)(nil),             // 9: agentlink.v1.Prompt
+	(*pb.PermissionDecision)(nil), // 10: agentlink.v1.PermissionDecision
+	(*pb.AgentEvent)(nil),         // 11: agentlink.v1.AgentEvent
+	(*pb.SessionParams)(nil),      // 12: agentlink.v1.SessionParams
+	(*pb.AgentState)(nil),         // 13: agentlink.v1.AgentState
 }
 var file_runner_v1_runner_proto_depIdxs = []int32{
-	2, // 0: runner.v1.RunnerClientFrame.spawn:type_name -> runner.v1.Spawn
-	3, // 1: runner.v1.RunnerClientFrame.signal:type_name -> runner.v1.Signal
-	4, // 2: runner.v1.RunnerServerFrame.started:type_name -> runner.v1.Started
-	5, // 3: runner.v1.RunnerServerFrame.exited:type_name -> runner.v1.Exited
-	0, // 4: runner.v1.AgentRunnerService.Run:input_type -> runner.v1.RunnerClientFrame
-	1, // 5: runner.v1.AgentRunnerService.Run:output_type -> runner.v1.RunnerServerFrame
-	5, // [5:6] is the sub-list for method output_type
-	4, // [4:5] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	2,  // 0: runner.v1.RunnerClientFrame.spawn:type_name -> runner.v1.Spawn
+	3,  // 1: runner.v1.RunnerClientFrame.join:type_name -> runner.v1.Join
+	4,  // 2: runner.v1.RunnerClientFrame.replay:type_name -> runner.v1.Replay
+	8,  // 3: runner.v1.RunnerClientFrame.ack:type_name -> agentlink.v1.AgentIOAck
+	9,  // 4: runner.v1.RunnerClientFrame.prompt:type_name -> agentlink.v1.Prompt
+	10, // 5: runner.v1.RunnerClientFrame.permission:type_name -> agentlink.v1.PermissionDecision
+	5,  // 6: runner.v1.RunnerClientFrame.stop:type_name -> runner.v1.Stop
+	6,  // 7: runner.v1.RunnerServerFrame.started:type_name -> runner.v1.Started
+	7,  // 8: runner.v1.RunnerServerFrame.replay_start:type_name -> runner.v1.ReplayStart
+	11, // 9: runner.v1.RunnerServerFrame.event:type_name -> agentlink.v1.AgentEvent
+	12, // 10: runner.v1.Spawn.session:type_name -> agentlink.v1.SessionParams
+	13, // 11: runner.v1.ReplayStart.state:type_name -> agentlink.v1.AgentState
+	0,  // 12: runner.v1.AgentRunnerService.Run:input_type -> runner.v1.RunnerClientFrame
+	1,  // 13: runner.v1.AgentRunnerService.Run:output_type -> runner.v1.RunnerServerFrame
+	13, // [13:14] is the sub-list for method output_type
+	12, // [12:13] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_runner_v1_runner_proto_init() }
@@ -474,14 +653,17 @@ func file_runner_v1_runner_proto_init() {
 	}
 	file_runner_v1_runner_proto_msgTypes[0].OneofWrappers = []any{
 		(*RunnerClientFrame_Spawn)(nil),
-		(*RunnerClientFrame_Stdin)(nil),
-		(*RunnerClientFrame_Signal)(nil),
+		(*RunnerClientFrame_Join)(nil),
+		(*RunnerClientFrame_Replay)(nil),
+		(*RunnerClientFrame_Ack)(nil),
+		(*RunnerClientFrame_Prompt)(nil),
+		(*RunnerClientFrame_Permission)(nil),
+		(*RunnerClientFrame_Stop)(nil),
 	}
 	file_runner_v1_runner_proto_msgTypes[1].OneofWrappers = []any{
 		(*RunnerServerFrame_Started)(nil),
-		(*RunnerServerFrame_Stdout)(nil),
-		(*RunnerServerFrame_Stderr)(nil),
-		(*RunnerServerFrame_Exited)(nil),
+		(*RunnerServerFrame_ReplayStart)(nil),
+		(*RunnerServerFrame_Event)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -489,7 +671,7 @@ func file_runner_v1_runner_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_runner_v1_runner_proto_rawDesc), len(file_runner_v1_runner_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
