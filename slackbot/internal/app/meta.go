@@ -150,7 +150,7 @@ func withPermissionPrompt(prompts map[string]string, requestID, ts string) map[s
 	return out
 }
 
-const maxThreadRead = 3000
+const maxThreadRead = 20000
 
 func (a *App) saveMeta(ctx context.Context, t *thread, edit func(m *sessionMeta)) {
 	t.statusMu.Lock()
