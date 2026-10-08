@@ -407,6 +407,26 @@ func TestStartingOverQuotesTheTriggeringReplyOnce(t *testing.T) {
 	}
 }
 
+func TestAFailedContinuationClosesItsStream(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+	f.app.HandleMention(context.Background(), mentionIn(f, "U1", "continue"))
+	waitFor(t, "the continuation's turn", func() bool { return len(f.api.promptRequests()) == 1 })
+	waitFor(t, "the session's stream", func() bool { return f.api.openStreams("old-1") == 1 })
+
+	f.api.setState("old-1", api.StateSuspended, api.StateLaunching, noReason)
+	f.api.emit("old-1", "t1", &pb.TurnFailed{Reason: "the workspace did not come back"})
+	f.api.setState("old-1", api.StateLaunching, api.StateSuspended, api.ReasonReviveFailed)
+	f.poster.waitForPost(t, "this time")
+
+	waitFor(t, "the failed continuation's stream to close", func() bool { return f.api.openStreams("old-1") == 0 })
+	if meta := f.slackState("old-1"); meta["watching"] != true {
+		t.Errorf("a session paused again should be watched for its ending: %v", meta)
+	}
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
