@@ -201,6 +201,15 @@ func TestTheApprovalDMSaysApprovedOnceTheSessionRuns(t *testing.T) {
 	}
 }
 
+func TestTheStatusSaysReadyAgainWhenTheTurnEnds(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	f.poster.waitForUpdate(t, "Working on it")
+
+	f.api.emit("sess-1", "opening", &pb.TurnCompleted{})
+	f.poster.waitForUpdate(t, "Ready — reply in this thread")
+}
+
 func TestPlainReplyFromANonParticipantIsDiscussion(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
