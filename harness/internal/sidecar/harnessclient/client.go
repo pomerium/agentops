@@ -60,6 +60,9 @@ type AgentSession struct {
 	Lost     <-chan struct{}
 	Send     func(*runnerpb.RunnerClientFrame) error
 	Close    func()
+
+	replays      uint64
+	replayStarts uint64
 }
 
 type Config struct {
@@ -643,6 +646,7 @@ func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 	}}}); err != nil {
 		return fmt.Errorf("%w: %v", errRunnerLost, err)
 	}
+	ag.replays++
 	c.log.Info("harness: agent io attached", "resume_after", open.GetConsumed())
 
 	commands := make(chan error, 1)
@@ -654,6 +658,10 @@ func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 		case f := <-ag.Frames:
 			switch {
 			case f.GetReplayStart() != nil:
+				ag.replayStarts++
+				if ag.replayStarts < ag.replays {
+					continue
+				}
 				replaying = false
 				if err := stream.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_State{
 					State: f.GetReplayStart().GetState(),
