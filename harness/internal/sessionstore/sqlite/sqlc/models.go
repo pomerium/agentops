@@ -4,6 +4,14 @@
 
 package sqlcgen
 
+type PodCommand struct {
+	SessionID string `json:"session_id"`
+	Kind      string `json:"kind"`
+	Key       string `json:"key"`
+	TurnID    string `json:"turn_id"`
+	Payload   []byte `json:"payload"`
+}
+
 type Session struct {
 	ID               string `json:"id"`
 	ClientID         string `json:"client_id"`
@@ -25,6 +33,9 @@ type Session struct {
 	SuspendedAt      int64  `json:"suspended_at"`
 	CreatedAt        int64  `json:"created_at"`
 	UpdatedAt        int64  `json:"updated_at"`
+	Executor         string `json:"executor"`
+	StreamID         string `json:"stream_id"`
+	PodSeq           int64  `json:"pod_seq"`
 }
 
 type SessionEvent struct {

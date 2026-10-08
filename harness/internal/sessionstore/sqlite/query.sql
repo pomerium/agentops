@@ -102,3 +102,40 @@ WHERE session_id = ? AND seq > ?
 ORDER BY seq
 LIMIT ?;
 
+
+-- name: UpdateSessionLink :execrows
+UPDATE sessions
+SET executor = sqlc.arg(executor),
+    stream_id = sqlc.arg(stream_id),
+    pod_seq = CASE WHEN stream_id = sqlc.arg(stream_id)
+                   THEN MAX(pod_seq, CAST(sqlc.arg(pod_seq) AS INTEGER))
+                   ELSE CAST(sqlc.arg(pod_seq) AS INTEGER) END,
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id);
+
+-- name: AdvancePodSeq :execrows
+UPDATE sessions
+SET pod_seq = MAX(pod_seq, CAST(sqlc.arg(pod_seq) AS INTEGER))
+WHERE id = sqlc.arg(id);
+
+-- name: PutPodCommand :exec
+INSERT INTO pod_commands (session_id, kind, key, turn_id, payload)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (session_id, kind, key) DO UPDATE SET turn_id = excluded.turn_id, payload = excluded.payload;
+
+-- name: ListPodCommands :many
+SELECT session_id, kind, key, turn_id, payload FROM pod_commands
+WHERE session_id = ?
+ORDER BY rowid;
+
+-- name: DeletePodCommand :exec
+DELETE FROM pod_commands
+WHERE session_id = ? AND kind = ? AND key = ?;
+
+-- name: DeletePodCommandsForTurn :exec
+DELETE FROM pod_commands
+WHERE session_id = ? AND turn_id = ?;
+
+-- name: DeletePodCommandsForSession :exec
+DELETE FROM pod_commands
+WHERE session_id = ?;

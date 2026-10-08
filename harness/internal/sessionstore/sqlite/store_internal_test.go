@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+
 	"github.com/pomerium/agentops/harness/api"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
+	migrations "github.com/pomerium/agentops/harness/internal/sessionstore/sqlite/migrations"
 	sqlcgen "github.com/pomerium/agentops/harness/internal/sessionstore/sqlite/sqlc"
 )
 
@@ -69,5 +72,42 @@ func TestFinishSessionSavesNothingWhenAnEventFails(t *testing.T) {
 	}
 	if got.Status != api.StateRunning || got.EventSeq != 0 {
 		t.Errorf("a failed FinishSession left status %v and event seq %d; want running and 0", got.Status, got.EventSeq)
+	}
+}
+
+func TestADatabaseFromBeforeTheMigrationSquashGetsThePodLink(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, s.db, migrations.FS)
+	if err != nil {
+		t.Fatalf("goose provider: %v", err)
+	}
+	if _, err := provider.DownTo(ctx, 1); err != nil {
+		t.Fatalf("migrate down to 1: %v", err)
+	}
+	for v := 2; v <= 10; v++ {
+		if _, err := s.db.ExecContext(ctx, "INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, 1)", v); err != nil {
+			t.Fatalf("record old version %d: %v", v, err)
+		}
+	}
+	_ = s.Close()
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.CreateSession(ctx, sessionstore.Session{ID: "a", ClientID: "c", ConversationRef: "one"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.UpdateSessionLink(ctx, "a", "exec", "stream", 4); err != nil {
+		t.Fatalf("UpdateSessionLink on a database from before the squash: %v", err)
+	}
+	if got, err := s.GetSession(ctx, "a"); err != nil || got.PodSeq != 4 {
+		t.Fatalf("GetSession = %+v, %v; want pod seq 4", got, err)
 	}
 }
