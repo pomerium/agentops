@@ -129,6 +129,7 @@ type thread struct {
 	stop          context.CancelFunc
 	replayThrough int64
 	adoptedState  api.SessionState
+	catchingUp    bool
 }
 
 type idleNotice struct {
@@ -151,7 +152,7 @@ func (t *thread) pastPause(seq int64) bool {
 }
 
 func (t *thread) pastApproval(seq int64) bool {
-	if seq > t.replayThrough {
+	if seq > t.replayThrough && !t.catchingUp {
 		return false
 	}
 	return t.adoptedState != api.StateAwaitingApproval || t.meta().ApprovalMessageTS != ""
