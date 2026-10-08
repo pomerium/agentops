@@ -55,14 +55,14 @@ func (a *App) sweepWatched(ctx context.Context, since time.Time) bool {
 		case !m.Watching:
 			continue
 		}
-		if !a.renderWatchedEnding(ctx, view, m) {
+		if !a.renderMissed(ctx, view, m, false) {
 			complete = false
 		}
 	}
 	return complete
 }
 
-func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m sessionMeta) bool {
+func (a *App) renderMissed(ctx context.Context, view *pb.SessionView, m sessionMeta, keepWatching bool) bool {
 	t := threadFromMeta(view, m)
 	if ok, _ := a.registerThread(t); !ok {
 		return true
@@ -76,7 +76,7 @@ func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m s
 			Ref: a.ref(view.GetId()), AfterSeq: last,
 		})
 		if err != nil {
-			a.log.WarnContext(ctx, "sweep: read a paused session's events failed; the next sweep continues from here",
+			a.log.WarnContext(ctx, "read a paused session's events failed; the next sweep continues from here",
 				"session", view.GetId(), "after_seq", last, "err", err)
 			a.saveMeta(ctx, t, func(meta *sessionMeta) { meta.LastSeq = last })
 			return false
@@ -93,11 +93,11 @@ func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m s
 	}
 
 	a.saveMeta(ctx, t, func(meta *sessionMeta) {
-		meta.Watching = false
+		meta.Watching = keepWatching
 		meta.LastSeq = last
 	})
-	a.log.InfoContext(ctx, "sweep: rendered a paused session's ending",
-		"session", view.GetId(), "state", view.GetState(), "events", rendered)
+	a.log.InfoContext(ctx, "rendered the events of a session the bot was not following",
+		"session", view.GetId(), "state", view.GetState(), "events", rendered, "watching", keepWatching)
 	return true
 }
 

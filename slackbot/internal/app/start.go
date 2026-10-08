@@ -124,6 +124,7 @@ func (a *App) adopt(ctx context.Context, view *pb.SessionView, atTS string) (*th
 		return nil, err
 	}
 	t := threadFromMeta(view, m)
+	t.replayThrough = view.GetLastSeq()
 	ok, flipped := a.registerThread(t)
 	if !ok {
 		if existing := a.lookup(m.ChannelID, m.ThreadTS, m.TeamID, m.UserID); existing != nil {

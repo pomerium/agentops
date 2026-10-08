@@ -196,9 +196,12 @@ func (a *App) ReconcileOnStartup(ctx context.Context) {
 		return
 	}
 	sessions := res.GetSessions()
-	followed := 0
+	followed, watched := 0, 0
 	for _, view := range sessions {
 		if view.GetState() == api.StateSuspended {
+			if a.watchMissedPause(ctx, view) {
+				watched++
+			}
 			continue
 		}
 		if a.followAgain(ctx, view) {
@@ -206,7 +209,22 @@ func (a *App) ReconcileOnStartup(ctx context.Context) {
 		}
 	}
 	a.log.InfoContext(ctx, "slack startup reconcile complete",
-		"live_sessions", len(sessions), "followed_again", followed)
+		"live_sessions", len(sessions), "followed_again", followed, "pauses_caught_up", watched)
+}
+
+func (a *App) watchMissedPause(ctx context.Context, view *pb.SessionView) bool {
+	m, err := a.loadMeta(ctx, view)
+	switch {
+	case errors.Is(err, errNoSlackState):
+		return false
+	case err != nil:
+		a.log.WarnContext(ctx, "startup reconcile: could not read a paused session's thread",
+			"session", view.GetId(), "err", err)
+		return false
+	case m.Watching:
+		return false
+	}
+	return a.renderMissed(ctx, view, m, true)
 }
 
 func (a *App) followAgain(ctx context.Context, view *pb.SessionView) bool {
