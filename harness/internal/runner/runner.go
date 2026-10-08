@@ -1,15 +1,13 @@
 package runner
 
 import (
+	"bytes"
+	"context"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -22,8 +20,6 @@ import (
 const DefaultSocket = "/var/run/agentops/runner.sock"
 
 const SocketEnv = "SIDECAR_RUNNER_SOCKET"
-
-const stdioChunk = 64 << 10
 
 const defaultKillDelay = 10 * time.Second
 
@@ -39,6 +35,7 @@ type options struct {
 	pipe      func() (*os.File, *os.File, error)
 	killDelay time.Duration
 	logger    *slog.Logger
+	outboxMax int
 }
 
 func WithCommand(argv []string) Option { return func(o *options) { o.command = argv } }
@@ -54,8 +51,10 @@ type Service struct {
 	cfg options
 	log *slog.Logger
 
-	mu   sync.Mutex
-	busy bool
+	mu     sync.Mutex
+	sess   *session
+	client context.CancelCauseFunc
+	closed bool
 }
 
 func New(opts ...Option) *Service {
@@ -75,6 +74,9 @@ func New(opts ...Option) *Service {
 	if o.killDelay <= 0 {
 		o.killDelay = defaultKillDelay
 	}
+	if o.outboxMax <= 0 {
+		o.outboxMax = outboxMax
+	}
 	log := o.logger
 	if log == nil {
 		log = slog.Default()
@@ -86,98 +88,80 @@ func (s *Service) Register(gs *grpc.Server) {
 	runnerpb.RegisterAgentRunnerServiceServer(gs, s)
 }
 
-func (s *Service) claim() bool {
+func (s *Service) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.busy {
-		return false
+	s.closed = true
+	sess := s.sess
+	s.mu.Unlock()
+	if sess != nil {
+		sess.proc.terminate(s.log, s.cfg.killDelay)
 	}
-	s.busy = true
-	return true
 }
 
-func (s *Service) release() {
+var errReplaced = errors.New("replaced by a newer runner stream")
+
+func (s *Service) open(first *runnerpb.RunnerClientFrame) (*session, error) {
 	s.mu.Lock()
-	s.busy = false
+	defer s.mu.Unlock()
+	switch {
+	case first.GetSpawn() != nil:
+		sp := first.GetSpawn()
+		if s.sess != nil {
+			if !bytes.Equal(s.sess.streamID, sp.GetStreamId()) {
+				return nil, status.Error(codes.AlreadyExists, "an agent session with another stream id is running")
+			}
+			return s.sess, nil
+		}
+		if s.closed {
+			return nil, status.Error(codes.Unavailable, "the runner is shutting down")
+		}
+		proc, err := s.spawn()
+		if err != nil {
+			s.log.Error("agent-runner: spawn failed", "err", err)
+			return nil, status.Errorf(codes.Internal, "spawn agent: %v", err)
+		}
+		s.log.Info("agent-runner: agent started", "pid", proc.pid(), "command", s.cfg.command)
+		s.sess = newSession(s.log, sp.GetStreamId(), proc, s.cfg.killDelay, s.cfg.outboxMax)
+		go s.sess.run(sp.GetSession())
+		return s.sess, nil
+	case first.GetJoin() != nil:
+		if s.sess == nil {
+			return nil, status.Error(codes.NotFound, "no agent session runs")
+		}
+		return s.sess, nil
+	default:
+		return nil, status.Error(codes.InvalidArgument, "the first runner frame must be Spawn or Join")
+	}
+}
+
+func (s *Service) claimClient(cancel context.CancelCauseFunc) {
+	s.mu.Lock()
+	prev := s.client
+	s.client = cancel
 	s.mu.Unlock()
+	if prev != nil {
+		prev(errReplaced)
+	}
 }
 
 func (s *Service) Run(stream runnerpb.AgentRunnerService_RunServer) error {
-	if !s.claim() {
-		return status.Error(codes.AlreadyExists, "an agent is already running")
-	}
-	defer s.release()
-
 	first, err := stream.Recv()
 	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "run closed before Spawn: %v", err)
+		return status.Errorf(codes.InvalidArgument, "run closed before its first frame: %v", err)
 	}
-	if first.GetSpawn() == nil {
-		return status.Error(codes.InvalidArgument, "the first runner frame must be Spawn")
-	}
-
-	proc, err := s.spawn()
+	sess, err := s.open(first)
 	if err != nil {
-		s.log.Error("agent-runner: spawn failed", "err", err)
-		return status.Errorf(codes.Internal, "spawn agent: %v", err)
+		return err
 	}
-	defer proc.terminate(s.log, s.cfg.killDelay)
+	ctx, cancel := context.WithCancelCause(stream.Context())
+	defer cancel(nil)
+	s.claimClient(cancel)
 
-	s.log.Info("agent-runner: agent started", "pid", proc.pid(), "command", s.cfg.command)
-	return s.bridge(stream, proc)
-}
-
-func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *agentProc) error {
-	ctx := stream.Context()
-	streamDone := make(chan struct{})
-	defer close(streamDone)
-	out := make(chan *runnerpb.RunnerServerFrame, 16)
-	sendDone := make(chan struct{})
-	var sendErr error
-
-	push := func(f *runnerpb.RunnerServerFrame) bool {
-		select {
-		case out <- f:
-			return true
-		case <-sendDone:
-			return false
-		}
+	if err := stream.Send(&runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_Started{Started: &runnerpb.Started{
+		Pid: int64(sess.proc.pid()), StreamId: sess.streamID,
+	}}}); err != nil {
+		return err
 	}
-
-	go func() {
-		defer close(sendDone)
-		for {
-			select {
-			case f := <-out:
-				if sendErr = stream.Send(f); sendErr != nil || f.GetExited() != nil {
-					return
-				}
-			case <-streamDone:
-				return
-			}
-		}
-	}()
-
-	if !push(&runnerpb.RunnerServerFrame{
-		Msg: &runnerpb.RunnerServerFrame_Started{Started: &runnerpb.Started{Pid: int64(proc.pid())}},
-	}) {
-		return nil
-	}
-
-	pumps := &sync.WaitGroup{}
-	pumps.Add(2)
-	go func() {
-		defer pumps.Done()
-		s.pump(proc.stdout, push, func(b []byte) *runnerpb.RunnerServerFrame {
-			return &runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_Stdout{Stdout: b}}
-		})
-	}()
-	go func() {
-		defer pumps.Done()
-		s.pump(proc.stderr, push, func(b []byte) *runnerpb.RunnerServerFrame {
-			return &runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_Stderr{Stderr: b}}
-		})
-	}()
 
 	type recvResult struct {
 		frame *runnerpb.RunnerClientFrame
@@ -187,15 +171,9 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 	go func() {
 		for {
 			f, err := stream.Recv()
-			if b := f.GetStdin(); err == nil && b != nil {
-				if _, err := proc.stdin.Write(b); err != nil {
-					s.log.Warn("agent-runner: write to agent stdin failed", "err", err)
-				}
-				continue
-			}
 			select {
 			case recvCh <- recvResult{f, err}:
-			case <-streamDone:
+			case <-ctx.Done():
 				return
 			}
 			if err != nil {
@@ -204,223 +182,99 @@ func (s *Service) bridge(stream runnerpb.AgentRunnerService_RunServer, proc *age
 		}
 	}()
 
+	var feedCancel context.CancelFunc
+	var feedDone chan struct{}
+	feedErr := make(chan error, 1)
+	stopFeed := func() bool {
+		if feedCancel == nil {
+			return true
+		}
+		feedCancel()
+		select {
+		case <-feedDone:
+		case <-ctx.Done():
+			return false
+		}
+		feedCancel, feedDone = nil, nil
+		return true
+	}
+	defer func() {
+		if feedCancel != nil {
+			feedCancel()
+		}
+	}()
+
 	for {
 		select {
 		case r := <-recvCh:
 			if r.err != nil {
-				if errors.Is(r.err, io.EOF) {
-					s.log.Info("agent-runner: run stream closed; stopping the agent", "pid", proc.pid())
-					return nil
+				s.log.Debug("agent-runner: runner stream closed; the agent keeps running", "err", r.err)
+				return nil
+			}
+			switch f := r.frame; {
+			case f.GetReplay() != nil:
+				if !stopFeed() {
+					continue
 				}
-				s.log.Info("agent-runner: run stream failed; stopping the agent", "pid", proc.pid(), "err", r.err)
-				return r.err
+				after := f.GetReplay().GetAfter()
+				if err := sess.out.check(after); err != nil {
+					return status.Errorf(codes.FailedPrecondition, "replay: %v", err)
+				}
+				fctx, fcancel := context.WithCancel(ctx)
+				done := make(chan struct{})
+				feedCancel, feedDone = fcancel, done
+				go func() {
+					defer close(done)
+					if err := feed(fctx, stream, sess, after); err != nil && fctx.Err() == nil {
+						select {
+						case feedErr <- err:
+						default:
+						}
+					}
+				}()
+			case f.GetAck() != nil:
+				sess.out.ack(f.GetAck().GetConsumed())
+			case f.GetPrompt() != nil:
+				sess.prompt(f.GetPrompt())
+			case f.GetPermission() != nil:
+				sess.decide(f.GetPermission())
+			case f.GetStop() != nil:
+				s.log.Info("agent-runner: stop requested", "pid", sess.proc.pid())
+				sess.stop()
+			case f.GetSpawn() != nil || f.GetJoin() != nil:
+				return status.Error(codes.InvalidArgument, "Spawn and Join are only valid as the first frame")
 			}
-			if sig := r.frame.GetSignal(); sig != nil {
-				proc.signal(s.log, syscall.Signal(sig.GetSignum()))
+		case err := <-feedErr:
+			if errors.Is(err, errReplayGone) {
+				return status.Errorf(codes.FailedPrecondition, "replay: %v", err)
 			}
+			return err
 		case <-ctx.Done():
-			s.log.Info("agent-runner: run stream canceled; stopping the agent", "pid", proc.pid())
+			if errors.Is(context.Cause(ctx), errReplaced) {
+				return status.Error(codes.Aborted, errReplaced.Error())
+			}
 			return ctx.Err()
-		case <-proc.done:
-			code := proc.exitCode()
-			proc.signal(s.log, syscall.SIGKILL)
-			_ = proc.stdout.SetReadDeadline(time.Now())
-			_ = proc.stderr.SetReadDeadline(time.Now())
-			drained := make(chan struct{})
-			go func() { pumps.Wait(); close(drained) }()
-			select {
-			case <-drained:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			s.log.Info("agent-runner: agent exited", "pid", proc.pid(), "exit_code", code)
-			push(&runnerpb.RunnerServerFrame{
-				Msg: &runnerpb.RunnerServerFrame_Exited{Exited: &runnerpb.Exited{ExitCode: int32(code)}},
-			})
-			select {
-			case <-sendDone:
-				return sendErr
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		case <-sendDone:
-			s.log.Info("agent-runner: send failed; stopping the agent", "pid", proc.pid(), "err", sendErr)
-			return sendErr
 		}
 	}
 }
 
-func (s *Service) pump(f *os.File, push func(*runnerpb.RunnerServerFrame) bool, wrap func([]byte) *runnerpb.RunnerServerFrame) {
-	buf := make([]byte, stdioChunk)
-	emit := func(n int) bool {
-		chunk := make([]byte, n)
-		copy(chunk, buf[:n])
-		return push(wrap(chunk))
+func feed(ctx context.Context, stream runnerpb.AgentRunnerService_RunServer, sess *session, after uint64) error {
+	if err := stream.Send(&runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_ReplayStart{ReplayStart: &runnerpb.ReplayStart{
+		State: sess.state(),
+	}}}); err != nil {
+		return err
 	}
+	cursor := after
 	for {
-		n, err := f.Read(buf)
-		if n > 0 && !emit(n) {
-			return
-		}
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			break
-		}
+		evs, err := sess.out.after(ctx, cursor)
 		if err != nil {
-			return
+			return err
 		}
-	}
-	if err := f.SetReadDeadline(time.Time{}); err != nil {
-		return
-	}
-	rc, err := f.SyscallConn()
-	if err != nil {
-		return
-	}
-	var pending int
-	var ioctlErr error
-	if err := rc.Control(func(fd uintptr) {
-		pending, ioctlErr = pipeBuffered(int(fd))
-	}); err != nil || ioctlErr != nil {
-		return
-	}
-	for pending > 0 {
-		var n int
-		var rerr error
-		if err := rc.Read(func(fd uintptr) bool {
-			n, rerr = syscall.Read(int(fd), buf[:min(pending, len(buf))])
-			return true
-		}); err != nil || rerr != nil || n <= 0 || !emit(n) {
-			return
-		}
-		pending -= n
-	}
-}
-
-type agentProc struct {
-	cmd    *exec.Cmd
-	stdin  *os.File
-	stdout *os.File
-	stderr *os.File
-
-	done chan struct{}
-	code atomic.Int32
-
-	once sync.Once
-}
-
-func (p *agentProc) exitCode() int32 { return p.code.Load() }
-
-func (p *agentProc) pid() int {
-	if p.cmd.Process == nil {
-		return 0
-	}
-	return p.cmd.Process.Pid
-}
-
-func (s *Service) spawn() (*agentProc, error) {
-	var opened []*os.File
-	pipe := func() (*os.File, *os.File, error) {
-		r, w, err := s.cfg.pipe()
-		if err != nil {
-			for _, f := range opened {
-				_ = f.Close()
+		for _, ev := range evs {
+			if err := stream.Send(&runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_Event{Event: ev}}); err != nil {
+				return err
 			}
-			return nil, nil, err
+			cursor = ev.GetSeq()
 		}
-		opened = append(opened, r, w)
-		return r, w, nil
 	}
-	inR, inW, err := pipe()
-	if err != nil {
-		return nil, err
-	}
-	outR, outW, err := pipe()
-	if err != nil {
-		return nil, err
-	}
-	errR, errW, err := pipe()
-	if err != nil {
-		return nil, err
-	}
-
-	cmd := exec.Command(s.cfg.command[0], s.cfg.command[1:]...) //nolint:gosec // the command is operator configuration
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, errW
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	exited, err := s.cfg.start(cmd)
-	_ = inR.Close()
-	_ = outW.Close()
-	_ = errW.Close()
-	if err != nil {
-		_, _ = inW.Close(), outR.Close()
-		_ = errR.Close()
-		return nil, err
-	}
-	proc := &agentProc{cmd: cmd, stdin: inW, stdout: outR, stderr: errR, done: make(chan struct{})}
-	go func() {
-		proc.code.Store(int32(<-exited))
-		close(proc.done)
-	}()
-	return proc, nil
-}
-
-func (p *agentProc) signal(log *slog.Logger, sig syscall.Signal) {
-	pid := p.pid()
-	if pid <= 0 {
-		return
-	}
-	if err := syscall.Kill(-pid, sig); err != nil {
-		log.Debug("agent-runner: signal failed", "pid", pid, "signal", sig.String(), "err", err)
-	}
-}
-
-func (p *agentProc) terminate(log *slog.Logger, delay time.Duration) {
-	p.once.Do(func() {
-		defer p.closeFDs()
-		select {
-		case <-p.done:
-		default:
-			p.signal(log, syscall.SIGTERM)
-			select {
-			case <-p.done:
-			case <-time.After(delay):
-				log.Warn("agent-runner: agent ignored TERM; killing", "pid", p.pid(), "after", delay.String())
-			}
-		}
-		p.signal(log, syscall.SIGKILL)
-		select {
-		case <-p.done:
-		case <-time.After(5 * time.Second):
-			log.Error("agent-runner: agent did not exit after KILL", "pid", p.pid())
-		}
-	})
-}
-
-func (p *agentProc) closeFDs() {
-	_ = p.stdin.Close()
-	_ = p.stdout.Close()
-	_ = p.stderr.Close()
-}
-
-func startAndWait(cmd *exec.Cmd) (<-chan int, error) {
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start agent: %w", err)
-	}
-	exited := make(chan int, 1)
-	go func() {
-		err := cmd.Wait()
-		exited <- exitCode(err)
-	}()
-	return exited, nil
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return ee.ExitCode()
-	}
-	return -1
 }
