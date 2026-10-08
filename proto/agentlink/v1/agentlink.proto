@@ -231,7 +231,8 @@ message SessionFailed {
 }
 
 // AgentMessage is one part of the reply of the agent. A tool call or the end
-// of the turn ends a part.
+// of the turn ends a part. A part has at most 256 KiB of text. The runner
+// starts a new part when a part gets to that size.
 message AgentMessage {
   string part_id = 1; // the turn ID, a period, and the part number
   string text = 2;
@@ -239,7 +240,8 @@ message AgentMessage {
 }
 
 // AgentThought is the reasoning text of the agent before its next reply or
-// tool call.
+// tool call. An event has at most 256 KiB of text. The runner sends a longer
+// thought in more than one event.
 message AgentThought {
   string text = 1;
 }
@@ -250,7 +252,9 @@ message ToolCall {
   string title = 2;
   string kind = 3;
   string status = 4;
-  bytes raw_input = 5; // JSON; empty if the agent did not send an input
+  // JSON. Empty if the agent did not send an input, or if the input is
+  // larger than 256 KiB.
+  bytes raw_input = 5;
   bool update = 6; // true if this changes an earlier tool call
 }
 

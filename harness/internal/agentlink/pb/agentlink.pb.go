@@ -1507,7 +1507,8 @@ func (x *SessionFailed) GetResumeUnavailable() bool {
 }
 
 // AgentMessage is one part of the reply of the agent. A tool call or the end
-// of the turn ends a part.
+// of the turn ends a part. A part has at most 256 KiB of text. The runner
+// starts a new part when a part gets to that size.
 type AgentMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PartId        string                 `protobuf:"bytes,1,opt,name=part_id,json=partId,proto3" json:"part_id,omitempty"` // the turn ID, a period, and the part number
@@ -1569,7 +1570,8 @@ func (x *AgentMessage) GetFinal() bool {
 }
 
 // AgentThought is the reasoning text of the agent before its next reply or
-// tool call.
+// tool call. An event has at most 256 KiB of text. The runner sends a longer
+// thought in more than one event.
 type AgentThought struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
@@ -1618,11 +1620,13 @@ type ToolCall struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// If empty on an update, the title is the one from an earlier event.
-	Title         string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	Kind          string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
-	Status        string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
-	RawInput      []byte `protobuf:"bytes,5,opt,name=raw_input,json=rawInput,proto3" json:"raw_input,omitempty"` // JSON; empty if the agent did not send an input
-	Update        bool   `protobuf:"varint,6,opt,name=update,proto3" json:"update,omitempty"`                    // true if this changes an earlier tool call
+	Title  string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Kind   string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Status string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	// JSON. Empty if the agent did not send an input, or if the input is
+	// larger than 256 KiB.
+	RawInput      []byte `protobuf:"bytes,5,opt,name=raw_input,json=rawInput,proto3" json:"raw_input,omitempty"`
+	Update        bool   `protobuf:"varint,6,opt,name=update,proto3" json:"update,omitempty"` // true if this changes an earlier tool call
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
