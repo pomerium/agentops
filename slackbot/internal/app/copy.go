@@ -13,6 +13,7 @@ const (
 	msgStatusPreparing            = ":hourglass_flowing_sand: Getting ready…"
 	msgStatusAwaitingApproval     = ":lock: Waiting for approval — I've sent you the link by DM."
 	msgStatusReady                = ":rocket: Ready — reply in this thread to talk to me."
+	msgStatusReadyInRoom          = ":rocket: Ready — @mention me in this thread to talk to me."
 	msgStatusReadyWorking         = ":rocket: Ready. Working on it…"
 	msgStatusFinished             = ":checkered_flag: Finished. @mention me here and I'll continue in a fresh session."
 	msgStatusIdleEnded            = ":zzz: Nothing came through for a while, so I've closed this session and freed the workspace. @mention me here and I'll continue in a fresh session."
@@ -30,11 +31,15 @@ func statusWorkspaceReleased(window time.Duration) string {
 		humanWindow(window))
 }
 
-func readyStatusFor(working bool) string {
-	if working {
+func readyStatusFor(working, multiplayer bool) string {
+	switch {
+	case working:
 		return msgStatusReadyWorking
+	case multiplayer:
+		return msgStatusReadyInRoom
+	default:
+		return msgStatusReady
 	}
-	return msgStatusReady
 }
 
 func statusStopped(reason string) string {
