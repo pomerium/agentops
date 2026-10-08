@@ -617,3 +617,45 @@ func TestAPendingPermissionThatIsNotRecordedWaitsForItsEvent(t *testing.T) {
 		t.Errorf("pending requests = %v, want none until the request is recorded", got)
 	}
 }
+
+type cancellablePodLog struct {
+	EventLog
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (l cancellablePodLog) AppendFromPod(
+	ctx context.Context, ev *pb.Event, seq uint64,
+) error {
+	close(l.entered)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.release:
+		return errors.New("released stalled write")
+	}
+}
+
+func TestClosingBindingCancelsPodWrite(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	entered, release := make(chan struct{}), make(chan struct{})
+	svc.events = cancellablePodLog{
+		EventLog: svc.events, entered: entered, release: release,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.handleEvent(context.Background(), b, turnFinished(2, "t1"))
+	}()
+	<-entered
+	b.close(0)
+	select {
+	case <-done:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("closed binding did not cancel its stalled pod write")
+	}
+}
