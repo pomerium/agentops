@@ -79,7 +79,6 @@ type SidecarFrame struct {
 	//
 	//	*SidecarFrame_Hello
 	//	*SidecarFrame_Status
-	//	*SidecarFrame_Exited
 	Msg           isSidecarFrame_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -140,15 +139,6 @@ func (x *SidecarFrame) GetStatus() *Status {
 	return nil
 }
 
-func (x *SidecarFrame) GetExited() *AgentExited {
-	if x != nil {
-		if x, ok := x.Msg.(*SidecarFrame_Exited); ok {
-			return x.Exited
-		}
-	}
-	return nil
-}
-
 type isSidecarFrame_Msg interface {
 	isSidecarFrame_Msg()
 }
@@ -161,15 +151,9 @@ type SidecarFrame_Status struct {
 	Status *Status `protobuf:"bytes,2,opt,name=status,proto3,oneof"` // state changes and heartbeats
 }
 
-type SidecarFrame_Exited struct {
-	Exited *AgentExited `protobuf:"bytes,3,opt,name=exited,proto3,oneof"` // the agent process stopped
-}
-
 func (*SidecarFrame_Hello) isSidecarFrame_Msg() {}
 
 func (*SidecarFrame_Status) isSidecarFrame_Msg() {}
-
-func (*SidecarFrame_Exited) isSidecarFrame_Msg() {}
 
 type ManagerFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -270,9 +254,10 @@ type ManagerFrame_Spawn struct {
 }
 
 type ManagerFrame_Shutdown struct {
-	// Ends the session. The sidecar stops the agent and envoy. Then it waits
-	// until the pod is deleted. It does not exit, because the kubelet restarts
-	// a container that exits. The manager deletes the pod.
+	// Ends the session. The sidecar tells the runner to stop the agent, and it
+	// stops envoy. Then it waits until the pod is deleted. It does not exit,
+	// because the kubelet restarts a container that exits. The manager deletes
+	// the pod.
 	Shutdown *Shutdown `protobuf:"bytes,3,opt,name=shutdown,proto3,oneof"`
 }
 
@@ -326,13 +311,12 @@ func (*Heartbeat) Descriptor() ([]byte, []int) {
 
 type SidecarHello struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // 1 is the only version
-	// Counts the Attach streams since the pod started. The first is 1. Use it
-	// only for logs and metrics.
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"` // 2 is the only version
+	// Counts the Attach streams since the sidecar started. The first is 1. Use
+	// it only for logs and metrics.
 	Attempt uint32 `protobuf:"varint,2,opt,name=attempt,proto3" json:"attempt,omitempty"`
-	// True on a new Attach stream if the sidecar has an agent and has not yet
-	// sent AgentExited for it. An agent that stops during a drop stays "running"
-	// until the sidecar sends AgentExited on the new stream.
+	// True if the runner has an agent session. It stays true after the agent
+	// exits. The manager learns about the exit from the AgentExited event.
 	AgentRunning  bool `protobuf:"varint,3,opt,name=agent_running,json=agentRunning,proto3" json:"agent_running,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -590,7 +574,7 @@ type Status struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	State Status_State           `protobuf:"varint,1,opt,name=state,proto3,enum=agentlink.v1.Status_State" json:"state,omitempty"`
 	// Set on STATE_ERROR. Examples: envoy_exited, runner_unreachable,
-	// token_terminal:<reason>, agentio_resume_invalid, agentio_stream_mismatch.
+	// runner_lost, token_terminal:<reason>, agentio_stream_mismatch.
 	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -640,66 +624,22 @@ func (x *Status) GetReason() string {
 	return ""
 }
 
-// AgentExited tells the manager that the agent process stopped. The sidecar
-// sends it after the manager acks all output of the agent.
-type AgentExited struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AgentExited) Reset() {
-	*x = AgentExited{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AgentExited) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AgentExited) ProtoMessage() {}
-
-func (x *AgentExited) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AgentExited.ProtoReflect.Descriptor instead.
-func (*AgentExited) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *AgentExited) GetExitCode() int32 {
-	if x != nil {
-		return x.ExitCode
-	}
-	return 0
-}
-
-// SpawnAgent starts the agent through the runner. The sidecar starts one agent
-// at most.
+// SpawnAgent starts the agent. The runner starts the agent process, and then
+// it opens the ACP session with these parameters. The sidecar starts one
+// agent at most.
 type SpawnAgent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The ID of the AgentIO byte stream. The manager makes a new random ID for
-	// each run. Each AgentIOOpen must contain it.
-	StreamId      []byte `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	// The ID of the agent session. The manager makes a new random ID for each
+	// run. Each AgentIOOpen must contain it.
+	StreamId      []byte         `protobuf:"bytes,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
+	Session       *SessionParams `protobuf:"bytes,2,opt,name=session,proto3" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SpawnAgent) Reset() {
 	*x = SpawnAgent{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[9]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -711,7 +651,7 @@ func (x *SpawnAgent) String() string {
 func (*SpawnAgent) ProtoMessage() {}
 
 func (x *SpawnAgent) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[9]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -724,7 +664,7 @@ func (x *SpawnAgent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpawnAgent.ProtoReflect.Descriptor instead.
 func (*SpawnAgent) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{9}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SpawnAgent) GetStreamId() []byte {
@@ -732,6 +672,148 @@ func (x *SpawnAgent) GetStreamId() []byte {
 		return x.StreamId
 	}
 	return nil
+}
+
+func (x *SpawnAgent) GetSession() *SessionParams {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
+// SessionParams are the parameters of the ACP session.
+type SessionParams struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Cwd   string                 `protobuf:"bytes,1,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	// The MCP servers of the session. Each is an HTTP server on a loopback
+	// address that envoy serves.
+	McpServers []*McpServer `protobuf:"bytes,2,rep,name=mcp_servers,json=mcpServers,proto3" json:"mcp_servers,omitempty"`
+	// The runner adds this text to the system prompt of the agent.
+	SystemPrompt string `protobuf:"bytes,3,opt,name=system_prompt,json=systemPrompt,proto3" json:"system_prompt,omitempty"`
+	// The values of the session config options, by option ID. If the agent does
+	// not offer an option, the session fails.
+	Config map[string]string `protobuf:"bytes,4,rep,name=config,proto3" json:"config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// If set, the runner resumes this ACP session and does not start a new one.
+	ResumeSessionId string `protobuf:"bytes,5,opt,name=resume_session_id,json=resumeSessionId,proto3" json:"resume_session_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SessionParams) Reset() {
+	*x = SessionParams{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionParams) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionParams) ProtoMessage() {}
+
+func (x *SessionParams) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionParams.ProtoReflect.Descriptor instead.
+func (*SessionParams) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SessionParams) GetCwd() string {
+	if x != nil {
+		return x.Cwd
+	}
+	return ""
+}
+
+func (x *SessionParams) GetMcpServers() []*McpServer {
+	if x != nil {
+		return x.McpServers
+	}
+	return nil
+}
+
+func (x *SessionParams) GetSystemPrompt() string {
+	if x != nil {
+		return x.SystemPrompt
+	}
+	return ""
+}
+
+func (x *SessionParams) GetConfig() map[string]string {
+	if x != nil {
+		return x.Config
+	}
+	return nil
+}
+
+func (x *SessionParams) GetResumeSessionId() string {
+	if x != nil {
+		return x.ResumeSessionId
+	}
+	return ""
+}
+
+type McpServer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Url           string                 `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *McpServer) Reset() {
+	*x = McpServer{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *McpServer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*McpServer) ProtoMessage() {}
+
+func (x *McpServer) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use McpServer.ProtoReflect.Descriptor instead.
+func (*McpServer) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *McpServer) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *McpServer) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
 }
 
 type Shutdown struct {
@@ -743,7 +825,7 @@ type Shutdown struct {
 
 func (x *Shutdown) Reset() {
 	*x = Shutdown{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +837,7 @@ func (x *Shutdown) String() string {
 func (*Shutdown) ProtoMessage() {}
 
 func (x *Shutdown) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[10]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +850,7 @@ func (x *Shutdown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Shutdown.ProtoReflect.Descriptor instead.
 func (*Shutdown) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{10}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Shutdown) GetReason() string {
@@ -778,24 +860,29 @@ func (x *Shutdown) GetReason() string {
 	return ""
 }
 
-// AgentIOFrame carries the ACP bytes. Both directions use the same rules.
+// AgentIOFrame carries the agent session.
 //
-// Each side counts the bytes that it sends. The first byte is 1. Each side
-// acks the bytes that it gets from its peer. A sender keeps the bytes that the
-// peer did not ack. It keeps at most 8 MiB plus one frame. When it has that
-// many, it stops until the peer acks. If a receiver gets more, it ends the
-// stream with a protocol error.
+// The runner numbers its events. The first event is 1. The manager acks each
+// event after it records the event. The runner keeps the events that the
+// manager did not ack. It keeps at most 8 MiB of them. When it has that many,
+// the agent waits until the manager acks.
 //
-// On each open, each side sends Open with the last byte that it consumed. The
-// peer then sends again all bytes after that byte. If the peer no longer has
-// them, the stream ends with an error. A frame carries at most 64 KiB.
+// The first frame of each side is Open. The manager sends in Open the last
+// event that it consumed. The runner then sends AgentState, and after it the
+// events after that one. Then it sends new events as they occur.
+//
+// Commands do not have numbers. The runner ignores a command that it already
+// has, so the manager can send a command again after a drop.
 type AgentIOFrame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
 	//
 	//	*AgentIOFrame_Open
-	//	*AgentIOFrame_Data
 	//	*AgentIOFrame_Ack
+	//	*AgentIOFrame_Event
+	//	*AgentIOFrame_State
+	//	*AgentIOFrame_Prompt
+	//	*AgentIOFrame_Permission
 	Msg           isAgentIOFrame_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -803,7 +890,7 @@ type AgentIOFrame struct {
 
 func (x *AgentIOFrame) Reset() {
 	*x = AgentIOFrame{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -815,7 +902,7 @@ func (x *AgentIOFrame) String() string {
 func (*AgentIOFrame) ProtoMessage() {}
 
 func (x *AgentIOFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[11]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -828,7 +915,7 @@ func (x *AgentIOFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentIOFrame.ProtoReflect.Descriptor instead.
 func (*AgentIOFrame) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{11}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *AgentIOFrame) GetMsg() isAgentIOFrame_Msg {
@@ -847,19 +934,46 @@ func (x *AgentIOFrame) GetOpen() *AgentIOOpen {
 	return nil
 }
 
-func (x *AgentIOFrame) GetData() *AgentIOData {
+func (x *AgentIOFrame) GetAck() *AgentIOAck {
 	if x != nil {
-		if x, ok := x.Msg.(*AgentIOFrame_Data); ok {
-			return x.Data
+		if x, ok := x.Msg.(*AgentIOFrame_Ack); ok {
+			return x.Ack
 		}
 	}
 	return nil
 }
 
-func (x *AgentIOFrame) GetAck() *AgentIOAck {
+func (x *AgentIOFrame) GetEvent() *AgentEvent {
 	if x != nil {
-		if x, ok := x.Msg.(*AgentIOFrame_Ack); ok {
-			return x.Ack
+		if x, ok := x.Msg.(*AgentIOFrame_Event); ok {
+			return x.Event
+		}
+	}
+	return nil
+}
+
+func (x *AgentIOFrame) GetState() *AgentState {
+	if x != nil {
+		if x, ok := x.Msg.(*AgentIOFrame_State); ok {
+			return x.State
+		}
+	}
+	return nil
+}
+
+func (x *AgentIOFrame) GetPrompt() *Prompt {
+	if x != nil {
+		if x, ok := x.Msg.(*AgentIOFrame_Prompt); ok {
+			return x.Prompt
+		}
+	}
+	return nil
+}
+
+func (x *AgentIOFrame) GetPermission() *PermissionDecision {
+	if x != nil {
+		if x, ok := x.Msg.(*AgentIOFrame_Permission); ok {
+			return x.Permission
 		}
 	}
 	return nil
@@ -873,27 +987,45 @@ type AgentIOFrame_Open struct {
 	Open *AgentIOOpen `protobuf:"bytes,1,opt,name=open,proto3,oneof"` // first frame of each side, sent once
 }
 
-type AgentIOFrame_Data struct {
-	Data *AgentIOData `protobuf:"bytes,2,opt,name=data,proto3,oneof"`
+type AgentIOFrame_Ack struct {
+	Ack *AgentIOAck `protobuf:"bytes,3,opt,name=ack,proto3,oneof"` // manager to runner
 }
 
-type AgentIOFrame_Ack struct {
-	Ack *AgentIOAck `protobuf:"bytes,3,opt,name=ack,proto3,oneof"`
+type AgentIOFrame_Event struct {
+	Event *AgentEvent `protobuf:"bytes,4,opt,name=event,proto3,oneof"` // runner to manager
+}
+
+type AgentIOFrame_State struct {
+	State *AgentState `protobuf:"bytes,5,opt,name=state,proto3,oneof"` // runner to manager, once after the Opens
+}
+
+type AgentIOFrame_Prompt struct {
+	Prompt *Prompt `protobuf:"bytes,6,opt,name=prompt,proto3,oneof"` // manager to runner
+}
+
+type AgentIOFrame_Permission struct {
+	Permission *PermissionDecision `protobuf:"bytes,7,opt,name=permission,proto3,oneof"` // manager to runner
 }
 
 func (*AgentIOFrame_Open) isAgentIOFrame_Msg() {}
 
-func (*AgentIOFrame_Data) isAgentIOFrame_Msg() {}
-
 func (*AgentIOFrame_Ack) isAgentIOFrame_Msg() {}
+
+func (*AgentIOFrame_Event) isAgentIOFrame_Msg() {}
+
+func (*AgentIOFrame_State) isAgentIOFrame_Msg() {}
+
+func (*AgentIOFrame_Prompt) isAgentIOFrame_Msg() {}
+
+func (*AgentIOFrame_Permission) isAgentIOFrame_Msg() {}
 
 type AgentIOOpen struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The last byte of the peer that this side consumed. The peer sends again
-	// from the byte after it.
+	// From the manager: the last event that the manager consumed. From the
+	// sidecar: zero.
 	Consumed uint64 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"`
-	// Must be equal to SpawnAgent.stream_id. If it is different, the offsets are
-	// for a different stream, and the stream ends with an error.
+	// Must be equal to SpawnAgent.stream_id. If it is different, the stream is
+	// for a different agent session, and it ends with an error.
 	StreamId      []byte `protobuf:"bytes,2,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -901,7 +1033,7 @@ type AgentIOOpen struct {
 
 func (x *AgentIOOpen) Reset() {
 	*x = AgentIOOpen{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -913,7 +1045,7 @@ func (x *AgentIOOpen) String() string {
 func (*AgentIOOpen) ProtoMessage() {}
 
 func (x *AgentIOOpen) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[12]
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -926,7 +1058,7 @@ func (x *AgentIOOpen) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentIOOpen.ProtoReflect.Descriptor instead.
 func (*AgentIOOpen) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{12}
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AgentIOOpen) GetConsumed() uint64 {
@@ -943,63 +1075,9 @@ func (x *AgentIOOpen) GetStreamId() []byte {
 	return nil
 }
 
-type AgentIOData struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"` // the number of the last byte in payload
-	Payload       []byte                 `protobuf:"bytes,2,opt,name=payload,proto3" json:"payload,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AgentIOData) Reset() {
-	*x = AgentIOData{}
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AgentIOData) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AgentIOData) ProtoMessage() {}
-
-func (x *AgentIOData) ProtoReflect() protoreflect.Message {
-	mi := &file_agentlink_v1_agentlink_proto_msgTypes[13]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AgentIOData.ProtoReflect.Descriptor instead.
-func (*AgentIOData) Descriptor() ([]byte, []int) {
-	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *AgentIOData) GetSeq() uint64 {
-	if x != nil {
-		return x.Seq
-	}
-	return 0
-}
-
-func (x *AgentIOData) GetPayload() []byte {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
 type AgentIOAck struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The last byte that this side consumed. It is cumulative. Each side acks
-	// after each 512 KiB of new bytes, and at least every 500 ms while new bytes
-	// arrive.
+	// The last event that the manager recorded. It is cumulative.
 	Consumed      uint64 `protobuf:"varint,1,opt,name=consumed,proto3" json:"consumed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1042,16 +1120,1069 @@ func (x *AgentIOAck) GetConsumed() uint64 {
 	return 0
 }
 
+// AgentState is the state of the agent session when the stream opens.
+type AgentState struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The highest Prompt.turn_seq that the runner received.
+	LastTurnSeq uint64 `protobuf:"varint,1,opt,name=last_turn_seq,json=lastTurnSeq,proto3" json:"last_turn_seq,omitempty"`
+	// The turns that have not finished, in the order that they run. The first
+	// one can be running.
+	OutstandingTurnIds []string `protobuf:"bytes,2,rep,name=outstanding_turn_ids,json=outstandingTurnIds,proto3" json:"outstanding_turn_ids,omitempty"`
+	// The permission requests that wait for a decision.
+	PendingPermissions []*PermissionRequest `protobuf:"bytes,3,rep,name=pending_permissions,json=pendingPermissions,proto3" json:"pending_permissions,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *AgentState) Reset() {
+	*x = AgentState{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentState) ProtoMessage() {}
+
+func (x *AgentState) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentState.ProtoReflect.Descriptor instead.
+func (*AgentState) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *AgentState) GetLastTurnSeq() uint64 {
+	if x != nil {
+		return x.LastTurnSeq
+	}
+	return 0
+}
+
+func (x *AgentState) GetOutstandingTurnIds() []string {
+	if x != nil {
+		return x.OutstandingTurnIds
+	}
+	return nil
+}
+
+func (x *AgentState) GetPendingPermissions() []*PermissionRequest {
+	if x != nil {
+		return x.PendingPermissions
+	}
+	return nil
+}
+
+// AgentEvent is one event of the agent session.
+type AgentEvent struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Seq    uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`                    // 1 for the first event, then each next number
+	TurnId string                 `protobuf:"bytes,2,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"` // empty if the event is not part of a turn
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*AgentEvent_SessionReady
+	//	*AgentEvent_SessionFailed
+	//	*AgentEvent_Message
+	//	*AgentEvent_Thought
+	//	*AgentEvent_ToolCall
+	//	*AgentEvent_Usage
+	//	*AgentEvent_PermissionRequest
+	//	*AgentEvent_TurnFinished
+	//	*AgentEvent_Exited
+	Payload       isAgentEvent_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentEvent) Reset() {
+	*x = AgentEvent{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentEvent) ProtoMessage() {}
+
+func (x *AgentEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentEvent.ProtoReflect.Descriptor instead.
+func (*AgentEvent) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *AgentEvent) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *AgentEvent) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *AgentEvent) GetPayload() isAgentEvent_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetSessionReady() *SessionReady {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_SessionReady); ok {
+			return x.SessionReady
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetSessionFailed() *SessionFailed {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_SessionFailed); ok {
+			return x.SessionFailed
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetMessage() *AgentMessage {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_Message); ok {
+			return x.Message
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetThought() *AgentThought {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_Thought); ok {
+			return x.Thought
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetToolCall() *ToolCall {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_ToolCall); ok {
+			return x.ToolCall
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetUsage() *Usage {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_Usage); ok {
+			return x.Usage
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetPermissionRequest() *PermissionRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_PermissionRequest); ok {
+			return x.PermissionRequest
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetTurnFinished() *TurnFinished {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_TurnFinished); ok {
+			return x.TurnFinished
+		}
+	}
+	return nil
+}
+
+func (x *AgentEvent) GetExited() *AgentExited {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEvent_Exited); ok {
+			return x.Exited
+		}
+	}
+	return nil
+}
+
+type isAgentEvent_Payload interface {
+	isAgentEvent_Payload()
+}
+
+type AgentEvent_SessionReady struct {
+	SessionReady *SessionReady `protobuf:"bytes,10,opt,name=session_ready,json=sessionReady,proto3,oneof"`
+}
+
+type AgentEvent_SessionFailed struct {
+	SessionFailed *SessionFailed `protobuf:"bytes,11,opt,name=session_failed,json=sessionFailed,proto3,oneof"`
+}
+
+type AgentEvent_Message struct {
+	Message *AgentMessage `protobuf:"bytes,12,opt,name=message,proto3,oneof"`
+}
+
+type AgentEvent_Thought struct {
+	Thought *AgentThought `protobuf:"bytes,13,opt,name=thought,proto3,oneof"`
+}
+
+type AgentEvent_ToolCall struct {
+	ToolCall *ToolCall `protobuf:"bytes,14,opt,name=tool_call,json=toolCall,proto3,oneof"`
+}
+
+type AgentEvent_Usage struct {
+	Usage *Usage `protobuf:"bytes,15,opt,name=usage,proto3,oneof"`
+}
+
+type AgentEvent_PermissionRequest struct {
+	PermissionRequest *PermissionRequest `protobuf:"bytes,16,opt,name=permission_request,json=permissionRequest,proto3,oneof"`
+}
+
+type AgentEvent_TurnFinished struct {
+	TurnFinished *TurnFinished `protobuf:"bytes,17,opt,name=turn_finished,json=turnFinished,proto3,oneof"`
+}
+
+type AgentEvent_Exited struct {
+	Exited *AgentExited `protobuf:"bytes,18,opt,name=exited,proto3,oneof"`
+}
+
+func (*AgentEvent_SessionReady) isAgentEvent_Payload() {}
+
+func (*AgentEvent_SessionFailed) isAgentEvent_Payload() {}
+
+func (*AgentEvent_Message) isAgentEvent_Payload() {}
+
+func (*AgentEvent_Thought) isAgentEvent_Payload() {}
+
+func (*AgentEvent_ToolCall) isAgentEvent_Payload() {}
+
+func (*AgentEvent_Usage) isAgentEvent_Payload() {}
+
+func (*AgentEvent_PermissionRequest) isAgentEvent_Payload() {}
+
+func (*AgentEvent_TurnFinished) isAgentEvent_Payload() {}
+
+func (*AgentEvent_Exited) isAgentEvent_Payload() {}
+
+// SessionReady is the first event after SpawnAgent when the ACP session opens.
+type SessionReady struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	AcpSessionId string                 `protobuf:"bytes,1,opt,name=acp_session_id,json=acpSessionId,proto3" json:"acp_session_id,omitempty"`
+	// True if the agent can resume this session later.
+	Resumable     bool `protobuf:"varint,2,opt,name=resumable,proto3" json:"resumable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionReady) Reset() {
+	*x = SessionReady{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionReady) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionReady) ProtoMessage() {}
+
+func (x *SessionReady) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionReady.ProtoReflect.Descriptor instead.
+func (*SessionReady) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *SessionReady) GetAcpSessionId() string {
+	if x != nil {
+		return x.AcpSessionId
+	}
+	return ""
+}
+
+func (x *SessionReady) GetResumable() bool {
+	if x != nil {
+		return x.Resumable
+	}
+	return false
+}
+
+// SessionFailed is the first event after SpawnAgent when the ACP session does
+// not open. The runner then stops the agent.
+type SessionFailed struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Reason string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	// True if the session did not open because the agent cannot resume
+	// SessionParams.resume_session_id.
+	ResumeUnavailable bool `protobuf:"varint,2,opt,name=resume_unavailable,json=resumeUnavailable,proto3" json:"resume_unavailable,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *SessionFailed) Reset() {
+	*x = SessionFailed{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionFailed) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionFailed) ProtoMessage() {}
+
+func (x *SessionFailed) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionFailed.ProtoReflect.Descriptor instead.
+func (*SessionFailed) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SessionFailed) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *SessionFailed) GetResumeUnavailable() bool {
+	if x != nil {
+		return x.ResumeUnavailable
+	}
+	return false
+}
+
+// AgentMessage is one part of the reply of the agent. A tool call or the end
+// of the turn ends a part. A part has at most 256 KiB of text. The runner
+// starts a new part when a part gets to that size.
+type AgentMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PartId        string                 `protobuf:"bytes,1,opt,name=part_id,json=partId,proto3" json:"part_id,omitempty"` // the turn ID, a period, and the part number
+	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	Final         bool                   `protobuf:"varint,3,opt,name=final,proto3" json:"final,omitempty"` // true for the last part of the turn
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentMessage) Reset() {
+	*x = AgentMessage{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentMessage) ProtoMessage() {}
+
+func (x *AgentMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
+func (*AgentMessage) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *AgentMessage) GetPartId() string {
+	if x != nil {
+		return x.PartId
+	}
+	return ""
+}
+
+func (x *AgentMessage) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *AgentMessage) GetFinal() bool {
+	if x != nil {
+		return x.Final
+	}
+	return false
+}
+
+// AgentThought is the reasoning text of the agent before its next reply or
+// tool call. An event has at most 256 KiB of text. The runner sends a longer
+// thought in more than one event.
+type AgentThought struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentThought) Reset() {
+	*x = AgentThought{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentThought) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentThought) ProtoMessage() {}
+
+func (x *AgentThought) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentThought.ProtoReflect.Descriptor instead.
+func (*AgentThought) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *AgentThought) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+type ToolCall struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// If empty on an update, the title is the one from an earlier event.
+	Title  string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Kind   string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	Status string `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	// JSON. Empty if the agent did not send an input, or if the input is
+	// larger than 256 KiB.
+	RawInput      []byte `protobuf:"bytes,5,opt,name=raw_input,json=rawInput,proto3" json:"raw_input,omitempty"`
+	Update        bool   `protobuf:"varint,6,opt,name=update,proto3" json:"update,omitempty"` // true if this changes an earlier tool call
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolCall) Reset() {
+	*x = ToolCall{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolCall) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolCall) ProtoMessage() {}
+
+func (x *ToolCall) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
+func (*ToolCall) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ToolCall) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ToolCall) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *ToolCall) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ToolCall) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ToolCall) GetRawInput() []byte {
+	if x != nil {
+		return x.RawInput
+	}
+	return nil
+}
+
+func (x *ToolCall) GetUpdate() bool {
+	if x != nil {
+		return x.Update
+	}
+	return false
+}
+
+type Usage struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	InputTokens       int64                  `protobuf:"varint,1,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens      int64                  `protobuf:"varint,2,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	CachedReadTokens  int64                  `protobuf:"varint,3,opt,name=cached_read_tokens,json=cachedReadTokens,proto3" json:"cached_read_tokens,omitempty"`
+	CachedWriteTokens int64                  `protobuf:"varint,4,opt,name=cached_write_tokens,json=cachedWriteTokens,proto3" json:"cached_write_tokens,omitempty"`
+	ThoughtTokens     int64                  `protobuf:"varint,5,opt,name=thought_tokens,json=thoughtTokens,proto3" json:"thought_tokens,omitempty"`
+	TotalTokens       int64                  `protobuf:"varint,6,opt,name=total_tokens,json=totalTokens,proto3" json:"total_tokens,omitempty"`
+	ContextWindow     int64                  `protobuf:"varint,7,opt,name=context_window,json=contextWindow,proto3" json:"context_window,omitempty"`
+	ContextUsed       int64                  `protobuf:"varint,8,opt,name=context_used,json=contextUsed,proto3" json:"context_used,omitempty"`
+	CostUsd           float64                `protobuf:"fixed64,9,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *Usage) Reset() {
+	*x = Usage{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Usage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Usage) ProtoMessage() {}
+
+func (x *Usage) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Usage.ProtoReflect.Descriptor instead.
+func (*Usage) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *Usage) GetInputTokens() int64 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetOutputTokens() int64 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCachedReadTokens() int64 {
+	if x != nil {
+		return x.CachedReadTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetCachedWriteTokens() int64 {
+	if x != nil {
+		return x.CachedWriteTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetThoughtTokens() int64 {
+	if x != nil {
+		return x.ThoughtTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetTotalTokens() int64 {
+	if x != nil {
+		return x.TotalTokens
+	}
+	return 0
+}
+
+func (x *Usage) GetContextWindow() int64 {
+	if x != nil {
+		return x.ContextWindow
+	}
+	return 0
+}
+
+func (x *Usage) GetContextUsed() int64 {
+	if x != nil {
+		return x.ContextUsed
+	}
+	return 0
+}
+
+func (x *Usage) GetCostUsd() float64 {
+	if x != nil {
+		return x.CostUsd
+	}
+	return 0
+}
+
+// PermissionRequest asks for a decision about a tool call. The agent waits
+// until the runner gets a PermissionDecision with the same request_id.
+type PermissionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	ToolCallId    string                 `protobuf:"bytes,2,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	Summary       string                 `protobuf:"bytes,3,opt,name=summary,proto3" json:"summary,omitempty"`
+	Options       []*PermissionOption    `protobuf:"bytes,4,rep,name=options,proto3" json:"options,omitempty"`
+	TurnId        string                 `protobuf:"bytes,5,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionRequest) Reset() {
+	*x = PermissionRequest{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionRequest) ProtoMessage() {}
+
+func (x *PermissionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionRequest.ProtoReflect.Descriptor instead.
+func (*PermissionRequest) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *PermissionRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PermissionRequest) GetToolCallId() string {
+	if x != nil {
+		return x.ToolCallId
+	}
+	return ""
+}
+
+func (x *PermissionRequest) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *PermissionRequest) GetOptions() []*PermissionOption {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+func (x *PermissionRequest) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+type PermissionOption struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionOption) Reset() {
+	*x = PermissionOption{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionOption) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionOption) ProtoMessage() {}
+
+func (x *PermissionOption) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionOption.ProtoReflect.Descriptor instead.
+func (*PermissionOption) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *PermissionOption) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PermissionOption) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PermissionOption) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+// TurnFinished ends a turn. It is the last event of the turn.
+type TurnFinished struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	StopReason    string                 `protobuf:"bytes,1,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"` // set if the turn completed
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`                             // set if the turn failed
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TurnFinished) Reset() {
+	*x = TurnFinished{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TurnFinished) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TurnFinished) ProtoMessage() {}
+
+func (x *TurnFinished) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TurnFinished.ProtoReflect.Descriptor instead.
+func (*TurnFinished) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *TurnFinished) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+func (x *TurnFinished) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// AgentExited is the last event of the agent session. The agent process
+// stopped.
+type AgentExited struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentExited) Reset() {
+	*x = AgentExited{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentExited) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentExited) ProtoMessage() {}
+
+func (x *AgentExited) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentExited.ProtoReflect.Descriptor instead.
+func (*AgentExited) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *AgentExited) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+// Prompt adds a turn. The runner runs the turns in the order of turn_seq, one
+// at a time.
+type Prompt struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	TurnId string                 `protobuf:"bytes,1,opt,name=turn_id,json=turnId,proto3" json:"turn_id,omitempty"`
+	// Increases with each turn of the session. The runner ignores a Prompt with
+	// a turn_seq that is not more than AgentState.last_turn_seq.
+	TurnSeq       uint64 `protobuf:"varint,2,opt,name=turn_seq,json=turnSeq,proto3" json:"turn_seq,omitempty"`
+	Text          string `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Prompt) Reset() {
+	*x = Prompt{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Prompt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Prompt) ProtoMessage() {}
+
+func (x *Prompt) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Prompt.ProtoReflect.Descriptor instead.
+func (*Prompt) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *Prompt) GetTurnId() string {
+	if x != nil {
+		return x.TurnId
+	}
+	return ""
+}
+
+func (x *Prompt) GetTurnSeq() uint64 {
+	if x != nil {
+		return x.TurnSeq
+	}
+	return 0
+}
+
+func (x *Prompt) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// PermissionDecision answers a PermissionRequest. The runner ignores a
+// decision for a request that does not wait.
+type PermissionDecision struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	OptionId      string                 `protobuf:"bytes,2,opt,name=option_id,json=optionId,proto3" json:"option_id,omitempty"` // one of the offered options, if not cancelled
+	Cancelled     bool                   `protobuf:"varint,3,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PermissionDecision) Reset() {
+	*x = PermissionDecision{}
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PermissionDecision) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PermissionDecision) ProtoMessage() {}
+
+func (x *PermissionDecision) ProtoReflect() protoreflect.Message {
+	mi := &file_agentlink_v1_agentlink_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PermissionDecision.ProtoReflect.Descriptor instead.
+func (*PermissionDecision) Descriptor() ([]byte, []int) {
+	return file_agentlink_v1_agentlink_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *PermissionDecision) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PermissionDecision) GetOptionId() string {
+	if x != nil {
+		return x.OptionId
+	}
+	return ""
+}
+
+func (x *PermissionDecision) GetCancelled() bool {
+	if x != nil {
+		return x.Cancelled
+	}
+	return false
+}
+
 var File_agentlink_v1_agentlink_proto protoreflect.FileDescriptor
 
 const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\n" +
-	"\x1cagentlink/v1/agentlink.proto\x12\fagentlink.v1\"\xae\x01\n" +
+	"\x1cagentlink/v1/agentlink.proto\x12\fagentlink.v1\"\x7f\n" +
 	"\fSidecarFrame\x122\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1a.agentlink.v1.SidecarHelloH\x00R\x05hello\x12.\n" +
-	"\x06status\x18\x02 \x01(\v2\x14.agentlink.v1.StatusH\x00R\x06status\x123\n" +
-	"\x06exited\x18\x03 \x01(\v2\x19.agentlink.v1.AgentExitedH\x00R\x06exitedB\x05\n" +
-	"\x03msg\"\xf4\x01\n" +
+	"\x06status\x18\x02 \x01(\v2\x14.agentlink.v1.StatusH\x00R\x06statusB\x05\n" +
+	"\x03msgJ\x04\b\x03\x10\x04\"\xf4\x01\n" +
 	"\fManagerFrame\x12<\n" +
 	"\thello_ack\x18\x01 \x01(\v2\x1d.agentlink.v1.ManagerHelloAckH\x00R\bhelloAck\x120\n" +
 	"\x05spawn\x18\x02 \x01(\v2\x18.agentlink.v1.SpawnAgentH\x00R\x05spawn\x124\n" +
@@ -1083,28 +2214,118 @@ const file_agentlink_v1_agentlink_proto_rawDesc = "" +
 	"\x11STATE_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSTATE_STARTING\x10\x01\x12\x0f\n" +
 	"\vSTATE_READY\x10\x02\x12\x0f\n" +
-	"\vSTATE_ERROR\x10\x03\"*\n" +
-	"\vAgentExited\x12\x1b\n" +
-	"\texit_code\x18\x01 \x01(\x05R\bexitCode\")\n" +
+	"\vSTATE_ERROR\x10\x03\"`\n" +
 	"\n" +
 	"SpawnAgent\x12\x1b\n" +
-	"\tstream_id\x18\x01 \x01(\fR\bstreamId\"\"\n" +
+	"\tstream_id\x18\x01 \x01(\fR\bstreamId\x125\n" +
+	"\asession\x18\x02 \x01(\v2\x1b.agentlink.v1.SessionParamsR\asession\"\xa8\x02\n" +
+	"\rSessionParams\x12\x10\n" +
+	"\x03cwd\x18\x01 \x01(\tR\x03cwd\x128\n" +
+	"\vmcp_servers\x18\x02 \x03(\v2\x17.agentlink.v1.McpServerR\n" +
+	"mcpServers\x12#\n" +
+	"\rsystem_prompt\x18\x03 \x01(\tR\fsystemPrompt\x12?\n" +
+	"\x06config\x18\x04 \x03(\v2'.agentlink.v1.SessionParams.ConfigEntryR\x06config\x12*\n" +
+	"\x11resume_session_id\x18\x05 \x01(\tR\x0fresumeSessionId\x1a9\n" +
+	"\vConfigEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"1\n" +
+	"\tMcpServer\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
+	"\x03url\x18\x02 \x01(\tR\x03url\"\"\n" +
 	"\bShutdown\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xa5\x01\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xd2\x02\n" +
 	"\fAgentIOFrame\x12/\n" +
-	"\x04open\x18\x01 \x01(\v2\x19.agentlink.v1.AgentIOOpenH\x00R\x04open\x12/\n" +
-	"\x04data\x18\x02 \x01(\v2\x19.agentlink.v1.AgentIODataH\x00R\x04data\x12,\n" +
-	"\x03ack\x18\x03 \x01(\v2\x18.agentlink.v1.AgentIOAckH\x00R\x03ackB\x05\n" +
-	"\x03msg\"F\n" +
+	"\x04open\x18\x01 \x01(\v2\x19.agentlink.v1.AgentIOOpenH\x00R\x04open\x12,\n" +
+	"\x03ack\x18\x03 \x01(\v2\x18.agentlink.v1.AgentIOAckH\x00R\x03ack\x120\n" +
+	"\x05event\x18\x04 \x01(\v2\x18.agentlink.v1.AgentEventH\x00R\x05event\x120\n" +
+	"\x05state\x18\x05 \x01(\v2\x18.agentlink.v1.AgentStateH\x00R\x05state\x12.\n" +
+	"\x06prompt\x18\x06 \x01(\v2\x14.agentlink.v1.PromptH\x00R\x06prompt\x12B\n" +
+	"\n" +
+	"permission\x18\a \x01(\v2 .agentlink.v1.PermissionDecisionH\x00R\n" +
+	"permissionB\x05\n" +
+	"\x03msgJ\x04\b\x02\x10\x03\"F\n" +
 	"\vAgentIOOpen\x12\x1a\n" +
 	"\bconsumed\x18\x01 \x01(\x04R\bconsumed\x12\x1b\n" +
-	"\tstream_id\x18\x02 \x01(\fR\bstreamId\"9\n" +
-	"\vAgentIOData\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x18\n" +
-	"\apayload\x18\x02 \x01(\fR\apayload\"(\n" +
+	"\tstream_id\x18\x02 \x01(\fR\bstreamId\"(\n" +
 	"\n" +
 	"AgentIOAck\x12\x1a\n" +
-	"\bconsumed\x18\x01 \x01(\x04R\bconsumed2\x9f\x01\n" +
+	"\bconsumed\x18\x01 \x01(\x04R\bconsumed\"\xb4\x01\n" +
+	"\n" +
+	"AgentState\x12\"\n" +
+	"\rlast_turn_seq\x18\x01 \x01(\x04R\vlastTurnSeq\x120\n" +
+	"\x14outstanding_turn_ids\x18\x02 \x03(\tR\x12outstandingTurnIds\x12P\n" +
+	"\x13pending_permissions\x18\x03 \x03(\v2\x1f.agentlink.v1.PermissionRequestR\x12pendingPermissions\"\xe9\x04\n" +
+	"\n" +
+	"AgentEvent\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x17\n" +
+	"\aturn_id\x18\x02 \x01(\tR\x06turnId\x12A\n" +
+	"\rsession_ready\x18\n" +
+	" \x01(\v2\x1a.agentlink.v1.SessionReadyH\x00R\fsessionReady\x12D\n" +
+	"\x0esession_failed\x18\v \x01(\v2\x1b.agentlink.v1.SessionFailedH\x00R\rsessionFailed\x126\n" +
+	"\amessage\x18\f \x01(\v2\x1a.agentlink.v1.AgentMessageH\x00R\amessage\x126\n" +
+	"\athought\x18\r \x01(\v2\x1a.agentlink.v1.AgentThoughtH\x00R\athought\x125\n" +
+	"\ttool_call\x18\x0e \x01(\v2\x16.agentlink.v1.ToolCallH\x00R\btoolCall\x12+\n" +
+	"\x05usage\x18\x0f \x01(\v2\x13.agentlink.v1.UsageH\x00R\x05usage\x12P\n" +
+	"\x12permission_request\x18\x10 \x01(\v2\x1f.agentlink.v1.PermissionRequestH\x00R\x11permissionRequest\x12A\n" +
+	"\rturn_finished\x18\x11 \x01(\v2\x1a.agentlink.v1.TurnFinishedH\x00R\fturnFinished\x123\n" +
+	"\x06exited\x18\x12 \x01(\v2\x19.agentlink.v1.AgentExitedH\x00R\x06exitedB\t\n" +
+	"\apayload\"R\n" +
+	"\fSessionReady\x12$\n" +
+	"\x0eacp_session_id\x18\x01 \x01(\tR\facpSessionId\x12\x1c\n" +
+	"\tresumable\x18\x02 \x01(\bR\tresumable\"V\n" +
+	"\rSessionFailed\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x12-\n" +
+	"\x12resume_unavailable\x18\x02 \x01(\bR\x11resumeUnavailable\"Q\n" +
+	"\fAgentMessage\x12\x17\n" +
+	"\apart_id\x18\x01 \x01(\tR\x06partId\x12\x12\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12\x14\n" +
+	"\x05final\x18\x03 \x01(\bR\x05final\"\"\n" +
+	"\fAgentThought\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\"\x91\x01\n" +
+	"\bToolCall\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\x12\x1b\n" +
+	"\traw_input\x18\x05 \x01(\fR\brawInput\x12\x16\n" +
+	"\x06update\x18\x06 \x01(\bR\x06update\"\xdc\x02\n" +
+	"\x05Usage\x12!\n" +
+	"\finput_tokens\x18\x01 \x01(\x03R\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\x02 \x01(\x03R\foutputTokens\x12,\n" +
+	"\x12cached_read_tokens\x18\x03 \x01(\x03R\x10cachedReadTokens\x12.\n" +
+	"\x13cached_write_tokens\x18\x04 \x01(\x03R\x11cachedWriteTokens\x12%\n" +
+	"\x0ethought_tokens\x18\x05 \x01(\x03R\rthoughtTokens\x12!\n" +
+	"\ftotal_tokens\x18\x06 \x01(\x03R\vtotalTokens\x12%\n" +
+	"\x0econtext_window\x18\a \x01(\x03R\rcontextWindow\x12!\n" +
+	"\fcontext_used\x18\b \x01(\x03R\vcontextUsed\x12\x19\n" +
+	"\bcost_usd\x18\t \x01(\x01R\acostUsd\"\xc1\x01\n" +
+	"\x11PermissionRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12 \n" +
+	"\ftool_call_id\x18\x02 \x01(\tR\n" +
+	"toolCallId\x12\x18\n" +
+	"\asummary\x18\x03 \x01(\tR\asummary\x128\n" +
+	"\aoptions\x18\x04 \x03(\v2\x1e.agentlink.v1.PermissionOptionR\aoptions\x12\x17\n" +
+	"\aturn_id\x18\x05 \x01(\tR\x06turnId\"J\n" +
+	"\x10PermissionOption\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\"E\n" +
+	"\fTurnFinished\x12\x1f\n" +
+	"\vstop_reason\x18\x01 \x01(\tR\n" +
+	"stopReason\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"*\n" +
+	"\vAgentExited\x12\x1b\n" +
+	"\texit_code\x18\x01 \x01(\x05R\bexitCode\"P\n" +
+	"\x06Prompt\x12\x17\n" +
+	"\aturn_id\x18\x01 \x01(\tR\x06turnId\x12\x19\n" +
+	"\bturn_seq\x18\x02 \x01(\x04R\aturnSeq\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\"n\n" +
+	"\x12PermissionDecision\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1b\n" +
+	"\toption_id\x18\x02 \x01(\tR\boptionId\x12\x1c\n" +
+	"\tcancelled\x18\x03 \x01(\bR\tcancelled2\x9f\x01\n" +
 	"\x10AgentLinkService\x12D\n" +
 	"\x06Attach\x12\x1a.agentlink.v1.SidecarFrame\x1a\x1a.agentlink.v1.ManagerFrame(\x010\x01\x12E\n" +
 	"\aAgentIO\x12\x1a.agentlink.v1.AgentIOFrame\x1a\x1a.agentlink.v1.AgentIOFrame(\x010\x01BHZFgithub.com/pomerium/agentops/harness/internal/agentlink/pb;agentlinkpbb\x06proto3"
@@ -1122,48 +2343,79 @@ func file_agentlink_v1_agentlink_proto_rawDescGZIP() []byte {
 }
 
 var file_agentlink_v1_agentlink_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_agentlink_v1_agentlink_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_agentlink_v1_agentlink_proto_goTypes = []any{
-	(Status_State)(0),       // 0: agentlink.v1.Status.State
-	(*SidecarFrame)(nil),    // 1: agentlink.v1.SidecarFrame
-	(*ManagerFrame)(nil),    // 2: agentlink.v1.ManagerFrame
-	(*Heartbeat)(nil),       // 3: agentlink.v1.Heartbeat
-	(*SidecarHello)(nil),    // 4: agentlink.v1.SidecarHello
-	(*ManagerHelloAck)(nil), // 5: agentlink.v1.ManagerHelloAck
-	(*SandboxConfig)(nil),   // 6: agentlink.v1.SandboxConfig
-	(*ProxiedEndpoint)(nil), // 7: agentlink.v1.ProxiedEndpoint
-	(*Status)(nil),          // 8: agentlink.v1.Status
-	(*AgentExited)(nil),     // 9: agentlink.v1.AgentExited
-	(*SpawnAgent)(nil),      // 10: agentlink.v1.SpawnAgent
-	(*Shutdown)(nil),        // 11: agentlink.v1.Shutdown
-	(*AgentIOFrame)(nil),    // 12: agentlink.v1.AgentIOFrame
-	(*AgentIOOpen)(nil),     // 13: agentlink.v1.AgentIOOpen
-	(*AgentIOData)(nil),     // 14: agentlink.v1.AgentIOData
-	(*AgentIOAck)(nil),      // 15: agentlink.v1.AgentIOAck
+	(Status_State)(0),          // 0: agentlink.v1.Status.State
+	(*SidecarFrame)(nil),       // 1: agentlink.v1.SidecarFrame
+	(*ManagerFrame)(nil),       // 2: agentlink.v1.ManagerFrame
+	(*Heartbeat)(nil),          // 3: agentlink.v1.Heartbeat
+	(*SidecarHello)(nil),       // 4: agentlink.v1.SidecarHello
+	(*ManagerHelloAck)(nil),    // 5: agentlink.v1.ManagerHelloAck
+	(*SandboxConfig)(nil),      // 6: agentlink.v1.SandboxConfig
+	(*ProxiedEndpoint)(nil),    // 7: agentlink.v1.ProxiedEndpoint
+	(*Status)(nil),             // 8: agentlink.v1.Status
+	(*SpawnAgent)(nil),         // 9: agentlink.v1.SpawnAgent
+	(*SessionParams)(nil),      // 10: agentlink.v1.SessionParams
+	(*McpServer)(nil),          // 11: agentlink.v1.McpServer
+	(*Shutdown)(nil),           // 12: agentlink.v1.Shutdown
+	(*AgentIOFrame)(nil),       // 13: agentlink.v1.AgentIOFrame
+	(*AgentIOOpen)(nil),        // 14: agentlink.v1.AgentIOOpen
+	(*AgentIOAck)(nil),         // 15: agentlink.v1.AgentIOAck
+	(*AgentState)(nil),         // 16: agentlink.v1.AgentState
+	(*AgentEvent)(nil),         // 17: agentlink.v1.AgentEvent
+	(*SessionReady)(nil),       // 18: agentlink.v1.SessionReady
+	(*SessionFailed)(nil),      // 19: agentlink.v1.SessionFailed
+	(*AgentMessage)(nil),       // 20: agentlink.v1.AgentMessage
+	(*AgentThought)(nil),       // 21: agentlink.v1.AgentThought
+	(*ToolCall)(nil),           // 22: agentlink.v1.ToolCall
+	(*Usage)(nil),              // 23: agentlink.v1.Usage
+	(*PermissionRequest)(nil),  // 24: agentlink.v1.PermissionRequest
+	(*PermissionOption)(nil),   // 25: agentlink.v1.PermissionOption
+	(*TurnFinished)(nil),       // 26: agentlink.v1.TurnFinished
+	(*AgentExited)(nil),        // 27: agentlink.v1.AgentExited
+	(*Prompt)(nil),             // 28: agentlink.v1.Prompt
+	(*PermissionDecision)(nil), // 29: agentlink.v1.PermissionDecision
+	nil,                        // 30: agentlink.v1.SessionParams.ConfigEntry
 }
 var file_agentlink_v1_agentlink_proto_depIdxs = []int32{
 	4,  // 0: agentlink.v1.SidecarFrame.hello:type_name -> agentlink.v1.SidecarHello
 	8,  // 1: agentlink.v1.SidecarFrame.status:type_name -> agentlink.v1.Status
-	9,  // 2: agentlink.v1.SidecarFrame.exited:type_name -> agentlink.v1.AgentExited
-	5,  // 3: agentlink.v1.ManagerFrame.hello_ack:type_name -> agentlink.v1.ManagerHelloAck
-	10, // 4: agentlink.v1.ManagerFrame.spawn:type_name -> agentlink.v1.SpawnAgent
-	11, // 5: agentlink.v1.ManagerFrame.shutdown:type_name -> agentlink.v1.Shutdown
-	3,  // 6: agentlink.v1.ManagerFrame.heartbeat:type_name -> agentlink.v1.Heartbeat
-	6,  // 7: agentlink.v1.ManagerHelloAck.config:type_name -> agentlink.v1.SandboxConfig
-	7,  // 8: agentlink.v1.SandboxConfig.endpoints:type_name -> agentlink.v1.ProxiedEndpoint
-	0,  // 9: agentlink.v1.Status.state:type_name -> agentlink.v1.Status.State
-	13, // 10: agentlink.v1.AgentIOFrame.open:type_name -> agentlink.v1.AgentIOOpen
-	14, // 11: agentlink.v1.AgentIOFrame.data:type_name -> agentlink.v1.AgentIOData
-	15, // 12: agentlink.v1.AgentIOFrame.ack:type_name -> agentlink.v1.AgentIOAck
-	1,  // 13: agentlink.v1.AgentLinkService.Attach:input_type -> agentlink.v1.SidecarFrame
-	12, // 14: agentlink.v1.AgentLinkService.AgentIO:input_type -> agentlink.v1.AgentIOFrame
-	2,  // 15: agentlink.v1.AgentLinkService.Attach:output_type -> agentlink.v1.ManagerFrame
-	12, // 16: agentlink.v1.AgentLinkService.AgentIO:output_type -> agentlink.v1.AgentIOFrame
-	15, // [15:17] is the sub-list for method output_type
-	13, // [13:15] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	5,  // 2: agentlink.v1.ManagerFrame.hello_ack:type_name -> agentlink.v1.ManagerHelloAck
+	9,  // 3: agentlink.v1.ManagerFrame.spawn:type_name -> agentlink.v1.SpawnAgent
+	12, // 4: agentlink.v1.ManagerFrame.shutdown:type_name -> agentlink.v1.Shutdown
+	3,  // 5: agentlink.v1.ManagerFrame.heartbeat:type_name -> agentlink.v1.Heartbeat
+	6,  // 6: agentlink.v1.ManagerHelloAck.config:type_name -> agentlink.v1.SandboxConfig
+	7,  // 7: agentlink.v1.SandboxConfig.endpoints:type_name -> agentlink.v1.ProxiedEndpoint
+	0,  // 8: agentlink.v1.Status.state:type_name -> agentlink.v1.Status.State
+	10, // 9: agentlink.v1.SpawnAgent.session:type_name -> agentlink.v1.SessionParams
+	11, // 10: agentlink.v1.SessionParams.mcp_servers:type_name -> agentlink.v1.McpServer
+	30, // 11: agentlink.v1.SessionParams.config:type_name -> agentlink.v1.SessionParams.ConfigEntry
+	14, // 12: agentlink.v1.AgentIOFrame.open:type_name -> agentlink.v1.AgentIOOpen
+	15, // 13: agentlink.v1.AgentIOFrame.ack:type_name -> agentlink.v1.AgentIOAck
+	17, // 14: agentlink.v1.AgentIOFrame.event:type_name -> agentlink.v1.AgentEvent
+	16, // 15: agentlink.v1.AgentIOFrame.state:type_name -> agentlink.v1.AgentState
+	28, // 16: agentlink.v1.AgentIOFrame.prompt:type_name -> agentlink.v1.Prompt
+	29, // 17: agentlink.v1.AgentIOFrame.permission:type_name -> agentlink.v1.PermissionDecision
+	24, // 18: agentlink.v1.AgentState.pending_permissions:type_name -> agentlink.v1.PermissionRequest
+	18, // 19: agentlink.v1.AgentEvent.session_ready:type_name -> agentlink.v1.SessionReady
+	19, // 20: agentlink.v1.AgentEvent.session_failed:type_name -> agentlink.v1.SessionFailed
+	20, // 21: agentlink.v1.AgentEvent.message:type_name -> agentlink.v1.AgentMessage
+	21, // 22: agentlink.v1.AgentEvent.thought:type_name -> agentlink.v1.AgentThought
+	22, // 23: agentlink.v1.AgentEvent.tool_call:type_name -> agentlink.v1.ToolCall
+	23, // 24: agentlink.v1.AgentEvent.usage:type_name -> agentlink.v1.Usage
+	24, // 25: agentlink.v1.AgentEvent.permission_request:type_name -> agentlink.v1.PermissionRequest
+	26, // 26: agentlink.v1.AgentEvent.turn_finished:type_name -> agentlink.v1.TurnFinished
+	27, // 27: agentlink.v1.AgentEvent.exited:type_name -> agentlink.v1.AgentExited
+	25, // 28: agentlink.v1.PermissionRequest.options:type_name -> agentlink.v1.PermissionOption
+	1,  // 29: agentlink.v1.AgentLinkService.Attach:input_type -> agentlink.v1.SidecarFrame
+	13, // 30: agentlink.v1.AgentLinkService.AgentIO:input_type -> agentlink.v1.AgentIOFrame
+	2,  // 31: agentlink.v1.AgentLinkService.Attach:output_type -> agentlink.v1.ManagerFrame
+	13, // 32: agentlink.v1.AgentLinkService.AgentIO:output_type -> agentlink.v1.AgentIOFrame
+	31, // [31:33] is the sub-list for method output_type
+	29, // [29:31] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_agentlink_v1_agentlink_proto_init() }
@@ -1174,7 +2426,6 @@ func file_agentlink_v1_agentlink_proto_init() {
 	file_agentlink_v1_agentlink_proto_msgTypes[0].OneofWrappers = []any{
 		(*SidecarFrame_Hello)(nil),
 		(*SidecarFrame_Status)(nil),
-		(*SidecarFrame_Exited)(nil),
 	}
 	file_agentlink_v1_agentlink_proto_msgTypes[1].OneofWrappers = []any{
 		(*ManagerFrame_HelloAck)(nil),
@@ -1182,10 +2433,24 @@ func file_agentlink_v1_agentlink_proto_init() {
 		(*ManagerFrame_Shutdown)(nil),
 		(*ManagerFrame_Heartbeat)(nil),
 	}
-	file_agentlink_v1_agentlink_proto_msgTypes[11].OneofWrappers = []any{
+	file_agentlink_v1_agentlink_proto_msgTypes[12].OneofWrappers = []any{
 		(*AgentIOFrame_Open)(nil),
-		(*AgentIOFrame_Data)(nil),
 		(*AgentIOFrame_Ack)(nil),
+		(*AgentIOFrame_Event)(nil),
+		(*AgentIOFrame_State)(nil),
+		(*AgentIOFrame_Prompt)(nil),
+		(*AgentIOFrame_Permission)(nil),
+	}
+	file_agentlink_v1_agentlink_proto_msgTypes[16].OneofWrappers = []any{
+		(*AgentEvent_SessionReady)(nil),
+		(*AgentEvent_SessionFailed)(nil),
+		(*AgentEvent_Message)(nil),
+		(*AgentEvent_Thought)(nil),
+		(*AgentEvent_ToolCall)(nil),
+		(*AgentEvent_Usage)(nil),
+		(*AgentEvent_PermissionRequest)(nil),
+		(*AgentEvent_TurnFinished)(nil),
+		(*AgentEvent_Exited)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1193,7 +2458,7 @@ func file_agentlink_v1_agentlink_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentlink_v1_agentlink_proto_rawDesc), len(file_agentlink_v1_agentlink_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
