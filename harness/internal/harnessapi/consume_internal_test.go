@@ -557,3 +557,63 @@ func TestAReplayDoesNotReopenAnAnsweredPermission(t *testing.T) {
 		t.Fatalf("decisions sent = %v, want only the accepted choice", got)
 	}
 }
+
+func waiterDeadline(b *binding, id string) (time.Time, bool) {
+	b.sink.mu.Lock()
+	defer b.sink.mu.Unlock()
+	w, ok := b.sink.waiters[id]
+	if !ok {
+		return time.Time{}, false
+	}
+	return w.deadline, true
+}
+
+func recordedDeadline(t *testing.T, svc *Service, id string) time.Time {
+	t.Helper()
+	evs, err := svc.events.History(context.Background(), "s1", 0, 1000)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	for _, ev := range evs {
+		if r := ev.GetPermissionRequest(); r.GetRequestId() == id {
+			return r.GetDeadline().AsTime()
+		}
+	}
+	t.Fatalf("no recorded request %q", id)
+	return time.Time{}
+}
+
+func TestAReconnectKeepsTheRecordedPermissionDeadline(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	if !svc.handleEvent(ctx, b, permissionEvent(2, "request")) {
+		t.Fatal("the request was not recorded")
+	}
+	recorded := recordedDeadline(t, svc, "request")
+	pending := &agentlinkpb.AgentState{PendingPermissions: []*agentlinkpb.PermissionRequest{permissionEvent(2, "request").GetPermissionRequest()}}
+
+	time.Sleep(20 * time.Millisecond)
+	svc.reconcileState(ctx, b, pending)
+	if got, ok := waiterDeadline(b, "request"); !ok || !got.Equal(recorded) {
+		t.Errorf("after a reconnect the enforced deadline is %v, want the recorded %v", got, recorded)
+	}
+
+	adopted := newBinding("s1", "claim", idleSession{}, newLogSink(svc, "s1", time.Minute))
+	time.Sleep(20 * time.Millisecond)
+	svc.reconcileState(ctx, adopted, pending)
+	if got, ok := waiterDeadline(adopted, "request"); !ok || !got.Equal(recorded) {
+		t.Errorf("after a restart the enforced deadline is %v, want the recorded %v", got, recorded)
+	}
+}
+
+func TestAPendingPermissionThatIsNotRecordedWaitsForItsEvent(t *testing.T) {
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	svc.reconcileState(context.Background(), b, &agentlinkpb.AgentState{
+		PendingPermissions: []*agentlinkpb.PermissionRequest{permissionEvent(2, "request").GetPermissionRequest()},
+	})
+	if got := b.sink.pending(); len(got) != 0 {
+		t.Errorf("pending requests = %v, want none until the request is recorded", got)
+	}
+}

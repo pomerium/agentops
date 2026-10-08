@@ -173,6 +173,13 @@ func (s *logSink) take(requestID string) (*permissionWaiter, bool) {
 	return w, true
 }
 
+func (s *logSink) has(requestID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.waiters[requestID]
+	return ok
+}
+
 func (s *logSink) pending() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

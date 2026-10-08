@@ -287,8 +287,25 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 	b.release()
 	b.sendMu.Unlock()
 
-	for _, req := range pending {
-		b.sink.await(req, b.sink.deadline(), func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
+	var missing []string
+	for id := range pending {
+		if !b.sink.has(id) {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		deadlines, err := s.recordedDeadlines(ctx, b.sessionID, missing)
+		for _, id := range missing {
+			deadline, recorded := deadlines[id]
+			if err != nil {
+				s.log.WarnContext(ctx, "could not read the deadline of a waiting permission request; it gets a new one",
+					"session", b.sessionID, "request_id", id, "err", err)
+				deadline, recorded = b.sink.deadline(), true
+			}
+			if recorded {
+				b.sink.await(pending[id], deadline, func(id string) { s.expirePermission(context.WithoutCancel(ctx), b, id) })
+			}
+		}
 	}
 	waiting := map[string]bool{}
 	for _, req := range st.GetPendingPermissions() {
@@ -299,6 +316,28 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 			b.sink.take(id)
 		}
 	}
+}
+
+func (s *Service) recordedDeadlines(ctx context.Context, sessionID string, ids []string) (map[string]time.Time, error) {
+	page := sessionstore.DefaultEventPage
+	out := map[string]time.Time{}
+	var after int64
+	for len(out) < len(ids) {
+		evs, err := s.events.History(ctx, sessionID, after, page)
+		if err != nil {
+			return nil, err
+		}
+		for _, ev := range evs {
+			if r := ev.GetPermissionRequest(); r != nil && slices.Contains(ids, r.GetRequestId()) {
+				out[r.GetRequestId()] = r.GetDeadline().AsTime()
+			}
+		}
+		if len(evs) < page {
+			break
+		}
+		after = evs[len(evs)-1].GetSeq()
+	}
+	return out, nil
 }
 
 func (s *Service) dropCommand(ctx context.Context, c sessionstore.PodCommand) {
