@@ -23,6 +23,10 @@ func (p *Poster) PostMessage(ctx context.Context, channelID string, opts ...slac
 	return ts, err
 }
 
+func (p *Poster) PostDM(ctx context.Context, userID string, opts ...slack.MsgOption) (string, string, error) {
+	return p.client.PostMessageContext(ctx, userID, opts...)
+}
+
 func (p *Poster) PostEphemeral(ctx context.Context, channelID, userID string, opts ...slack.MsgOption) (string, error) {
 	return p.client.PostEphemeralContext(ctx, channelID, userID, opts...)
 }

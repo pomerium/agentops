@@ -41,6 +41,14 @@ func optsText(opts []slack.MsgOption) string {
 	return b.String()
 }
 
+func (f *fakeSender) PostDM(ctx context.Context, userID string, opts ...slack.MsgOption) (string, string, error) {
+	ts, err := f.PostMessage(ctx, userID, opts...)
+	if err != nil {
+		return "", "", err
+	}
+	return "D-" + userID, ts, nil
+}
+
 func (f *fakeSender) PostMessage(_ context.Context, channel string, opts ...slack.MsgOption) (string, error) {
 	if f.latency > 0 {
 		time.Sleep(f.latency)
@@ -278,5 +286,13 @@ func TestLimitedThreadRepliesAndPermalinkPassThrough(t *testing.T) {
 	}
 	if len(f.permalinkCalls) != 1 || f.permalinkCalls[0] != "C1|2.0" {
 		t.Errorf("Permalink not forwarded, got %v", f.permalinkCalls)
+	}
+}
+
+func TestPostDMReturnsTheDMChannel(t *testing.T) {
+	l := NewLimited(&fakeSender{}, nil)
+	channel, ts, err := l.PostDM(context.Background(), "U1", slack.MsgOptionText("hi", false))
+	if err != nil || channel != "D-U1" || ts != "ts-new" {
+		t.Fatalf("PostDM = %q, %q, %v; want the DM channel and the message ts", channel, ts, err)
 	}
 }

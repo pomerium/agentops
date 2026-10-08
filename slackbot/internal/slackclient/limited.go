@@ -15,6 +15,7 @@ import (
 
 type Sender interface {
 	PostMessage(ctx context.Context, channelID string, opts ...slack.MsgOption) (string, error)
+	PostDM(ctx context.Context, userID string, opts ...slack.MsgOption) (string, string, error)
 	PostEphemeral(ctx context.Context, channelID, userID string, opts ...slack.MsgOption) (string, error)
 	UpdateMessage(ctx context.Context, channelID, ts string, opts ...slack.MsgOption) (string, error)
 	DeleteMessage(ctx context.Context, channelID, ts string) error
@@ -165,6 +166,17 @@ func (l *Limited) PostMessage(ctx context.Context, channelID string, opts ...sla
 		return err
 	})
 	return ts, err
+}
+
+func (l *Limited) PostDM(ctx context.Context, userID string, opts ...slack.MsgOption) (string, string, error) {
+	bucket := l.limiterFor(l.posts, userID, l.lim.PostPerChannel, l.lim.PostBurst)
+	var channel, ts string
+	err := l.guaranteed(ctx, bucket, func(ctx context.Context) error {
+		var err error
+		channel, ts, err = l.next.PostDM(ctx, userID, opts...)
+		return err
+	})
+	return channel, ts, err
 }
 
 func (l *Limited) PostEphemeral(ctx context.Context, channelID, userID string, opts ...slack.MsgOption) (string, error) {

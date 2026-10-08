@@ -52,3 +52,17 @@ func TestThreadRepliesReadsEveryPage(t *testing.T) {
 		t.Fatalf("got %+v, want the newest two messages", msgs)
 	}
 }
+
+func TestPostDMReturnsTheChannelSlackOpened(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ok":true,"channel":"D0DM","ts":"1.000100"}`)
+	}))
+	defer srv.Close()
+
+	p := &Poster{client: slack.New("test-token", slack.OptionAPIURL(srv.URL+"/"))}
+	channel, ts, err := p.PostDM(context.Background(), "U1", slack.MsgOptionText("hi", false))
+	if err != nil || channel != "D0DM" || ts != "1.000100" {
+		t.Fatalf("PostDM = %q, %q, %v; want the DM channel Slack opened", channel, ts, err)
+	}
+}
