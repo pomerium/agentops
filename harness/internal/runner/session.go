@@ -109,6 +109,7 @@ func (s *session) watchExit(cancel context.CancelFunc) {
 	case <-time.After(stdoutDrainGrace):
 	}
 	_ = s.proc.stdout.Close()
+	_ = s.proc.stderr.Close()
 	_ = s.proc.stdin.Close()
 	cancel()
 }

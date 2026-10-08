@@ -3,15 +3,18 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	runnerpb "github.com/pomerium/agentops/harness/internal/runner/pb"
 )
 
@@ -98,5 +101,49 @@ func TestALongStderrLineKeepsThePipeDraining(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stderr reader did not stop at EOF")
+	}
+}
+
+func TestStderrClosesWhenTheAgentExits(t *testing.T) {
+	var files []*os.File
+	svc := New(WithCommand([]string{"/bin/sh", "-c", "exit 0"}), WithKillDelay(time.Millisecond))
+	svc.cfg.pipe = func() (*os.File, *os.File, error) {
+		r, w, err := os.Pipe()
+		if err == nil {
+			files = append(files, r, w)
+		}
+		return r, w, err
+	}
+	defer func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}()
+	var inherited *os.File
+	svc.cfg.start = func(cmd *exec.Cmd) (<-chan int, error) {
+		fd, err := syscall.Dup(int(cmd.Stderr.(*os.File).Fd()))
+		if err != nil {
+			return nil, err
+		}
+		inherited = os.NewFile(uintptr(fd), "inherited-stderr")
+		return startAndWait(cmd)
+	}
+	p, err := svc.spawn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inherited.Close()
+	s := newSession(slog.Default(), []byte("A"), p, time.Millisecond, outboxMax)
+	go s.run(&agentlinkpb.SessionParams{Cwd: t.TempDir()})
+	<-s.done
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := files[4].Stat(); errors.Is(err, os.ErrClosed) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stderr reader stays open after the agent exited")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

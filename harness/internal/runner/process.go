@@ -18,6 +18,7 @@ type agentProc struct {
 	cmd    *exec.Cmd
 	stdin  *os.File
 	stdout *os.File
+	stderr *os.File
 
 	done chan struct{}
 	code atomic.Int32
@@ -82,7 +83,7 @@ func (s *Service) spawn() (*agentProc, error) {
 		_ = errR.Close()
 		return nil, err
 	}
-	proc := &agentProc{cmd: cmd, stdin: inW, stdout: outR, done: make(chan struct{})}
+	proc := &agentProc{cmd: cmd, stdin: inW, stdout: outR, stderr: errR, done: make(chan struct{})}
 	go logStderr(s.log, errR, proc.pid())
 	go func() {
 		proc.code.Store(int32(<-exited))
