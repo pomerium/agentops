@@ -4,10 +4,13 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
+	"github.com/cenkalti/backoff/v7"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -25,6 +28,11 @@ const (
 	commandPermission = "permission"
 )
 
+const (
+	podRetryInitial = 50 * time.Millisecond
+	podRetryMax     = 5 * time.Second
+)
+
 func (s *Service) consume(b *binding) {
 	defer close(b.consumed)
 	ctx := telemetry.With(context.Background(), "session_id", b.sessionID)
@@ -39,13 +47,15 @@ func (s *Service) consume(b *binding) {
 			case f.GetState() != nil:
 				s.reconcileState(ctx, b, f.GetState())
 			case f.GetEvent() != nil:
-				s.handleEvent(ctx, b, f.GetEvent())
+				if !s.handleEvent(ctx, b, f.GetEvent()) {
+					return
+				}
 			}
 		}
 	}
 }
 
-func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.AgentEvent) {
+func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.AgentEvent) bool {
 	turnID, seq := ev.GetTurnId(), ev.GetSeq()
 	var out *pb.Event
 	switch p := ev.GetPayload().(type) {
@@ -99,22 +109,28 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 			out = &pb.Event{Payload: &pb.Event_TurnCompleted{TurnCompleted: &pb.TurnCompleted{StopReason: p.TurnFinished.GetStopReason()}}}
 		}
 	case *agentlinkpb.AgentEvent_Exited:
-		s.advancePod(ctx, b, seq)
+		if !s.advancePod(ctx, b, seq) {
+			return false
+		}
 		b.session.Ack(seq)
 		code := p.Exited.GetExitCode()
 		s.log.InfoContext(ctx, "the agent exited; ending the session", "session", b.sessionID, "exit_code", code)
 		go s.stopOwned(context.WithoutCancel(ctx), b.sessionID, b.owner, stopSpec{
 			end: api.EndAgentExit, detail: fmt.Sprintf("the agent exited with code %d", code),
 		})
-		return
+		return true
 	default:
-		s.advancePod(ctx, b, seq)
+		if !s.advancePod(ctx, b, seq) {
+			return false
+		}
 		b.session.Ack(seq)
-		return
+		return true
 	}
 
 	out.TurnId = turnID
-	s.emitPod(ctx, b.sessionID, out, seq)
+	if !s.recordPod(ctx, b, seq, func(ctx context.Context) error { return s.emitPod(ctx, b.sessionID, out, seq) }) {
+		return false
+	}
 	b.session.Ack(seq)
 	if ev.GetTurnFinished() != nil {
 		b.leave(turnID)
@@ -122,6 +138,7 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 			s.log.WarnContext(ctx, "could not clear the commands of a finished turn", "session", b.sessionID, "turn_id", turnID, "err", err)
 		}
 	}
+	return true
 }
 
 func toolInput(raw []byte) *structpb.Value {
@@ -139,10 +156,40 @@ func toolInput(raw []byte) *structpb.Value {
 	return out
 }
 
-func (s *Service) advancePod(ctx context.Context, b *binding, seq uint64) {
-	if err := s.store.AdvancePodSeq(ctx, b.sessionID, int64(seq)); err != nil {
-		s.log.WarnContext(ctx, "could not record the last agent event", "session", b.sessionID, "seq", seq, "err", err)
+func (s *Service) advancePod(ctx context.Context, b *binding, seq uint64) bool {
+	return s.recordPod(ctx, b, seq, func(ctx context.Context) error { return s.store.AdvancePodSeq(ctx, b.sessionID, int64(seq)) })
+}
+
+func (s *Service) recordPod(ctx context.Context, b *binding, seq uint64, record func(ctx context.Context) error) bool {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-b.done:
+		case <-b.session.Done():
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+	policy := backoff.NewExponentialBackOff()
+	policy.InitialInterval = podRetryInitial
+	policy.MaxInterval = podRetryMax
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		err := record(ctx)
+		if errors.Is(err, sessionstore.ErrNotFound) {
+			return struct{}{}, backoff.Permanent(err)
+		}
+		return struct{}{}, err
+	}, backoff.WithBackOff(policy), backoff.WithMaxElapsedTime(0), backoff.WithNotify(func(err error, wait time.Duration) {
+		s.log.WarnContext(ctx, "could not record an agent event; retrying before the ack",
+			"session", b.sessionID, "seq", seq, "retry_in", wait, "err", err)
+	}))
+	if err != nil {
+		s.log.WarnContext(ctx, "an agent event was not recorded and stays unacked; the pod sends it again on the next stream",
+			"session", b.sessionID, "seq", seq, "err", err)
+		return false
 	}
+	return true
 }
 
 func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkpb.AgentState) {

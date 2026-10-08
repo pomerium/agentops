@@ -581,27 +581,25 @@ func storedTemplate(sess sessionstore.Session) (*v1alpha1.AgentTemplate, string,
 }
 
 func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
-	s.emitPod(ctx, sessionID, ev, 0)
+	if err := s.emitPod(ctx, sessionID, ev, 0); err != nil {
+		s.log.ErrorContext(ctx, "could not record a session event; clients will see a gap",
+			"session", sessionID, "event", api.Kind(ev), "err", err)
+	}
 }
 
-func (s *Service) emitPod(ctx context.Context, sessionID string, ev *pb.Event, podSeq uint64) {
+func (s *Service) emitPod(ctx context.Context, sessionID string, ev *pb.Event, podSeq uint64) error {
 	ev.SessionId = sessionID
 	ctx = context.WithoutCancel(ctx)
 	defer s.lockEvents(sessionID)()
 	current, err := s.store.GetSession(ctx, sessionID)
 	if err == nil && api.Terminal(current.Status) {
 		s.tel.Debug(ctx, "the session has ended; dropping a later event", "session", sessionID, "event", api.Kind(ev))
-		return
+		return nil
 	}
 	if podSeq > 0 {
-		err = s.events.AppendFromPod(ctx, ev, podSeq)
-	} else {
-		err = s.events.Append(ctx, ev)
+		return s.events.AppendFromPod(ctx, ev, podSeq)
 	}
-	if err != nil {
-		s.log.ErrorContext(ctx, "could not record a session event; clients will see a gap",
-			"session", sessionID, "event", api.Kind(ev), "err", err)
-	}
+	return s.events.Append(ctx, ev)
 }
 
 func (s *Service) lockEvents(sessionID string) func() {
