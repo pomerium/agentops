@@ -124,6 +124,16 @@ func (s *logSink) restore(id string, w *permissionWaiter, after time.Duration) {
 	s.armLocked(id, w, max(after, 0))
 }
 
+func (s *logSink) reinstate(id string, w *permissionWaiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.waiters[id]; ok || s.stopped {
+		return
+	}
+	w.timer = nil
+	s.waiters[id] = w
+}
+
 func (s *logSink) fire() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

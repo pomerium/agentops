@@ -771,3 +771,60 @@ func TestAReconnectResolutionThatIsNotRecordedIsSupersededByTheStop(t *testing.T
 		t.Fatal("a request whose resolution was not recorded was dropped; the stop cannot close it")
 	}
 }
+
+type cancelledSupersedeLog struct {
+	EventLog
+	entered chan struct{}
+}
+
+func (l cancelledSupersedeLog) Append(
+	ctx context.Context, ev *pb.Event,
+) error {
+	if ev.GetPermissionResolved().GetUnanswered() ==
+		api.ResolutionSuperseded {
+		close(l.entered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return l.EventLog.Append(ctx, ev)
+}
+
+func TestCancelledReconcileDoesNotRestartExpiry(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	live := &decisionLog{}
+	b.session = live
+	b.sink.permTimeout = time.Hour
+	defer b.sink.stop()
+
+	if !svc.handleEvent(ctx, b, permissionEvent(2, "request")) {
+		t.Fatal("request was not recorded")
+	}
+	// Its original timer has not fired. The stalled resolution
+	// write has outlived the recorded deadline.
+	b.sink.mu.Lock()
+	b.sink.waiters["request"].deadline = time.Now().Add(-time.Second)
+	b.sink.mu.Unlock()
+
+	entered := make(chan struct{})
+	svc.events = cancelledSupersedeLog{
+		EventLog: svc.events, entered: entered,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.reconcileState(ctx, b, &agentlinkpb.AgentState{})
+	}()
+	<-entered
+	b.close(0)
+	<-done
+
+	until := time.Now().Add(time.Second)
+	for time.Now().Before(until) {
+		if len(live.sent()) != 0 {
+			t.Fatal("closed binding sent a new cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

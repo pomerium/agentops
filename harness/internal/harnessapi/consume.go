@@ -325,7 +325,7 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 				"session", b.sessionID, "request_id", id, "retry_in", wait, "err", err)
 		})
 		if err != nil {
-			b.sink.restore(id, w, time.Until(w.deadline))
+			b.sink.reinstate(id, w)
 			continue
 		}
 		err = s.whileBound(ctx, b, func(ctx context.Context) error {
@@ -410,6 +410,11 @@ func (s *Service) saveDecision(ctx context.Context, b *binding, turnID, requestI
 func (s *Service) expirePermission(ctx context.Context, b *binding, requestID string) {
 	b.permMu.Lock()
 	defer b.permMu.Unlock()
+	select {
+	case <-b.done:
+		return
+	default:
+	}
 	w, ok := b.sink.take(requestID)
 	if !ok {
 		return
