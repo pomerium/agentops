@@ -379,6 +379,24 @@ func TestForeignWorkspaceMentionIsIgnored(t *testing.T) {
 	}
 }
 
+func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+	})
+	f.poster.failNextReads(1000)
+
+	f.app.HandleMention(context.Background(), mentionIn(f, "U1", "continue"))
+
+	f.poster.waitForPost(t, "couldn't send that to the agent")
+	if ends := f.api.endRequests(); len(ends) != 0 {
+		t.Errorf("a failed Slack read ended the paused session: %v", ends)
+	}
+	if n := len(f.api.createRequests()); n != 0 {
+		t.Errorf("a failed Slack read started %d fresh sessions", n)
+	}
+}
+
 func userMessage(user, ts, text string) slack.Message {
 	m := slack.Message{}
 	m.User = user

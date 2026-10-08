@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -432,6 +433,7 @@ type fakePoster struct {
 	reactions []reactionOp
 	replies   []slack.Message
 	posted    []slack.Message
+	failReads int
 }
 
 func (p *fakePoster) PostMessage(_ context.Context, channelID string, opts ...slack.MsgOption) (string, error) {
@@ -531,6 +533,10 @@ func (p *fakePoster) RemoveReaction(_ context.Context, channelID, ts, emoji stri
 func (p *fakePoster) ThreadReplies(_ context.Context, _, threadTS, since string, max int) ([]slack.Message, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.failReads > 0 {
+		p.failReads--
+		return nil, errors.New("slack is unavailable")
+	}
 	out := append([]slack.Message(nil), p.replies...)
 	for _, m := range p.posted {
 		if m.ThreadTimestamp == threadTS {
@@ -551,6 +557,12 @@ func (p *fakePoster) ThreadReplies(_ context.Context, _, threadTS, since string,
 		out = out[len(out)-max:]
 	}
 	return out, nil
+}
+
+func (p *fakePoster) failNextReads(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failReads = n
 }
 
 func (p *fakePoster) Permalink(_ context.Context, channelID, ts string) (string, error) {
