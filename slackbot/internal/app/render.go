@@ -51,6 +51,12 @@ func (r *renderer) beginTurn(turnID string) {
 	r.finished = false
 }
 
+func (r *renderer) unfinish() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.finished = false
+}
+
 func (r *renderer) toolCall() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -198,7 +204,9 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 		text := t.render.appendPart(p.AgentMessage.GetText())
 		if p.AgentMessage.GetFinal() {
 			t.render.finish(ev.GetTurnId())
-			a.showFinal(ctx, t, text)
+			if !a.showFinal(ctx, t, text) {
+				t.render.unfinish()
+			}
 			return
 		}
 		a.showIntermediary(ctx, t, text)
@@ -328,11 +336,17 @@ func endReaction(reason api.EndReason) string {
 }
 
 func (a *App) endTurn(ctx context.Context, t *thread, turnID string) {
+	delivered := true
 	if text, ok := t.render.finish(turnID); ok {
-		a.showFinal(ctx, t, text)
+		delivered = a.showFinal(ctx, t, text)
 	}
 	a.clearBusy(ctx, t)
-	a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS = "", "" })
+	if delivered {
+		a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS = "", "" })
+	} else {
+		a.log.ErrorContext(ctx, "the turn's answer did not reach Slack after a retry",
+			"session", t.sessionID, "turn_id", turnID)
+	}
 	t.render.mu.Lock()
 	finalTS, reacted := t.render.curTS, t.render.reacted
 	t.render.reacted = false
@@ -389,11 +403,12 @@ func (a *App) showIntermediary(ctx context.Context, t *thread, seg string) {
 	}
 }
 
-func (a *App) showFinal(ctx context.Context, t *thread, seg string) {
+func (a *App) showFinal(ctx context.Context, t *thread, seg string) bool {
 	t.render.mu.Lock()
 	cur := t.render.curTS
 	t.render.mu.Unlock()
 
+	delivered := true
 	var firstTS string
 	for i, piece := range mdsplit.Split(seg, maxMessageChars) {
 		content := messageContent(t, piece, i == 0)
@@ -401,6 +416,7 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) {
 			if _, err := a.poster.UpdateMessage(ctx, t.channel, cur, content...); err != nil {
 				a.log.ErrorContext(ctx, "update agent message failed",
 					"channel", t.channel, "ts", cur, "err", err)
+				delivered = false
 			}
 			firstTS = cur
 			continue
@@ -409,6 +425,7 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) {
 		if err != nil {
 			a.log.ErrorContext(ctx, "post agent message failed",
 				"channel", t.channel, "thread_ts", t.threadTS, "err", err)
+			delivered = false
 			continue
 		}
 		if firstTS == "" {
@@ -421,6 +438,7 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) {
 		t.render.curTS = firstTS
 		t.render.mu.Unlock()
 	}
+	return delivered
 }
 
 func (a *App) rememberAnswer(ctx context.Context, t *thread, ts string) {
@@ -464,22 +482,25 @@ func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequ
 func (a *App) closePermission(ctx context.Context, t *thread, p *pb.PermissionResolved) {
 	t.render.mu.Lock()
 	ts := t.render.permTS[p.GetRequestId()]
-	delete(t.render.permTS, p.GetRequestId())
 	t.render.mu.Unlock()
 	if ts == "" {
 		return
 	}
-	a.saveMeta(ctx, t, func(m *sessionMeta) {
-		m.PermissionPrompts = withPermissionPrompt(m.PermissionPrompts, p.GetRequestId(), "")
-	})
 	text := permissionResolvedText(p)
 	if _, err := a.poster.UpdateMessage(ctx, t.channel, ts,
 		chromeMeta(t.sessionID), slack.MsgOptionText(text, false),
 		slack.MsgOptionBlocks(slack.NewSectionBlock(
 			slack.NewTextBlockObject(slack.MarkdownType, text, false, false), nil, nil))); err != nil {
-		a.log.WarnContext(ctx, "could not close an answered permission prompt",
+		a.log.WarnContext(ctx, "could not close an answered permission prompt; keeping it so a replay closes it",
 			"session", t.sessionID, "request", p.GetRequestId(), "err", err)
+		return
 	}
+	t.render.mu.Lock()
+	delete(t.render.permTS, p.GetRequestId())
+	t.render.mu.Unlock()
+	a.saveMeta(ctx, t, func(m *sessionMeta) {
+		m.PermissionPrompts = withPermissionPrompt(m.PermissionPrompts, p.GetRequestId(), "")
+	})
 }
 
 func (a *App) warnIdle(ctx context.Context, t *thread, lead time.Duration) {
