@@ -8,6 +8,10 @@ import (
 	"github.com/slack-go/slack"
 )
 
+func sessionTranscript(replies []slack.Message, spec carrySpec) []transcriptEntry {
+	return mergeRuns(transcriptMessages(replies, spec))
+}
+
 func human(ts, text string) slack.Message {
 	return slack.Message{Msg: slack.Msg{Timestamp: ts, Text: text}}
 }
@@ -238,7 +242,11 @@ func TestCarriedLabelsAreAllSanitizable(t *testing.T) {
 func TestCapEntriesKeepsMostRecent(t *testing.T) {
 	var entries []transcriptEntry
 	for i := range transcriptMaxMessages + 10 {
-		entries = append(entries, transcriptEntry{role: roleRequest, text: fmt.Sprintf("m-%d", i)})
+		role := roleRequest
+		if i%2 == 1 {
+			role = roleReply
+		}
+		entries = append(entries, transcriptEntry{role: role, text: fmt.Sprintf("m-%d", i), msgs: 1})
 	}
 	got, truncated := capEntries(entries)
 	if !truncated {
@@ -273,6 +281,35 @@ func TestCapEntriesUntouchedWhenWithinBudget(t *testing.T) {
 	got, truncated := capEntries(entries)
 	if truncated || len(got) != 1 {
 		t.Errorf("a short transcript must not be reported truncated: %v %d", truncated, len(got))
+	}
+}
+
+func TestCapKeepsTheNewestMessagesThatFit(t *testing.T) {
+	replies := []slack.Message{
+		human("1.0001", strings.Repeat("a", 3000)),
+		human("1.0002", strings.Repeat("b", 3000)),
+		human("1.0003", strings.Repeat("c", 3000)),
+	}
+	got, truncated := capEntries(transcriptMessages(replies, seedCarry("1.0004", "U0BOT")))
+	if !truncated {
+		t.Error("dropping a message must report truncation")
+	}
+	if n := carriedMessages(got); n != 2 {
+		t.Fatalf("kept %d messages, want the newest 2:\n%s", n, texts(got))
+	}
+	if strings.Contains(texts(got), "a") || !strings.Contains(texts(got), "c") {
+		t.Errorf("the oldest message must go first:\n%.40s", texts(got))
+	}
+}
+
+func TestCapTruncatesASingleMessageOverTheBudget(t *testing.T) {
+	replies := []slack.Message{human("1.0001", strings.Repeat("z", transcriptMaxChars+500))}
+	got, truncated := capEntries(transcriptMessages(replies, seedCarry("1.0002", "U0BOT")))
+	if !truncated {
+		t.Error("cutting a message must report truncation")
+	}
+	if len(got) != 1 || len(got[0].text) > transcriptMaxChars+len("…") || !strings.HasPrefix(got[0].text, "zzz") {
+		t.Fatalf("a message over the budget must be cut to it, not dropped: %d entries", len(got))
 	}
 }
 

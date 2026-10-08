@@ -3,6 +3,7 @@ package app
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/slack-go/slack"
 )
@@ -83,7 +84,7 @@ func catchupCarry(afterTS, beforeTS, botUserID, selfSessionID, selfUserID string
 	}
 }
 
-func sessionTranscript(replies []slack.Message, spec carrySpec) []transcriptEntry {
+func transcriptMessages(replies []slack.Message, spec carrySpec) []transcriptEntry {
 	var out []transcriptEntry
 	for _, msg := range replies {
 		if spec.after != "" && msg.Timestamp <= spec.after {
@@ -111,12 +112,20 @@ func sessionTranscript(replies []slack.Message, spec carrySpec) []transcriptEntr
 		case spec.selfUserID != "" && msg.User == spec.selfUserID:
 			role = spec.own
 		}
-		if n := len(out); n > 0 && out[n-1].role == role {
-			out[n-1].text += "\n\n" + msg.Text
-			out[n-1].msgs++
+		out = append(out, transcriptEntry{role: role, text: msg.Text, msgs: 1})
+	}
+	return out
+}
+
+func mergeRuns(msgs []transcriptEntry) []transcriptEntry {
+	var out []transcriptEntry
+	for _, m := range msgs {
+		if n := len(out); n > 0 && out[n-1].role == m.role {
+			out[n-1].text += "\n\n" + m.text
+			out[n-1].msgs += m.msgs
 			continue
 		}
-		out = append(out, transcriptEntry{role: role, text: msg.Text, msgs: 1})
+		out = append(out, m)
 	}
 	return out
 }
@@ -261,20 +270,38 @@ func quoteConversation(entries []transcriptEntry, truncated bool) string {
 	return b.String()
 }
 
-func capEntries(entries []transcriptEntry) ([]transcriptEntry, bool) {
+func capEntries(msgs []transcriptEntry) ([]transcriptEntry, bool) {
 	truncated := false
-	if len(entries) > transcriptMaxMessages {
-		entries = entries[len(entries)-transcriptMaxMessages:]
+	if len(msgs) > transcriptMaxMessages {
+		msgs = msgs[len(msgs)-transcriptMaxMessages:]
 		truncated = true
 	}
 	chars := 0
-	for i := len(entries) - 1; i >= 0; i-- {
-		chars += len(entries[i].text)
-		if chars > transcriptMaxChars {
-			entries = entries[i+1:]
-			truncated = true
+	for i := len(msgs) - 1; i >= 0; i-- {
+		chars += len(msgs[i].text)
+		if chars <= transcriptMaxChars {
+			continue
+		}
+		truncated = true
+		if i < len(msgs)-1 {
+			msgs = msgs[i+1:]
 			break
 		}
+		last := msgs[i]
+		last.text = cutBytes(last.text, transcriptMaxChars) + "…"
+		msgs = []transcriptEntry{last}
+		break
 	}
-	return entries, truncated
+	return mergeRuns(msgs), truncated
+}
+
+func cutBytes(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
