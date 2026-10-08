@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
+	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
 type flakyPodLog struct {
@@ -109,5 +111,89 @@ func TestAPodEventIsAckedOnceTheLogRecordsIt(t *testing.T) {
 	}
 	if sess.PodSeq != 2 {
 		t.Errorf("pod seq = %d, want 2", sess.PodSeq)
+	}
+}
+
+type promptProbe struct {
+	idleSession
+	mu       sync.Mutex
+	last     uint64
+	accepted []string
+}
+
+func (p *promptProbe) Prompt(turnID string, turnSeq uint64, _ string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if turnSeq > p.last {
+		p.last = turnSeq
+		p.accepted = append(p.accepted, turnID)
+	}
+}
+
+func (p *promptProbe) acceptedTurns() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.accepted)
+}
+
+type commandsHook struct {
+	Store
+	hook func()
+}
+
+func (s commandsHook) ListPodCommands(ctx context.Context, sessionID string) ([]sessionstore.PodCommand, error) {
+	cmds, err := s.Store.ListPodCommands(ctx, sessionID)
+	s.hook()
+	return cmds, err
+}
+
+func TestAReconnectSendsTheOlderTurnBeforeANewOne(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+
+	id, n, err := svc.nextTurn(ctx, "s1")
+	if err != nil {
+		t.Fatalf("nextTurn: %v", err)
+	}
+	b.enter(id)
+	svc.sendPrompt(ctx, b, id, uint64(n), "first")
+
+	live := &promptProbe{}
+	b.session = live
+	sess, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	newer := make(chan string, 1)
+	svc.store = commandsHook{Store: st, hook: func() {
+		sent := make(chan struct{})
+		go func() {
+			defer close(sent)
+			turnID, err := svc.startTurn(ctx, sess, "second")
+			if err != nil {
+				t.Errorf("startTurn: %v", err)
+			}
+			newer <- turnID
+		}()
+		select {
+		case <-sent:
+		case <-time.After(200 * time.Millisecond):
+		}
+	}}
+
+	svc.reconcileState(ctx, b, &agentlinkpb.AgentState{})
+	var second string
+	select {
+	case second = <-newer:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the newer turn was never sent")
+	}
+
+	if got, want := live.acceptedTurns(), []string{id, second}; !slices.Equal(got, want) {
+		t.Errorf("turns the agent accepted = %v, want %v", got, want)
+	}
+	if !slices.Contains(b.outstanding(), second) {
+		t.Errorf("outstanding = %v, want it to keep %s", b.outstanding(), second)
 	}
 }

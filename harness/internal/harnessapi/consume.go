@@ -193,6 +193,7 @@ func (s *Service) recordPod(ctx context.Context, b *binding, seq uint64, record 
 }
 
 func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkpb.AgentState) {
+	b.sendMu.Lock()
 	cmds, err := s.store.ListPodCommands(ctx, b.sessionID)
 	if err != nil {
 		s.log.WarnContext(ctx, "could not read the commands the agent may not have", "session", b.sessionID, "err", err)
@@ -233,7 +234,6 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 	for _, p := range resend {
 		outstanding = append(outstanding, p.GetTurnId())
 	}
-	b.sendMu.Lock()
 	for _, p := range b.held {
 		if !slices.Contains(outstanding, p.GetTurnId()) {
 			outstanding = append(outstanding, p.GetTurnId())
