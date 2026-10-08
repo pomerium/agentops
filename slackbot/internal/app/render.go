@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type renderer struct {
 	curTS    string
 	reacted  bool
 	turnID   string
+	pieceTS  map[int]string
 	text     string
 	broken   bool
 	finished bool
@@ -46,6 +48,7 @@ func (r *renderer) beginTurn(turnID string) {
 	r.turnID = turnID
 	r.curTS = ""
 	r.reacted = false
+	r.pieceTS = nil
 	r.text = ""
 	r.broken = false
 	r.finished = false
@@ -417,19 +420,29 @@ func (a *App) showIntermediary(ctx context.Context, t *thread, seg string) {
 func (a *App) showFinal(ctx context.Context, t *thread, seg string) bool {
 	t.render.mu.Lock()
 	cur := t.render.curTS
+	sent := maps.Clone(t.render.pieceTS)
 	t.render.mu.Unlock()
+	if sent == nil {
+		sent = map[int]string{}
+	}
 
 	delivered := true
 	var firstTS string
 	for i, piece := range mdsplit.Split(seg, maxMessageChars) {
 		content := messageContent(t, piece, i == 0)
-		if i == 0 && cur != "" {
-			if _, err := a.poster.UpdateMessage(ctx, t.channel, cur, content...); err != nil {
+		known := sent[i]
+		if i == 0 {
+			known = cur
+		}
+		if known != "" {
+			if _, err := a.poster.UpdateMessage(ctx, t.channel, known, content...); err != nil {
 				a.log.ErrorContext(ctx, "update agent message failed",
-					"channel", t.channel, "ts", cur, "err", err)
+					"channel", t.channel, "ts", known, "err", err)
 				delivered = false
 			}
-			firstTS = cur
+			if i == 0 {
+				firstTS = known
+			}
 			continue
 		}
 		ts, err := a.poster.PostMessage(ctx, t.channel, append(content, slack.MsgOptionTS(t.threadTS))...)
@@ -439,16 +452,19 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) bool {
 			delivered = false
 			continue
 		}
+		sent[i] = ts
 		if firstTS == "" {
 			firstTS = ts
 			a.rememberAnswer(ctx, t, ts)
 		}
 	}
+	t.render.mu.Lock()
 	if firstTS != "" {
-		t.render.mu.Lock()
 		t.render.curTS = firstTS
-		t.render.mu.Unlock()
 	}
+	delete(sent, 0)
+	t.render.pieceTS = sent
+	t.render.mu.Unlock()
 	return delivered
 }
 
