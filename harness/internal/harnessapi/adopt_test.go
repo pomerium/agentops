@@ -2,6 +2,7 @@ package harnessapi_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
+	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
 func restart(t *testing.T, h *harness) *harness {
@@ -419,5 +421,35 @@ func TestUnattachedAdoptionFailsItsSavedTurn(t *testing.T) {
 	if countKind(history(t, &h2, ref), "turn_failed",
 		turn.GetTurnId()) != 1 {
 		t.Fatal("the saved turn never finished before the session ended")
+	}
+}
+
+type keepTurnCommands struct{ sessionstore.Store }
+
+func (keepTurnCommands) DeletePodCommandsForTurn(context.Context, string, string) error {
+	return errors.New("database unavailable")
+}
+
+func TestAnAdoptionDoesNotFailATurnThatAlreadyFinished(t *testing.T) {
+	h := newHarness(t)
+	h.svc = harnessapi.New(keepTurnCommands{h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+	ref := byID(launchRunning(t, h, "stub:finished").GetId())
+	turn, err := h.svc.Prompt(as(stubClient), &pb.PromptRequest{Ref: ref, Content: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForEvent(t, h, ref, kindOf("turn_completed", turn.GetTurnId()))
+	h.svc.Shutdown()
+
+	h2 := *h
+	h2.svc = harnessapi.New(h.store, harnessapi.NewEventLog(h.store), silentAdoptLauncher{h.launcher}, h.tmpl, h.runs,
+		harnessapi.WithLogger(testLogger(t)))
+	t.Cleanup(h2.svc.Shutdown)
+	<-h2.svc.ReconcileOnStartup(context.Background())
+	h2.launcher.down("tunnel_lost")
+	waitForStoredState(t, &h2, ref, api.StateEnded)
+	if n := countKind(history(t, &h2, ref), "turn_failed", turn.GetTurnId()); n != 0 {
+		t.Fatalf("a completed turn got %d turn_failed events after the adoption", n)
 	}
 }
