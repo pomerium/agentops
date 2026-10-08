@@ -447,6 +447,7 @@ type fakePoster struct {
 	replies   []slack.Message
 	posted    []slack.Message
 	failReads int
+	tooLong   bool
 }
 
 func (p *fakePoster) PostMessage(_ context.Context, channelID string, opts ...slack.MsgOption) (string, error) {
@@ -550,6 +551,9 @@ func (p *fakePoster) ThreadReplies(_ context.Context, _, threadTS, since string,
 	if p.failReads > 0 {
 		p.failReads--
 		return nil, errors.New("slack is unavailable")
+	}
+	if p.tooLong && since == "" {
+		return nil, errors.New("the thread has more replies than one read covers")
 	}
 	out := append([]slack.Message(nil), p.replies...)
 	for _, m := range p.posted {

@@ -111,7 +111,7 @@ func TestAFailedCatchupReadIsCarriedByTheNextTurn(t *testing.T) {
 	f.humanSaid("U9", "do not deploy production")
 
 	before := len(f.api.promptRequests())
-	f.poster.failNextReads(1)
+	f.poster.failNextReads(2)
 	f.app.HandleMention(ctx, mentionIn(f, "U1", "check staging"))
 	waitFor(t, "U1's turn without a catch-up", func() bool { return len(f.api.promptRequests()) > before })
 
@@ -172,6 +172,23 @@ func TestAPeerAnswerFinishedAfterMyTurnReachesMyNextTurn(t *testing.T) {
 	waitFor(t, "U1's next turn", func() bool { return len(f.api.promptRequests()) > before })
 	if content := f.api.promptRequests()[before].Content; !strings.Contains(content, "staging failed; do not promote") {
 		t.Errorf("the peer's finished answer never reached U1's agent:\n%s", content)
+	}
+}
+
+func TestACatchupInAThreadTooLongToReadWholeStillCarriesNewMessages(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	twoParticipants(t, f)
+	f.poster.mu.Lock()
+	f.poster.tooLong = true
+	f.poster.mu.Unlock()
+	f.humanSaid("U9", "do not deploy production")
+
+	before := len(f.api.promptRequests())
+	f.app.HandleMention(ctx, mentionIn(f, "U1", "check staging"))
+	waitFor(t, "U1's turn", func() bool { return len(f.api.promptRequests()) > before })
+	if content := f.api.promptRequests()[before].Content; !strings.Contains(content, "do not deploy production") {
+		t.Errorf("a thread too long to read whole lost its catch-up:\n%s", content)
 	}
 }
 
