@@ -347,6 +347,7 @@ func (a *App) endTurn(ctx context.Context, t *thread, turnID string) {
 		a.log.ErrorContext(ctx, "the turn's answer did not reach Slack after a retry",
 			"session", t.sessionID, "turn_id", turnID)
 	}
+	a.settleReadyStatus(ctx, t)
 	t.render.mu.Lock()
 	finalTS, reacted := t.render.curTS, t.render.reacted
 	t.render.reacted = false
@@ -354,6 +355,16 @@ func (a *App) endTurn(ctx context.Context, t *thread, turnID string) {
 	if reacted && finalTS != "" {
 		a.removeReaction(ctx, t.channel, finalTS, reactionBusy)
 	}
+}
+
+func (a *App) settleReadyStatus(ctx context.Context, t *thread) {
+	if t.busy.Load() > 0 || t.currentState() != api.StateRunning {
+		return
+	}
+	if t.meta().statusText != lifecycleText(t, msgStatusReadyWorking) {
+		return
+	}
+	a.editStatus(ctx, t, readyStatusFor(false, t.multiplayer()))
 }
 
 func (a *App) startOver(ctx context.Context, t *thread, in gateway.MentionInvocation) {
