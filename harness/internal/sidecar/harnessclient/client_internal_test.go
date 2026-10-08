@@ -4,262 +4,17 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
-	"github.com/pomerium/agentops/harness/internal/agentio"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
+	runnerpb "github.com/pomerium/agentops/harness/internal/runner/pb"
 )
-
-var testStreamID = []byte("stream-1")
-
-type bearer string
-
-func (b bearer) Bearer() string { return string(b) }
-
-func (bearer) Refresh() {}
-
-type fakeLink struct {
-	agentlinkpb.AgentLinkServiceClient
-	attach *fakeAttach
-}
-
-func (l *fakeLink) Attach(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AttachClient, error) {
-	l.attach.ctx = ctx
-	return l.attach, nil
-}
-
-func (l *fakeLink) AgentIO(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AgentIOClient, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
-type fakeAttach struct {
-	agentlinkpb.AgentLinkService_AttachClient
-	ctx     context.Context
-	exitErr error
-	exited  chan int32
-	helloed chan struct{}
-	frames  chan *agentlinkpb.ManagerFrame
-
-	mu    sync.Mutex
-	acked bool
-	hello *agentlinkpb.SidecarHello
-}
-
-func newFakeAttach(exitErr error) *fakeAttach {
-	return &fakeAttach{
-		exitErr: exitErr, exited: make(chan int32, 1), helloed: make(chan struct{}, 1),
-		frames: make(chan *agentlinkpb.ManagerFrame, 4),
-	}
-}
-
-func (s *fakeAttach) Recv() (*agentlinkpb.ManagerFrame, error) {
-	s.mu.Lock()
-	acked := s.acked
-	s.acked = true
-	s.mu.Unlock()
-	if !acked {
-		return &agentlinkpb.ManagerFrame{Msg: &agentlinkpb.ManagerFrame_HelloAck{
-			HelloAck: &agentlinkpb.ManagerHelloAck{},
-		}}, nil
-	}
-	select {
-	case f := <-s.frames:
-		if f == nil {
-			return nil, status.Error(codes.Unavailable, "link dropped")
-		}
-		return f, nil
-	case <-s.ctx.Done():
-		return nil, s.ctx.Err()
-	}
-}
-
-func (s *fakeAttach) Send(f *agentlinkpb.SidecarFrame) error {
-	switch {
-	case f.GetHello() != nil:
-		s.mu.Lock()
-		s.hello = f.GetHello()
-		s.mu.Unlock()
-		s.helloed <- struct{}{}
-	case f.GetExited() != nil:
-		s.exited <- f.GetExited().GetExitCode()
-		return s.exitErr
-	}
-	return nil
-}
-
-func (s *fakeAttach) agentRunning() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.hello.GetAgentRunning()
-}
-
-func TestAnExitTheLinkDroppedIsReportedAfterReattach(t *testing.T) {
-	exited := make(chan AgentExit, 1)
-	exited <- AgentExit{Code: 7}
-	link := &fakeLink{attach: newFakeAttach(status.Error(codes.Unavailable, "link dropped"))}
-	c := &Client{
-		cfg:      Config{Token: bearer("Bearer pom_art_test")},
-		log:      slog.New(slog.DiscardHandler),
-		client:   link,
-		statusCh: make(chan *agentlinkpb.Status, 4),
-		ioSlot:   make(chan struct{}, 1),
-		agent:    &AgentSession{IO: agentio.New(), Exited: exited},
-	}
-	defer c.stopAgent()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := c.session(ctx, 1, c.cfg.Token.Bearer()); status.Code(err) != codes.Unavailable {
-		t.Fatalf("first session ended with %v, want the dropped exit send", err)
-	}
-	if code := <-link.attach.exited; code != 7 {
-		t.Fatalf("first link saw exit %d, want 7", code)
-	}
-
-	second := newFakeAttach(nil)
-	link.attach = second
-	ctx2, cancel2 := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- c.session(ctx2, 2, c.cfg.Token.Bearer()) }()
-	select {
-	case code := <-second.exited:
-		if code != 7 {
-			t.Errorf("reattached link saw exit %d, want 7", code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Error("the reattached link never learned that the agent exited")
-	}
-	cancel2()
-	<-done
-	if !second.agentRunning() {
-		t.Error("the reattach Hello reported no agent while its exit was still unreported")
-	}
-
-	third := newFakeAttach(nil)
-	link.attach = third
-	ctx3, cancel3 := context.WithCancel(ctx)
-	go func() { done <- c.session(ctx3, 3, c.cfg.Token.Bearer()) }()
-	<-third.helloed
-	cancel3()
-	<-done
-	if third.agentRunning() {
-		t.Error("the Hello after the exit was reported still claimed a running agent")
-	}
-	select {
-	case code := <-third.exited:
-		t.Errorf("an exit already reported was sent again (%d)", code)
-	default:
-	}
-}
-
-type ioLink struct {
-	agentlinkpb.AgentLinkServiceClient
-	streams chan *fakeIO
-}
-
-func (l *ioLink) AgentIO(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AgentIOClient, error) {
-	s := <-l.streams
-	s.ctx = ctx
-	return s, nil
-}
-
-type fakeIO struct {
-	agentlinkpb.AgentLinkService_AgentIOClient
-	ctx    context.Context
-	frames chan *agentlinkpb.AgentIOFrame
-	opened chan uint64
-}
-
-func newFakeIO(frames ...*agentlinkpb.AgentIOFrame) *fakeIO {
-	s := &fakeIO{frames: make(chan *agentlinkpb.AgentIOFrame, len(frames)+4), opened: make(chan uint64, 1)}
-	for _, f := range frames {
-		s.frames <- f
-	}
-	return s
-}
-
-func (s *fakeIO) Send(f *agentlinkpb.AgentIOFrame) error {
-	if f.GetOpen() != nil {
-		s.opened <- f.GetOpen().GetConsumed()
-	}
-	return nil
-}
-
-func (s *fakeIO) Recv() (*agentlinkpb.AgentIOFrame, error) {
-	select {
-	case f := <-s.frames:
-		return f, nil
-	case <-s.ctx.Done():
-		return nil, s.ctx.Err()
-	}
-}
-
-func TestAgentIOResumesOnlyAfterThePreviousPumpReturns(t *testing.T) {
-	first := newFakeIO(append([]*agentlinkpb.AgentIOFrame{agentio.OpenFrame(0, testStreamID)},
-		agentio.DataFrames([]byte("hello"), 5)...)...)
-	second := newFakeIO(agentio.OpenFrame(0, testStreamID))
-	link := &ioLink{streams: make(chan *fakeIO, 2)}
-	link.streams <- first
-	link.streams <- second
-	c := &Client{
-		log:      slog.New(slog.DiscardHandler),
-		client:   link,
-		statusCh: make(chan *agentlinkpb.Status, 4),
-		ioSlot:   make(chan struct{}, 1),
-	}
-	ag := &AgentSession{IO: agentio.New(), streamID: testStreamID}
-	defer ag.IO.Close(nil)
-	lost := make(chan error, 2)
-
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	defer cancel1()
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		c.pumpAgentIO(ctx1, ag, lost)
-	}()
-	<-first.opened
-	buf := make([]byte, 5)
-	if _, err := io.ReadFull(ag.IO.Inbound(), buf[:2]); err != nil {
-		t.Fatalf("read the start of the delivery: %v", err)
-	}
-	cancel1()
-
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	defer cancel2()
-	go c.pumpAgentIO(ctx2, ag, lost)
-
-	var declared uint64
-	opened := false
-	select {
-	case declared = <-second.opened:
-		opened = true
-	case <-time.After(200 * time.Millisecond):
-	}
-	go func() { _, _ = io.ReadFull(ag.IO.Inbound(), buf[2:]) }()
-	select {
-	case <-firstDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the previous pump never returned")
-	}
-	if !opened {
-		select {
-		case declared = <-second.opened:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the new AgentIO stream never sent Open")
-		}
-	}
-	if got := ag.IO.Consumed(); declared != got {
-		t.Fatalf("Open declared %d consumed bytes, but %d were delivered", declared, got)
-	}
-}
 
 type delayedStart struct {
 	entered chan struct{}
@@ -267,164 +22,205 @@ type delayedStart struct {
 	agent   *AgentSession
 }
 
-func (r *delayedStart) Spawn(context.Context) (*AgentSession, error) {
+func (r *delayedStart) Spawn(context.Context, []byte, *agentlinkpb.SessionParams) (*AgentSession, error) {
 	close(r.entered)
 	<-r.release
 	return r.agent, nil
 }
 
+func (r *delayedStart) Join(context.Context) (*AgentSession, error) { return nil, ErrNoAgent }
+
 func TestAnAgentThatStartsAfterShutdownIsStopped(t *testing.T) {
-	stopped := make(chan struct{}, 1)
-	ag := &AgentSession{IO: agentio.New(), Stop: func() { stopped <- struct{}{} }}
-	defer ag.IO.Close(nil)
+	sent := make(chan *runnerpb.RunnerClientFrame, 4)
+	closed := make(chan struct{})
+	ag := &AgentSession{
+		Send:  func(f *runnerpb.RunnerClientFrame) error { sent <- f; return nil },
+		Close: func() { close(closed) },
+	}
 	r := &delayedStart{entered: make(chan struct{}), release: make(chan struct{}), agent: ag}
 	c := &Client{cfg: Config{Runner: r}, log: slog.New(slog.DiscardHandler)}
 
-	pending := c.startSpawn(context.Background(), testStreamID)
+	pending := c.startSpawn(context.Background(), []byte("s"), &agentlinkpb.SessionParams{})
 	<-r.entered
 	c.stopAgent()
 	close(r.release)
 	<-pending.done
 
 	select {
-	case <-stopped:
-	default:
-		t.Error("the agent that started after shutdown was never stopped")
+	case f := <-sent:
+		if f.GetStop() == nil {
+			t.Fatalf("frame sent to the late agent = %v, want Stop", f)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the agent that started after shutdown was never stopped")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the late agent's runner stream was never closed")
 	}
 	if c.currentAgent() != nil {
 		t.Error("shutdown left the late agent stored")
 	}
 }
 
-func TestAReattachWatchesAnAgentThatFinishedStartingAfterTheDrop(t *testing.T) {
-	exits := make(chan AgentExit, 1)
-	r := &delayedStart{
-		entered: make(chan struct{}), release: make(chan struct{}),
-		agent: &AgentSession{IO: agentio.New(), Exited: exits},
-	}
-	link := &fakeLink{attach: newFakeAttach(nil)}
-	c := &Client{
-		cfg:      Config{Token: bearer("Bearer pom_art_test"), Runner: r},
-		log:      slog.New(slog.DiscardHandler),
-		client:   link,
-		statusCh: make(chan *agentlinkpb.Status, 4),
-		ioSlot:   make(chan struct{}, 1),
-	}
-	defer c.stopAgent()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	first := link.attach
-	first.frames <- &agentlinkpb.ManagerFrame{Msg: &agentlinkpb.ManagerFrame_Spawn{Spawn: &agentlinkpb.SpawnAgent{StreamId: testStreamID}}}
-	done := make(chan error, 1)
-	go func() { done <- c.session(ctx, 1, c.cfg.Token.Bearer()) }()
-	<-r.entered
-	first.frames <- nil
-	if err := <-done; status.Code(err) != codes.Unavailable {
-		t.Fatalf("first session ended with %v, want the dropped link", err)
-	}
-
-	second := newFakeAttach(nil)
-	link.attach = second
-	go func() { done <- c.session(ctx, 2, c.cfg.Token.Bearer()) }()
-	<-second.helloed
-	close(r.release)
-	exits <- AgentExit{Code: 7}
-
-	select {
-	case code := <-second.exited:
-		if code != 7 {
-			t.Errorf("reattached link saw exit %d, want 7", code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Error("the reattached link never watched the agent that finished starting after the drop")
-	}
-	if !second.agentRunning() {
-		t.Error("the reattach Hello reported no agent while its start was still in flight")
-	}
-	cancel()
-	<-done
-}
-
-type exitLink struct {
+type replayLink struct {
 	agentlinkpb.AgentLinkServiceClient
-	attach *fakeAttach
-	io     *fakeIO
+	streams chan *replayIO
 }
 
-func (l *exitLink) Attach(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AttachClient, error) {
-	l.attach.ctx = ctx
-	return l.attach, nil
+func (l *replayLink) AgentIO(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AgentIOClient, error) {
+	s := &replayIO{ctx: ctx, states: make(chan *agentlinkpb.AgentState, 4)}
+	l.streams <- s
+	return s, nil
 }
 
-func (l *exitLink) AgentIO(ctx context.Context, _ ...grpc.CallOption) (agentlinkpb.AgentLinkService_AgentIOClient, error) {
-	l.io.ctx = ctx
-	return l.io, nil
+type replayIO struct {
+	agentlinkpb.AgentLinkService_AgentIOClient
+	ctx    context.Context
+	opened bool
+	states chan *agentlinkpb.AgentState
 }
 
-func TestAnExitIsReportedOnlyAfterTheHarnessAckedTheFinalOutput(t *testing.T) {
-	final := []byte("final reply\n")
-	exits := make(chan AgentExit, 1)
-	ag := &AgentSession{IO: agentio.New(), Exited: exits, streamID: testStreamID}
-	ag.IO.Record(final)
-	link := &exitLink{attach: newFakeAttach(nil), io: newFakeIO(agentio.OpenFrame(0, testStreamID))}
-	c := &Client{
-		cfg:      Config{Token: bearer("Bearer pom_art_test")},
-		log:      slog.New(slog.DiscardHandler),
-		client:   link,
-		statusCh: make(chan *agentlinkpb.Status, 4),
-		ioSlot:   make(chan struct{}, 1),
-		agent:    ag,
+func (s *replayIO) Recv() (*agentlinkpb.AgentIOFrame, error) {
+	if !s.opened {
+		s.opened = true
+		return &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{StreamId: []byte("s")}}}, nil
 	}
-	defer c.stopAgent()
+	<-s.ctx.Done()
+	return nil, s.ctx.Err()
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+func (s *replayIO) Send(f *agentlinkpb.AgentIOFrame) error {
+	if st := f.GetState(); st != nil {
+		s.states <- st
+	}
+	return nil
+}
+
+func replayStart(lastTurnSeq uint64) *runnerpb.RunnerServerFrame {
+	return &runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_ReplayStart{ReplayStart: &runnerpb.ReplayStart{
+		State: &agentlinkpb.AgentState{LastTurnSeq: lastTurnSeq},
+	}}}
+}
+
+func TestAReplayStartLeftFromAnEarlierAgentIOIsNotForwarded(t *testing.T) {
+	frames := make(chan *runnerpb.RunnerServerFrame, 8)
+	replays := make(chan struct{}, 4)
+	ag := &AgentSession{
+		StreamID: []byte("s"),
+		Frames:   frames,
+		Send: func(f *runnerpb.RunnerClientFrame) error {
+			if f.GetReplay() != nil {
+				replays <- struct{}{}
+			}
+			return nil
+		},
+	}
+	link := &replayLink{streams: make(chan *replayIO, 4)}
+	c := &Client{log: slog.New(slog.DiscardHandler), client: link}
+
+	firstCtx, dropFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- c.agentIO(firstCtx, ag) }()
+	<-link.streams
+	<-replays
+	dropFirst()
+	<-firstDone
+	frames <- replayStart(1)
+	frames <- &runnerpb.RunnerServerFrame{Msg: &runnerpb.RunnerServerFrame_Event{Event: &agentlinkpb.AgentEvent{Seq: 1}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- c.session(ctx, 1, c.cfg.Token.Bearer()) }()
-	<-link.io.opened
-	exits <- AgentExit{Code: 7, Output: uint64(len(final))}
+	go func() { done <- c.agentIO(ctx, ag) }()
+	defer func() { cancel(); <-done }()
+	second := <-link.streams
+	<-replays
+	frames <- replayStart(2)
 
 	select {
-	case <-link.attach.exited:
-		t.Fatal("the exit overtook output the harness had not acknowledged")
-	case <-time.After(200 * time.Millisecond):
-	}
-	link.io.frames <- agentio.AckFrame(uint64(len(final)))
-	select {
-	case code := <-link.attach.exited:
-		if code != 7 {
-			t.Errorf("exit %d crossed the link, want 7", code)
+	case st := <-second.states:
+		if st.GetLastTurnSeq() != 2 {
+			t.Fatalf("the new AgentIO got the state of an earlier replay (last_turn_seq %d), want the answer to its own replay", st.GetLastTurnSeq())
 		}
 	case <-time.After(5 * time.Second):
-		t.Error("the exit was never reported after the harness acknowledged the output")
+		t.Fatal("the new AgentIO forwarded no state")
 	}
-	cancel()
-	<-done
 }
 
-func TestAnOpenForAnotherStreamIsTerminal(t *testing.T) {
-	link := &ioLink{streams: make(chan *fakeIO, 1)}
-	link.streams <- newFakeIO(agentio.OpenFrame(0, []byte("stream-2")))
-	c := &Client{
-		log:      slog.New(slog.DiscardHandler),
-		client:   link,
-		statusCh: make(chan *agentlinkpb.Status, 4),
-		ioSlot:   make(chan struct{}, 1),
+type droppedAttach struct {
+	agentlinkpb.AgentLinkService_AttachClient
+	release chan struct{}
+}
+
+func (s *droppedAttach) Recv() (*agentlinkpb.ManagerFrame, error) {
+	<-s.release
+	return nil, io.EOF
+}
+
+func (s *droppedAttach) Send(*agentlinkpb.SidecarFrame) error { return io.ErrClosedPipe }
+
+func attachEndWaiters() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "harnessclient.awaitAttachEnd(")
+}
+
+func TestATerminalStatusLeavesNoReceiverBehind(t *testing.T) {
+	before := attachEndWaiters()
+	stream := &droppedAttach{release: make(chan struct{})}
+	t.Cleanup(func() { close(stream.release) })
+	c := &Client{log: slog.New(slog.DiscardHandler), statusCh: make(chan *agentlinkpb.Status, 1)}
+	c.statusCh <- &agentlinkpb.Status{State: agentlinkpb.Status_STATE_ERROR, Reason: ReasonLocalFailure}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := c.serve(ctx, ctx, stream, time.Hour, time.Hour); err == nil {
+		t.Fatal("serve returned no error for a terminal status")
 	}
-	ag := &AgentSession{IO: agentio.New(), streamID: testStreamID}
-	defer ag.IO.Close(nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	c.pumpAgentIO(ctx, ag, make(chan error, 1))
-
-	select {
-	case st := <-c.statusCh:
-		if st.GetReason() != ReasonStreamMismatch {
-			t.Errorf("status reason = %q, want %q", st.GetReason(), ReasonStreamMismatch)
+	deadline := time.Now().Add(2 * time.Second)
+	for attachEndWaiters() <= before {
+		if time.Now().After(deadline) {
+			t.Fatal("the terminal receiver never started")
 		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for attachEndWaiters() > before {
+		if time.Now().After(deadline) {
+			t.Fatal("the terminal receiver outlived its canceled session")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestStopIsBoundedWhenTheRunnerStopsReading(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	closed := make(chan struct{})
+	ag := &AgentSession{
+		Send: func(*runnerpb.RunnerClientFrame) error {
+			<-release
+			return io.ErrClosedPipe
+		},
+		Close: func() {
+			close(closed)
+			unblock()
+		},
+	}
+	done := make(chan struct{})
+	go func() { stop(ag); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * closeGrace):
+		unblock()
+		t.Fatal("stop waited for a Stop that the runner never read")
+	}
+	select {
+	case <-closed:
 	default:
-		t.Fatal("an Open for another stream did not fail the session")
+		t.Fatal("stop did not close the session")
 	}
 }
