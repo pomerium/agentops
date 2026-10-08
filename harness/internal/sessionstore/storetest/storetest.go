@@ -51,6 +51,7 @@ func Run(t *testing.T, newDatabase func(t *testing.T) Opener) {
 		{"RelinkingTheSameStreamKeepsItsPodSeq", testRelinkingTheSameStreamKeepsItsPodSeq},
 		{"PodEventAndPodSeqAreOneWrite", testPodEventAndPodSeqAreOneWrite},
 		{"PodCommandsOutbox", testPodCommandsOutbox},
+		{"PodTurnEndClearsTheTurnsCommands", testPodTurnEndClearsTheTurnsCommands},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1054,4 +1055,28 @@ func testPodCommandsOutbox(t *testing.T, open Opener) {
 	if got, _ := s.ListPodCommands(ctx, "s2"); len(got) != 0 {
 		t.Errorf("DeletePodCommands left %+v", got)
 	}
+}
+
+func testPodTurnEndClearsTheTurnsCommands(t *testing.T, open Opener) {
+	ctx := context.Background()
+	s := openStore(t, open)
+	create(t, s, sessionstore.Session{ID: "s1", ClientID: "stub", ConversationRef: "c1"})
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "prompt", Key: "t1", TurnID: "t1"}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "permission", Key: "r1", TurnID: "t1"}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "prompt", Key: "t2", TurnID: "t2"}))
+	seq, err := s.AppendPodTurnEnd(ctx, "s1", "turn_completed", "t1", time.Now(), nil, 9)
+	must(t, err)
+	if seq != 1 {
+		t.Errorf("event seq = %d, want 1", seq)
+	}
+	cmds, err := s.ListPodCommands(ctx, "s1")
+	must(t, err)
+	if len(cmds) != 1 || cmds[0].TurnID != "t2" {
+		t.Errorf("commands after the end of t1 = %+v, want only t2's", cmds)
+	}
+	if got := get(t, s, "s1").PodSeq; got != 9 {
+		t.Errorf("pod seq = %d, want 9", got)
+	}
+	_, err = s.AppendPodTurnEnd(ctx, "missing", "turn_completed", "t1", time.Now(), nil, 1)
+	wantErr(t, "AppendPodTurnEnd on an unknown session", err, sessionstore.ErrNotFound)
 }

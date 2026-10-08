@@ -268,14 +268,18 @@ func (s *Store) NextTurnSeq(ctx context.Context, sessionID string) (int64, error
 }
 
 func (s *Store) AppendSessionEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte) (int64, error) {
-	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, 0)
+	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, 0, false)
 }
 
 func (s *Store) AppendPodEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error) {
-	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, podSeq)
+	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, podSeq, false)
 }
 
-func (s *Store) appendEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error) {
+func (s *Store) AppendPodTurnEnd(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error) {
+	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, podSeq, true)
+}
+
+func (s *Store) appendEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64, endsTurn bool) (int64, error) {
 	if payload == nil {
 		payload = []byte{}
 	}
@@ -298,6 +302,11 @@ func (s *Store) appendEvent(ctx context.Context, sessionID, eventType, turnID st
 			Payload:   payload,
 		}); err != nil {
 			return err
+		}
+		if endsTurn {
+			if err := q.DeletePodCommandsForTurn(ctx, sqlcgen.DeletePodCommandsForTurnParams{SessionID: sessionID, TurnID: turnID}); err != nil {
+				return err
+			}
 		}
 		if podSeq > 0 {
 			_, err := q.AdvancePodSeq(ctx, sqlcgen.AdvancePodSeqParams{PodSeq: podSeq, ID: sessionID})

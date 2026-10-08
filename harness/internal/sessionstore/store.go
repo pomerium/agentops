@@ -88,6 +88,7 @@ type Sessions interface {
 type Events interface {
 	AppendSessionEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte) (int64, error)
 	AppendPodEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error)
+	AppendPodTurnEnd(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error)
 	ListSessionEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]SessionEvent, error)
 	FinishSession(ctx context.Context, sessionID string, status api.SessionState, events []NewSessionEvent) ([]int64, error)
 }
