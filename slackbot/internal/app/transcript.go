@@ -87,10 +87,11 @@ func catchupCarry(afterTS, beforeTS, botUserID, selfSessionID, selfUserID string
 func transcriptMessages(replies []slack.Message, spec carrySpec) []transcriptEntry {
 	var out []transcriptEntry
 	for _, msg := range replies {
-		if spec.after != "" && msg.Timestamp <= spec.after && !editedAfter(msg, spec.after) {
+		version := lastVersion(msg)
+		if spec.after != "" && version <= spec.after {
 			continue
 		}
-		if spec.before != "" && msg.Timestamp >= spec.before {
+		if spec.before != "" && version >= spec.before {
 			continue
 		}
 		if strings.TrimSpace(msg.Text) == "" {
@@ -117,8 +118,11 @@ func transcriptMessages(replies []slack.Message, spec carrySpec) []transcriptEnt
 	return out
 }
 
-func editedAfter(msg slack.Message, ts string) bool {
-	return msg.Edited != nil && msg.Edited.Timestamp > ts
+func lastVersion(msg slack.Message) string {
+	if msg.Edited != nil && msg.Edited.Timestamp > msg.Timestamp {
+		return msg.Edited.Timestamp
+	}
+	return msg.Timestamp
 }
 
 func mergeRuns(msgs []transcriptEntry) []transcriptEntry {

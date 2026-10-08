@@ -199,6 +199,17 @@ func TestCatchupCarriesAPeerAnswerFinishedAfterTheCursor(t *testing.T) {
 	}
 }
 
+func TestACatchupCarriesAnEditOnce(t *testing.T) {
+	answer := ourTaggedAnswer("1.0001", "peer", "staging failed")
+	answer.Edited = &slack.Edited{Timestamp: "1.0004"}
+
+	first := transcriptMessages([]slack.Message{answer}, catchupCarry("1.0002", "1.0003", "U0BOT", "self", "UA"))
+	second := transcriptMessages([]slack.Message{answer}, catchupCarry("1.0003", "1.0005", "U0BOT", "self", "UA"))
+	if n := carriedMessages(first) + carriedMessages(second); n != 1 {
+		t.Fatalf("the same edit was carried %d times, want 1", n)
+	}
+}
+
 func TestComposeCatchupBlockEmptyDelta(t *testing.T) {
 	if got := composeCatchupBlock(nil, false); got != "" {
 		t.Errorf("an empty delta must produce no block, got %q", got)
