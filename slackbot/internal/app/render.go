@@ -20,9 +20,9 @@ import (
 	"github.com/pomerium/agentops/slackbot/internal/telemetry"
 )
 
-const maxMessageChars = 11000
-
 const maxTextChars = 3900
+
+const maxMessageChars = maxTextChars
 
 type renderer struct {
 	mu       sync.Mutex
