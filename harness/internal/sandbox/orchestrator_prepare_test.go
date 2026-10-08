@@ -89,7 +89,7 @@ func TestActivate_FailsFastOnPodReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expect: %v", err)
 	}
-	if _, err := o.Activate(context.Background(), nil, prepared, att); err == nil {
+	if _, err := o.Activate(context.Background(), prepared, att); err == nil {
 		t.Fatal("expected Activate to fail fast on pod replacement")
 	}
 	if link.live() != 0 {
@@ -106,7 +106,6 @@ func TestPrepareActivate_OpensSessionWhenUIDStable(t *testing.T) {
 	pods := &fakePodGetter{pods: []*corev1.Pod{pod("agentops", "sandbox-agent", "uid-A")}}
 
 	o := New(claims, pods, nil, link, WithNamespace("agentops"), WithHarnessRoute("https://harness.example.com"))
-	o.openSession = stubOpenSession
 
 	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
 	if err != nil {
@@ -121,7 +120,7 @@ func TestPrepareActivate_OpensSessionWhenUIDStable(t *testing.T) {
 		link.handle("run-1").attach(1, false)
 	}()
 
-	sess, err := o.Activate(context.Background(), nil, prepared, att)
+	sess, err := o.Activate(context.Background(), prepared, att)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}

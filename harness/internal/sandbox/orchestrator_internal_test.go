@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"slices"
 	"sync"
 	"testing"
@@ -19,7 +18,6 @@ import (
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
 	"github.com/pomerium/agentops/harness/internal/agentlink"
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
-	"github.com/pomerium/agentops/harness/internal/telemetry"
 )
 
 type fakeClaims struct {
@@ -63,11 +61,12 @@ func (f *fakeClaims) deletedNames() []string {
 }
 
 type fakeAgentLink struct {
-	mu        sync.Mutex
-	expected  map[string]*fakeHandle
-	configs   map[string]*agentlinkpb.SandboxConfig
-	forgotten []string
-	expectErr error
+	mu         sync.Mutex
+	expected   map[string]*fakeHandle
+	configs    map[string]*agentlinkpb.SandboxConfig
+	forgotten  []string
+	expectErr  error
+	spawnReply func(h *fakeHandle)
 }
 
 func newFakeAgentLink() *fakeAgentLink {
@@ -88,8 +87,10 @@ func (g *fakeAgentLink) Expect(runID string, _ agenticrun.Executor, cfg *agentli
 		opts:     callbacks,
 		attached: make(chan struct{}),
 		ready:    make(chan struct{}),
-		ioReady:  make(chan struct{}),
-		spawned:  make(chan struct{}, 1),
+		spawned:  make(chan *agentlinkpb.SessionParams, 1),
+		inbox:    make(chan *agentlinkpb.AgentIOFrame, 16),
+		done:     make(chan struct{}),
+		reply:    g.spawnReply,
 	}
 	g.expected[runID] = h
 	g.configs[runID] = cfg
@@ -125,11 +126,15 @@ type fakeHandle struct {
 	opts     agentlink.ExpectCallbacks
 	attached chan struct{}
 	ready    chan struct{}
-	ioReady  chan struct{}
-	spawned  chan struct{}
+	spawned  chan *agentlinkpb.SessionParams
+	inbox    chan *agentlinkpb.AgentIOFrame
+	done     chan struct{}
+	reply    func(h *fakeHandle)
 
 	mu           sync.Mutex
 	shutdownWith string
+	sent         []*agentlinkpb.AgentIOFrame
+	acked        uint64
 }
 
 func (h *fakeHandle) AwaitAttach(ctx context.Context) error {
@@ -150,22 +155,58 @@ func (h *fakeHandle) AwaitReady(ctx context.Context) error {
 	}
 }
 
-func (h *fakeHandle) SpawnAgent(context.Context) error {
+func (h *fakeHandle) SpawnAgent(_ context.Context, params *agentlinkpb.SessionParams) error {
 	select {
-	case h.spawned <- struct{}{}:
+	case h.spawned <- params:
 	default:
 	}
-	close(h.ioReady)
+	if h.reply != nil {
+		h.reply(h)
+	} else {
+		h.push(&agentlinkpb.AgentEvent{Seq: 1, Payload: &agentlinkpb.AgentEvent_SessionReady{
+			SessionReady: &agentlinkpb.SessionReady{AcpSessionId: "acp-1", Resumable: true},
+		}})
+	}
 	return nil
 }
 
-func (h *fakeHandle) AwaitAgentIO(ctx context.Context) (io.Writer, io.Reader, error) {
-	select {
-	case <-h.ioReady:
-		return io.Discard, &blockingReader{}, nil
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+func (h *fakeHandle) push(ev *agentlinkpb.AgentEvent) {
+	h.inbox <- &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Event{Event: ev}}
+}
+
+func (h *fakeHandle) StreamID() []byte {
+	if len(h.opts.StreamID) > 0 {
+		return h.opts.StreamID
 	}
+	return []byte("fake-stream")
+}
+
+func (h *fakeHandle) Inbox() <-chan *agentlinkpb.AgentIOFrame { return h.inbox }
+
+func (h *fakeHandle) Done() <-chan struct{} { return h.done }
+
+func (h *fakeHandle) Ack(seq uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.acked = max(h.acked, seq)
+}
+
+func (h *fakeHandle) Send(f *agentlinkpb.AgentIOFrame) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sent = append(h.sent, f)
+}
+
+func (h *fakeHandle) sentFrames() []*agentlinkpb.AgentIOFrame {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]*agentlinkpb.AgentIOFrame(nil), h.sent...)
+}
+
+func (h *fakeHandle) ackedSeq() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.acked
 }
 
 func (h *fakeHandle) Shutdown(reason string) {
@@ -197,19 +238,13 @@ func testTemplate() *v1alpha1.AgentTemplate {
 	}
 }
 
-func stubOpenSession(_ context.Context, _ *telemetry.Component, _ EventSink, _ io.Writer, _ io.Reader, closeFn func() error, _ SessionParams) (*Session, error) {
-	return &Session{close: closeFn}, nil
-}
-
 func testPods() PodGetter {
 	return &fakePodGetter{pods: []*corev1.Pod{pod("ns", "sandbox-agent", "uid-1")}}
 }
 
 func newTestOrchestrator(t *testing.T, claims ClaimClient, link AgentLink) *Orchestrator {
 	t.Helper()
-	o := New(claims, testPods(), nil, link, WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"))
-	o.openSession = stubOpenSession
-	return o
+	return New(claims, testPods(), nil, link, WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"))
 }
 
 func TestPrepareCreatesAnAdoptableClaim(t *testing.T) {
@@ -293,7 +328,7 @@ func TestActivateWaitsForReadyBeforeSpawning(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := o.Activate(context.Background(), nil, prepared, att)
+		_, err := o.Activate(context.Background(), prepared, att)
 		done <- err
 	}()
 
@@ -318,21 +353,16 @@ func TestActivateWaitsForReadyBeforeSpawning(t *testing.T) {
 	}
 }
 
-func TestActivateOpensSessionOverTheTunnel(t *testing.T) {
+func TestActivateSpawnsWithTheSessionParametersAndWaitsForReady(t *testing.T) {
 	link := newFakeAgentLink()
 	o := newTestOrchestrator(t, newFakeClaims(), link)
-
-	var gotParams SessionParams
-	o.openSession = func(_ context.Context, _ *telemetry.Component, _ EventSink, _ io.Writer, _ io.Reader, closeFn func() error, params SessionParams) (*Session, error) {
-		gotParams = params
-		return &Session{close: closeFn}, nil
-	}
 
 	endpoints := []ProxiedEndpoint{{
 		Name: "agno", ListenPort: 9100, UpstreamURL: "https://docs.agno.com/mcp",
 	}}
 	prepared, err := o.Prepare(context.Background(), LaunchSpec{
 		SessionID: "s1", Template: testTemplate(), Endpoints: endpoints,
+		SystemPrompt: "be terse", ResumeACPSessionID: "acp-0",
 	})
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -347,37 +377,195 @@ func TestActivateOpensSessionOverTheTunnel(t *testing.T) {
 		link.handle("run-1").attach(1, false)
 	}()
 
-	sess, err := o.Activate(context.Background(), nil, prepared, att)
+	sess, err := o.Activate(context.Background(), prepared, att)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
+	if sess.ID() != "acp-1" || sess.ReadySeq() != 1 {
+		t.Errorf("session = %q ready at %d, want acp-1 at 1", sess.ID(), sess.ReadySeq())
+	}
 
+	var params *agentlinkpb.SessionParams
 	select {
-	case <-link.handle("run-1").spawned:
+	case params = <-link.handle("run-1").spawned:
 	default:
-		t.Error("the agent was never spawned")
+		t.Fatal("the agent was never spawned")
 	}
-
-	if len(gotParams.MCPServers) != 1 {
-		t.Fatalf("session MCP servers = %+v, want 1", gotParams.MCPServers)
+	if params.GetCwd() != "/workspace" || params.GetSystemPrompt() != "be terse" || params.GetResumeSessionId() != "acp-0" {
+		t.Errorf("session params = %v", params)
 	}
-	http := gotParams.MCPServers[0].Http
-	if http == nil || http.Url != "http://127.0.0.1:9100/mcp" {
-		t.Errorf("session MCP server = %+v, want the rewritten loopback URL", gotParams.MCPServers[0])
+	if len(params.GetMcpServers()) != 1 || params.GetMcpServers()[0].GetUrl() != "http://127.0.0.1:9100/mcp" {
+		t.Errorf("session MCP servers = %v, want the rewritten loopback URL", params.GetMcpServers())
 	}
-	if len(http.Headers) != 0 {
-		t.Errorf("session MCP server carries headers: %+v", http.Headers)
-	}
-	if got := gotParams.SessionConfig["model"]; got != "opus" {
+	if got := params.GetConfig()["model"]; got != "opus" {
 		t.Errorf("session config model = %q, want opus", got)
 	}
 
+	h := link.handle("run-1")
 	_ = sess.Close()
-	if reason := link.handle("run-1"); reason != nil {
-		t.Error("the expectation survived the session close")
+	if h.shutdownReason() != "session_end" {
+		t.Errorf("closing the session sent shutdown %q, want session_end", h.shutdownReason())
 	}
 	if link.live() != 0 {
 		t.Errorf("the Agent Link still holds %d expectations", link.live())
+	}
+}
+
+func TestActivateReportsAFailedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		resumeUnavailable bool
+		resumed           bool
+		wantTeardown      bool
+	}{
+		{name: "launch", wantTeardown: true},
+		{name: "unresumable revive", resumeUnavailable: true, resumed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			link := newFakeAgentLink()
+			link.spawnReply = func(h *fakeHandle) {
+				h.push(&agentlinkpb.AgentEvent{Seq: 1, Payload: &agentlinkpb.AgentEvent_SessionFailed{
+					SessionFailed: &agentlinkpb.SessionFailed{Reason: "nope", ResumeUnavailable: tc.resumeUnavailable},
+				}})
+			}
+			claims := newFakeClaims()
+			o := newTestOrchestrator(t, claims, link)
+			prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			prepared.Resumed = tc.resumed
+			att, err := o.Expect("run-1", prepared)
+			if err != nil {
+				t.Fatalf("Expect: %v", err)
+			}
+			link.handle("run-1").attach(1, false)
+			_, err = o.Activate(context.Background(), prepared, att)
+			if err == nil {
+				t.Fatal("Activate succeeded although the session failed")
+			}
+			if errors.Is(err, ErrResumeUnavailable) != tc.resumeUnavailable {
+				t.Errorf("err = %v; resume unavailable = %v, want %v", err, errors.Is(err, ErrResumeUnavailable), tc.resumeUnavailable)
+			}
+			if got := len(claims.deletedNames()) == 1; got != tc.wantTeardown {
+				t.Errorf("claim torn down = %v, want %v", got, tc.wantTeardown)
+			}
+			if link.live() != 0 {
+				t.Errorf("the expectation leaked: %d still registered", link.live())
+			}
+		})
+	}
+}
+
+func TestSessionCommandsAndAcksReachTheLink(t *testing.T) {
+	link := newFakeAgentLink()
+	o := newTestOrchestrator(t, newFakeClaims(), link)
+	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	att, err := o.Expect("run-1", prepared)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	h := link.handle("run-1")
+	h.attach(1, false)
+	sess, err := o.Activate(context.Background(), prepared, att)
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	sess.Prompt("t1", 1, "hello")
+	sess.Decide("c1", "allow", false)
+	sess.Ack(5)
+	sent := h.sentFrames()
+	if len(sent) != 2 || sent[0].GetPrompt().GetTurnId() != "t1" || sent[0].GetPrompt().GetTurnSeq() != 1 ||
+		sent[1].GetPermission().GetRequestId() != "c1" || sent[1].GetPermission().GetOptionId() != "allow" {
+		t.Fatalf("frames sent = %v", sent)
+	}
+	if h.ackedSeq() != 5 {
+		t.Errorf("acked = %d, want 5", h.ackedSeq())
+	}
+}
+
+func TestAdoptExpectsTheRunAgainAtItsResumePoint(t *testing.T) {
+	link := newFakeAgentLink()
+	o := New(newFakeClaims(), testPods(), nil, link,
+		WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
+		WithAttachGrace(50*time.Millisecond),
+	)
+	downs := make(chan string, 4)
+	sess, err := o.Adopt(context.Background(), AdoptSpec{
+		RunID: "run-9", ClaimName: "claim-9", SandboxName: "sandbox-agent",
+		Executor:     agenticrun.Executor{Namespace: "ns", ServiceAccount: "sandbox-agent", PodName: "sandbox-agent", PodUID: "uid-1"},
+		Launch:       LaunchSpec{SessionID: "s9", Template: testTemplate()},
+		ACPSessionID: "acp-9", StreamID: []byte("stream-9"), ResumeAfter: 42,
+	}, WithOnDown(func(cause string) { downs <- cause }))
+	if err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	h := link.handle("run-9")
+	if h == nil {
+		t.Fatal("Adopt did not expect the run")
+	}
+	if string(h.opts.StreamID) != "stream-9" || h.opts.ResumeAfter != 42 {
+		t.Errorf("expect options = stream %q resume %d, want stream-9 and 42", h.opts.StreamID, h.opts.ResumeAfter)
+	}
+	if sess.ID() != "acp-9" || string(sess.StreamID()) != "stream-9" {
+		t.Errorf("adopted session = %q %q", sess.ID(), sess.StreamID())
+	}
+	select {
+	case cause := <-downs:
+		if cause != "tunnel_lost" {
+			t.Errorf("cause = %q, want tunnel_lost", cause)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("an adopted run that never attached again was never closed")
+	}
+}
+
+func TestAdoptKeepsTheSessionWhenTheSidecarReturns(t *testing.T) {
+	link := newFakeAgentLink()
+	o := New(newFakeClaims(), testPods(), nil, link,
+		WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
+		WithAttachGrace(100*time.Millisecond),
+	)
+	downs := make(chan string, 4)
+	if _, err := o.Adopt(context.Background(), AdoptSpec{
+		RunID: "run-9", ClaimName: "claim-9", SandboxName: "sandbox-agent",
+		Executor: agenticrun.Executor{Namespace: "ns", ServiceAccount: "sandbox-agent", PodName: "sandbox-agent", PodUID: "uid-1"},
+		Launch:   LaunchSpec{SessionID: "s9", Template: testTemplate()},
+	}, WithOnDown(func(cause string) { downs <- cause })); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	link.handle("run-9").attach(1, true)
+	select {
+	case cause := <-downs:
+		t.Fatalf("an adopted run that attached again was closed: %s", cause)
+	case <-time.After(300 * time.Millisecond):
+	}
+	link.handle("run-9").opts.OnAttached(2, false)
+	select {
+	case cause := <-downs:
+		if cause != "sidecar_restarted" {
+			t.Errorf("cause = %q, want sidecar_restarted", cause)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("an adopted run whose agent is gone was not closed")
+	}
+}
+
+func TestAdoptRefusesAReplacedPod(t *testing.T) {
+	link := newFakeAgentLink()
+	o := newTestOrchestrator(t, newFakeClaims(), link)
+	if _, err := o.Adopt(context.Background(), AdoptSpec{
+		RunID: "run-9", SandboxName: "sandbox-agent",
+		Executor: agenticrun.Executor{Namespace: "ns", ServiceAccount: "sandbox-agent", PodName: "sandbox-agent", PodUID: "uid-OLD"},
+		Launch:   LaunchSpec{SessionID: "s9", Template: testTemplate()},
+	}); err == nil {
+		t.Fatal("Adopt succeeded for a pod that was replaced")
+	}
+	if link.live() != 0 {
+		t.Errorf("a refused adoption left %d expectations", link.live())
 	}
 }
 
@@ -388,10 +576,6 @@ func TestActivateFailureForgetsAndTearsDown(t *testing.T) {
 		WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
 		WithAttachTimeout(50*time.Millisecond),
 	)
-	o.openSession = func(_ context.Context, _ *telemetry.Component, _ EventSink, _ io.Writer, _ io.Reader, closeFn func() error, _ SessionParams) (*Session, error) {
-		t.Error("openSession must not run when the sandbox never attached")
-		return nil, errors.New("unreachable")
-	}
 
 	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
 	if err != nil {
@@ -402,7 +586,7 @@ func TestActivateFailureForgetsAndTearsDown(t *testing.T) {
 		t.Fatalf("Expect: %v", err)
 	}
 
-	if _, err := o.Activate(context.Background(), nil, prepared, att); err == nil {
+	if _, err := o.Activate(context.Background(), prepared, att); err == nil {
 		t.Fatal("Activate succeeded although the sandbox never attached")
 	}
 	if link.live() != 0 {
@@ -415,23 +599,24 @@ func TestActivateFailureForgetsAndTearsDown(t *testing.T) {
 
 func TestFailedReviveActivationKeepsTheClaim(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		attach  bool
-		openErr error
+		name   string
+		attach bool
 	}{
 		{name: "attach timeout"},
-		{name: "acp setup error", attach: true, openErr: errors.New("initialize failed")},
+		{name: "acp setup error", attach: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			link := newFakeAgentLink()
+			link.spawnReply = func(h *fakeHandle) {
+				h.push(&agentlinkpb.AgentEvent{Seq: 1, Payload: &agentlinkpb.AgentEvent_SessionFailed{
+					SessionFailed: &agentlinkpb.SessionFailed{Reason: "initialize failed"},
+				}})
+			}
 			claims := newFakeClaims()
 			o := New(claims, testPods(), nil, link,
 				WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"),
 				WithAttachTimeout(50*time.Millisecond),
 			)
-			o.openSession = func(_ context.Context, _ *telemetry.Component, _ EventSink, _ io.Writer, _ io.Reader, _ func() error, _ SessionParams) (*Session, error) {
-				return nil, tc.openErr
-			}
 
 			prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
 			if err != nil {
@@ -446,7 +631,7 @@ func TestFailedReviveActivationKeepsTheClaim(t *testing.T) {
 				link.handle("run-1").attach(1, false)
 			}
 
-			if _, err := o.Activate(context.Background(), nil, prepared, att); err == nil {
+			if _, err := o.Activate(context.Background(), prepared, att); err == nil {
 				t.Fatal("Activate succeeded")
 			}
 			if names := claims.deletedNames(); len(names) != 0 {
@@ -520,7 +705,6 @@ func TestGraceWindowExpiryClosesOnce(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the grace window never expired")
 	}
-	h.opts.OnAgentExit(1)
 	h.opts.OnError("envoy_exited", errors.New("boom"))
 	time.Sleep(100 * time.Millisecond)
 	if len(downs) != 0 {
@@ -554,7 +738,7 @@ func TestForgottenAttachmentNeverReportsDown(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	h.opts.OnAgentExit(1)
+	h.opts.OnError("envoy_exited", errors.New("boom"))
 	select {
 	case cause := <-downs:
 		t.Fatalf("a forgotten attachment reported down: %s", cause)
@@ -578,7 +762,7 @@ func TestReattachWithoutAgentClosesTheSession(t *testing.T) {
 	h := link.handle("run-1")
 
 	h.attach(1, false)
-	if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+	if _, err := o.Activate(context.Background(), prepared, att); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 	select {
@@ -614,17 +798,17 @@ func TestFirstAttachAfterRetriesKeepsSupervision(t *testing.T) {
 	h := link.handle("run-1")
 
 	h.attach(3, false)
-	if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+	if _, err := o.Activate(context.Background(), prepared, att); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
-	h.opts.OnAgentExit(1)
+	h.opts.OnError("envoy_exited", errors.New("boom"))
 	select {
 	case cause := <-downs:
-		if cause != "agent_exited" {
-			t.Errorf("cause = %q, want agent_exited", cause)
+		if cause != "envoy_exited" {
+			t.Errorf("cause = %q, want envoy_exited", cause)
 		}
 	default:
-		t.Fatal("the agent exit was never reported")
+		t.Fatal("the sidecar error was never reported")
 	}
 }
 
@@ -745,12 +929,12 @@ func TestSupervisionAcrossReattaches(t *testing.T) {
 			},
 		},
 		{
-			name: "exit then re-attach reports the exit once",
+			name: "an error then a re-attach reports the error once",
 			after: func(h *fakeHandle) {
-				h.opts.OnAgentExit(0)
+				h.opts.OnError("envoy_exited", errors.New("boom"))
 				h.opts.OnAttached(2, false)
 			},
-			want: []string{"agent_exited"},
+			want: []string{"envoy_exited"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -769,7 +953,7 @@ func TestSupervisionAcrossReattaches(t *testing.T) {
 			}
 			h := link.handle("run-1")
 			h.attach(1, false)
-			if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+			if _, err := o.Activate(context.Background(), prepared, att); err != nil {
 				t.Fatalf("Activate: %v", err)
 			}
 
@@ -802,7 +986,7 @@ func TestRevivedAttachmentStartsUnspawned(t *testing.T) {
 	}
 	oldHandle := link.handle("run-1")
 	oldHandle.attach(1, false)
-	if _, err := o.Activate(context.Background(), nil, prepared, old); err != nil {
+	if _, err := o.Activate(context.Background(), prepared, old); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 	old.Forget()
@@ -823,17 +1007,17 @@ func TestRevivedAttachmentStartsUnspawned(t *testing.T) {
 		t.Fatalf("the forgotten attachment reported down: %s", cause)
 	default:
 	}
-	if _, err := o.Activate(context.Background(), nil, prepared, att); err != nil {
+	if _, err := o.Activate(context.Background(), prepared, att); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
-	h.opts.OnAgentExit(1)
+	h.opts.OnError("envoy_exited", errors.New("boom"))
 	select {
 	case cause := <-downs:
-		if cause != "agent_exited" {
-			t.Errorf("cause = %q, want agent_exited", cause)
+		if cause != "envoy_exited" {
+			t.Errorf("cause = %q, want envoy_exited", cause)
 		}
 	default:
-		t.Fatal("the revived agent's exit was never reported")
+		t.Fatal("the revived sandbox's error was never reported")
 	}
 }
 
@@ -849,15 +1033,4 @@ func TestExpectFailureIsReported(t *testing.T) {
 	if _, err := o.Expect("run-1", prepared); err == nil {
 		t.Fatal("Expect succeeded although the Agent Link refused")
 	}
-}
-
-type blockingReader struct {
-	once sync.Once
-	ch   chan struct{}
-}
-
-func (b *blockingReader) Read([]byte) (int, error) {
-	b.once.Do(func() { b.ch = make(chan struct{}) })
-	<-b.ch
-	return 0, io.EOF
 }
