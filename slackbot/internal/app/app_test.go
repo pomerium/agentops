@@ -350,6 +350,59 @@ func TestASessionsEventsArriveAfterTheHarnessWasBrieflyUnavailable(t *testing.T)
 	f.poster.waitForPost(t, "made it through")
 }
 
+func TestStartupFollowsALiveSessionFromWhereItsThreadLeftOff(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateRunning, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1", "last_seq": 2,
+	})
+	f.api.emit("old-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "already shown", Final: true})
+	f.api.emit("old-1", "t1", &pb.TurnCompleted{})
+
+	f.app.ReconcileOnStartup(context.Background())
+	waitFor(t, "the session's stream", func() bool { return f.api.openStreams("old-1") == 1 })
+	f.api.emit("old-1", "t2", &pb.AgentMessage{PartId: "t2.1", Text: "said while the bot was down", Final: true})
+
+	f.poster.waitForPost(t, "said while the bot was down")
+	if n := len(f.poster.postsContaining("already shown")); n != 0 {
+		t.Errorf("an answer the thread already had was posted again %d times", n)
+	}
+	if n := len(f.poster.postsContaining("restart")); n != 0 {
+		t.Errorf("a session the bot can follow again was reported lost: %v", f.poster.postsContaining("restart"))
+	}
+	if ends := f.api.endRequests(); len(ends) != 0 {
+		t.Errorf("startup ended a live session: %v", ends)
+	}
+
+	f.app.HandleMessage(context.Background(), replyIn(f, "U1", "and the tests?"))
+	waitFor(t, "the owner's next turn", func() bool { return len(f.api.promptRequests()) == 1 })
+}
+
+func TestStartupLeavesTheSessionsItAlreadyFollowsAlone(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+	waitFor(t, "the session's stream", func() bool { return f.api.openStreams("sess-1") == 1 })
+
+	f.app.ReconcileOnStartup(context.Background())
+
+	if n := f.api.openStreams("sess-1"); n != 1 {
+		t.Errorf("startup opened a second stream for a session it already follows: %d streams", n)
+	}
+	if n := len(f.poster.postsContaining("restart")); n != 0 {
+		t.Errorf("a fresh session was reported lost: %v", f.poster.postsContaining("restart"))
+	}
+}
+
+func TestATurnEndRecordsHowFarTheThreadGot(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	f.api.emit("sess-1", "t1", &pb.TurnCompleted{})
+	waitFor(t, "the cursor", func() bool {
+		seq, _ := f.slackState("sess-1")["last_seq"].(float64)
+		return seq >= 2
+	})
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
