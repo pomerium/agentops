@@ -119,6 +119,7 @@ func run(log *slog.Logger) error {
 		agentlink.WithHeartbeatInterval(cfg.Harness.HeartbeatInterval),
 		agentlink.WithHeartbeatMissLimit(cfg.Harness.HeartbeatMissLimit),
 		agentlink.WithLogger(log),
+		agentlink.WithStartupHold(),
 	)
 	if err != nil {
 		return err
@@ -171,14 +172,15 @@ func run(log *slog.Logger) error {
 		harnessapi.WithLogger(log),
 	)
 
-	<-api.ReconcileOnStartup(ctx)
-	go runSweeper(ctx, api)
-
 	stopAgentLink, err := serveAgentLink(linkSrv, cfg.Harness.GRPCAddr, log)
 	if err != nil {
 		return err
 	}
 	defer stopAgentLink()
+
+	<-api.ReconcileOnStartup(ctx)
+	linkSrv.EndStartupHold()
+	go runSweeper(ctx, api)
 
 	stopAPI, err := serveClientAPI(ctx, cfg, api, st, crCache, log)
 	if err != nil {

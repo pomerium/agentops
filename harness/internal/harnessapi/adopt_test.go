@@ -312,4 +312,3 @@ func TestAnAgentExitEndsTheSession(t *testing.T) {
 		t.Errorf("end reason = %v, want %v", ended.GetSessionEnded().GetReason(), api.EndAgentExit)
 	}
 }
-

@@ -80,7 +80,7 @@ func (onePod) Get(_ context.Context, name string) (*corev1.Pod, error) {
 type noopSandboxes struct{}
 
 func (noopSandboxes) Get(context.Context, string) (*agentsv1.Sandbox, error) { return nil, nil }
-func (noopSandboxes) Patch(context.Context, string, []byte) error           { return nil }
+func (noopSandboxes) Patch(context.Context, string, []byte) error            { return nil }
 
 var podSeal = agenticrun.Executor{Namespace: "agentops", ServiceAccount: "sandbox-agent", PodName: "sandbox-pod", PodUID: "pod-uid-1"}
 
@@ -90,22 +90,38 @@ type harnessSide struct {
 	stop func()
 }
 
+type slowLeaseSandboxes struct {
+	noopSandboxes
+	delay time.Duration
+}
+
+func (s slowLeaseSandboxes) Patch(context.Context, string, []byte) error {
+	time.Sleep(s.delay)
+	return nil
+}
+
 func startHarnessSide(t *testing.T, store *sqlite.Store, claims *readyClaims, runs *fakeRunClient, tmpl *fakeTemplates,
-	idp *agentlinktest.IDP, addr string,
+	idp *agentlinktest.IDP, addr string, orchOpts ...sandbox.Option,
+) *harnessSide {
+	t.Helper()
+	return startHarnessSideWith(t, store, claims, runs, tmpl, idp, addr, noopSandboxes{}, orchOpts...)
+}
+
+func startHarnessSideWith(t *testing.T, store *sqlite.Store, claims *readyClaims, runs *fakeRunClient, tmpl *fakeTemplates,
+	idp *agentlinktest.IDP, addr string, sandboxes sandbox.SandboxClient, orchOpts ...sandbox.Option,
 ) *harnessSide {
 	t.Helper()
 	link, err := agentlink.New(idp.Verifier(t),
-		agentlink.WithHeartbeatInterval(time.Second), agentlink.WithLogger(testLogger(t)))
+		agentlink.WithHeartbeatInterval(time.Second), agentlink.WithLogger(testLogger(t)), agentlink.WithStartupHold())
 	if err != nil {
 		t.Fatalf("agentlink.New: %v", err)
 	}
-	orch := sandbox.New(claims, onePod{}, noopSandboxes{}, sandbox.NewAgentLink(link),
-		sandbox.WithNamespace("agentops"), sandbox.WithHarnessRoute("http://"+addr),
-		sandbox.WithAttachGrace(30*time.Second), sandbox.WithLogger(testLogger(t)))
+	orch := sandbox.New(claims, onePod{}, sandboxes, sandbox.NewAgentLink(link), append([]sandbox.Option{
+		sandbox.WithNamespace("agentops"), sandbox.WithHarnessRoute("http://" + addr),
+		sandbox.WithAttachGrace(30 * time.Second), sandbox.WithLogger(testLogger(t)),
+	}, orchOpts...)...)
 	svc := harnessapi.New(store, harnessapi.NewEventLog(store), harnessapi.NewOrchestratorLauncher(orch), tmpl, runs,
 		harnessapi.WithLogger(testLogger(t)))
-	<-svc.ReconcileOnStartup(context.Background())
-
 	var lis net.Listener
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -119,6 +135,8 @@ func startHarnessSide(t *testing.T, store *sqlite.Store, claims *readyClaims, ru
 		time.Sleep(20 * time.Millisecond)
 	}
 	stop := agentlinktest.ServeOn(lis, link, func() string { return idp.SignFor(t, "run-1", podSeal) })
+	<-svc.ReconcileOnStartup(context.Background())
+	link.EndStartupHold()
 	return &harnessSide{svc: svc, link: link, stop: stop}
 }
 
@@ -177,7 +195,27 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+type startSide func(t *testing.T, store *sqlite.Store, claims *readyClaims, runs *fakeRunClient, tmpl *fakeTemplates,
+	idp *agentlinktest.IDP, addr string) *harnessSide
+
 func TestAHarnessRestartKeepsTheTurnThatIsRunning(t *testing.T) {
+	restartMidTurn(t, func(t *testing.T, store *sqlite.Store, claims *readyClaims, runs *fakeRunClient, tmpl *fakeTemplates,
+		idp *agentlinktest.IDP, addr string,
+	) *harnessSide {
+		return startHarnessSide(t, store, claims, runs, tmpl, idp, addr)
+	})
+}
+
+func TestARestartWhoseLeaseUpdateOutlastsTheAttachGraceKeepsTheSession(t *testing.T) {
+	restartMidTurn(t, func(t *testing.T, store *sqlite.Store, claims *readyClaims, runs *fakeRunClient, tmpl *fakeTemplates,
+		idp *agentlinktest.IDP, addr string,
+	) *harnessSide {
+		return startHarnessSideWith(t, store, claims, runs, tmpl, idp, addr, slowLeaseSandboxes{delay: 1500 * time.Millisecond},
+			sandbox.WithAttachGrace(500*time.Millisecond), sandbox.WithLease(time.Hour))
+	})
+}
+
+func restartMidTurn(t *testing.T, startSecond startSide) {
 	ctx := as(stubClient)
 	store, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "harness.db"))
 	if err != nil {
@@ -231,7 +269,7 @@ func TestAHarnessRestartKeepsTheTurnThatIsRunning(t *testing.T) {
 	first.svc.Shutdown()
 	first.stop()
 
-	second := startHarnessSide(t, store, claims, runs, h.tmpl, idp, addr)
+	second := startSecond(t, store, claims, runs, h.tmpl, idp, addr)
 	t.Cleanup(second.stop)
 	h.svc = second.svc
 	if err := os.WriteFile(gate, nil, 0o644); err != nil {
