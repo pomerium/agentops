@@ -69,21 +69,27 @@ func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m s
 	}
 	defer a.unregisterThread(t)
 
-	res, err := a.api.ListEvents(ctx, &pb.ListEventsRequest{
-		Ref: a.ref(view.GetId()), AfterSeq: m.LastSeq,
-	})
-	if err != nil {
-		a.log.WarnContext(ctx, "sweep: read a paused session's events failed",
-			"session", view.GetId(), "err", err)
-		return false
-	}
-
 	t.setState(api.StateSuspended)
-	events := res.GetEvents()
-	last := m.LastSeq
-	for _, ev := range events {
-		a.renderEvent(ctx, t, "", ev)
-		last = ev.Seq
+	last, rendered := m.LastSeq, 0
+	for {
+		res, err := a.api.ListEvents(ctx, &pb.ListEventsRequest{
+			Ref: a.ref(view.GetId()), AfterSeq: last,
+		})
+		if err != nil {
+			a.log.WarnContext(ctx, "sweep: read a paused session's events failed; the next sweep continues from here",
+				"session", view.GetId(), "after_seq", last, "err", err)
+			a.saveMeta(ctx, t, func(meta *sessionMeta) { meta.LastSeq = last })
+			return false
+		}
+		events := res.GetEvents()
+		for _, ev := range events {
+			a.renderEvent(ctx, t, "", ev)
+			last = ev.Seq
+		}
+		rendered += len(events)
+		if len(events) == 0 || last >= view.GetLastSeq() {
+			break
+		}
 	}
 
 	a.saveMeta(ctx, t, func(meta *sessionMeta) {
@@ -91,7 +97,7 @@ func (a *App) renderWatchedEnding(ctx context.Context, view *pb.SessionView, m s
 		meta.LastSeq = last
 	})
 	a.log.InfoContext(ctx, "sweep: rendered a paused session's ending",
-		"session", view.GetId(), "state", view.GetState(), "events", len(events))
+		"session", view.GetId(), "state", view.GetState(), "events", rendered)
 	return true
 }
 
