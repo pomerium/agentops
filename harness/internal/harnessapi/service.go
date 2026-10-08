@@ -598,10 +598,14 @@ func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
 }
 
 func (s *Service) emitPod(ctx context.Context, sessionID string, ev *pb.Event, podSeq uint64) error {
-	ev.SessionId = sessionID
 	if podSeq == 0 {
 		ctx = context.WithoutCancel(ctx)
 	}
+	return s.recordEvent(ctx, sessionID, ev, podSeq)
+}
+
+func (s *Service) recordEvent(ctx context.Context, sessionID string, ev *pb.Event, podSeq uint64) error {
+	ev.SessionId = sessionID
 	defer s.lockEvents(sessionID)()
 	current, err := s.store.GetSession(ctx, sessionID)
 	if err == nil && api.Terminal(current.Status) {

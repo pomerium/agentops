@@ -316,11 +316,27 @@ func (s *Service) reconcileState(ctx context.Context, b *binding, st *agentlinkp
 		if !ok {
 			continue
 		}
-		s.emit(ctx, b.sessionID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
-			RequestId: id, Resolution: unanswered(api.ResolutionSuperseded).GetResolution(),
-		}}})
-		if err := s.store.DeletePodCommand(ctx, b.sessionID, commandPermission, id); err != nil {
-			s.log.WarnContext(ctx, "could not clear the decision of a request the agent dropped", "session", b.sessionID, "request_id", id, "err", err)
+		err := s.whileBound(ctx, b, func(ctx context.Context) error {
+			return s.recordEvent(ctx, b.sessionID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
+				RequestId: id, Resolution: unanswered(api.ResolutionSuperseded).GetResolution(),
+			}}}, 0)
+		}, func(err error, wait time.Duration) {
+			s.log.WarnContext(ctx, "could not record the end of a request the agent dropped; retrying",
+				"session", b.sessionID, "request_id", id, "retry_in", wait, "err", err)
+		})
+		if err != nil {
+			b.sink.restore(id, w, time.Until(w.deadline))
+			continue
+		}
+		err = s.whileBound(ctx, b, func(ctx context.Context) error {
+			return s.store.DeletePodCommand(ctx, b.sessionID, commandPermission, id)
+		}, func(err error, wait time.Duration) {
+			s.log.WarnContext(ctx, "could not clear the decision of a request the agent dropped; retrying",
+				"session", b.sessionID, "request_id", id, "retry_in", wait, "err", err)
+		})
+		if err != nil {
+			s.log.WarnContext(ctx, "the decision of a request the agent dropped stays saved until the session stops",
+				"session", b.sessionID, "request_id", id, "err", err)
 		}
 	}
 }

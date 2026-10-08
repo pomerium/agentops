@@ -694,3 +694,80 @@ func TestAReconnectClosesAPermissionTheRunnerNoLongerWaitsFor(t *testing.T) {
 		t.Errorf("saved commands = %v, want none for a closed request", cmds)
 	}
 }
+
+type stalledResolutionLog struct {
+	EventLog
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (l stalledResolutionLog) Append(
+	ctx context.Context, ev *pb.Event,
+) error {
+	close(l.entered)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-l.release:
+		return errors.New("released stalled write")
+	}
+}
+
+func TestClosingBindingCancelsReconnectResolution(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	if !svc.handleEvent(ctx, b, permissionEvent(2, "request")) {
+		t.Fatal("request was not recorded")
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	svc.events = stalledResolutionLog{
+		EventLog: svc.events, entered: entered, release: release,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.reconcileState(ctx, b, &agentlinkpb.AgentState{})
+	}()
+	<-entered
+	b.close(0)
+	select {
+	case <-done:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("closed binding did not cancel resolution write")
+	}
+}
+
+func TestAReconnectResolutionThatIsNotRecordedIsSupersededByTheStop(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := runningService(t, quietLauncher{})
+	b := svc.lookup("s1")
+	if !svc.handleEvent(ctx, b, permissionEvent(2, "request")) {
+		t.Fatal("request was not recorded")
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	log := svc.events
+	svc.events = stalledResolutionLog{EventLog: log, entered: entered, release: release}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.reconcileState(ctx, b, &agentlinkpb.AgentState{})
+	}()
+	<-entered
+	b.close(0)
+	select {
+	case <-done:
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("closed binding did not cancel the resolution write")
+	}
+	svc.events = log
+	if !b.sink.has("request") {
+		t.Fatal("a request whose resolution was not recorded was dropped; the stop cannot close it")
+	}
+}
