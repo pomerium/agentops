@@ -30,6 +30,7 @@ type renderer struct {
 	reacted  bool
 	turnID   string
 	text     string
+	broken   bool
 	finished bool
 	permTS   map[string]string
 }
@@ -46,7 +47,14 @@ func (r *renderer) beginTurn(turnID string) {
 	r.curTS = ""
 	r.reacted = false
 	r.text = ""
+	r.broken = false
 	r.finished = false
+}
+
+func (r *renderer) toolCall() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.broken = r.text != ""
 }
 
 func (r *renderer) finish(turnID string) (string, bool) {
@@ -62,9 +70,10 @@ func (r *renderer) finish(turnID string) (string, bool) {
 func (r *renderer) appendPart(part string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.text != "" && part != "" && !endsInSpace(r.text) && !startsInSpace(part) {
+	if r.broken && part != "" && !endsInSpace(r.text) && !startsInSpace(part) {
 		r.text += "\n\n"
 	}
+	r.broken = false
 	r.text += part
 	return r.text
 }
@@ -178,6 +187,7 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 			"session", t.sessionID, "turn_id", ev.GetTurnId(), "text", p.AgentThought.GetText())
 
 	case *pb.Event_ToolCall:
+		t.render.toolCall()
 		tc := p.ToolCall
 		a.log.DebugContext(ctx, "tool call",
 			"session", t.sessionID, "turn_id", ev.GetTurnId(),
