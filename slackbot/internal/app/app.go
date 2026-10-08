@@ -398,6 +398,9 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, 
 			"session", t.sessionID, "err", err)
 		return "", false
 	}
+	if cursor == threadStartCursor {
+		return composeJoinBlock(capEntries(transcriptMessages(replies, seedCarry(beforeTS, a.botUserID)))), true
+	}
 	entries, truncated := capEntries(transcriptMessages(replies,
 		catchupCarry(cursor, beforeTS, a.botUserID, t.sessionID, t.ownerUserID)))
 	block := composeCatchupBlock(entries, truncated)
