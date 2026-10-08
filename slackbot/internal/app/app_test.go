@@ -496,7 +496,7 @@ func TestSweepRendersTheReleaseCopy(t *testing.T) {
 	go f.app.RunSweeper(sweepCtx, 20*time.Millisecond)
 
 	f.poster.waitForUpdate(t, "released the workspace")
-	if meta := f.slackState("sess-1"); meta["watching"] == true {
-		t.Errorf("the watch should be over once the session can produce nothing further: %v", meta)
-	}
+	waitFor(t, "the watch to end once the session can produce nothing further", func() bool {
+		return f.slackState("sess-1")["watching"] != true
+	})
 }
