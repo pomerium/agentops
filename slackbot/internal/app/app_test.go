@@ -257,6 +257,31 @@ func TestPromptIsKeyedByItsMessage(t *testing.T) {
 	}
 }
 
+func TestAPermissionChoiceWithAVeryLongIDStillReachesTheHarness(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	long := strings.Repeat("o", 1500)
+	f.api.emit("sess-1", "t1", &pb.PermissionRequest{RequestId: "call-9", Summary: "Run a command",
+		Options: []*pb.PermissionOption{{Id: long, Name: "Allow", Kind: "allow_once"}}})
+	waitFor(t, "the permission prompt", func() bool {
+		for _, p := range f.poster.allPosts() {
+			if p.text == "" && p.threadTS == threadRoot {
+				return true
+			}
+		}
+		return false
+	})
+
+	f.app.HandleInteraction(context.Background(), gateway.Interaction{
+		TeamID: "T1", UserID: "U1", ChannelID: "C1", ThreadTS: threadRoot,
+		ActionID: gateway.ActionPermission, Value: gateway.PermissionValue("sess-1", "call-9", long),
+	})
+	waitFor(t, "the permission answer", func() bool { return len(f.api.permissionResponses()) == 1 })
+	if got := f.api.permissionResponses()[0].GetOptionId(); got != long {
+		t.Fatalf("the harness got option %.20q…, want the long option ID", got)
+	}
+}
+
 func TestPermissionClickIsOwnerOnly(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
