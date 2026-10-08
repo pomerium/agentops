@@ -47,6 +47,9 @@ func Run(t *testing.T, newDatabase func(t *testing.T) Opener) {
 		{"EventPayloadIsOpaqueBytes", testEventPayloadIsOpaqueBytes},
 		{"EventTimestampsKeepMilliseconds", testEventTimestampsKeepMilliseconds},
 		{"FinishSessionSavesTheEndWithItsEvents", testFinishSessionSavesTheEndWithItsEvents},
+		{"PodSeqOnlyMovesForward", testPodSeqOnlyMovesForward},
+		{"PodEventAndPodSeqAreOneWrite", testPodEventAndPodSeqAreOneWrite},
+		{"PodCommandsOutbox", testPodCommandsOutbox},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -452,6 +455,24 @@ func testUpdatesChangeOnlyTheirFields(t *testing.T, open Opener) {
 			func(s *sessionstore.Session) { s.EventSeq++ },
 			false,
 		},
+		{
+			"UpdateSessionLink",
+			func(id string) error { return s.UpdateSessionLink(ctx, id, "exec-2", "stream-2", 9) },
+			func(s *sessionstore.Session) { s.Executor, s.StreamID, s.PodSeq = "exec-2", "stream-2", 9 },
+			true,
+		},
+		{
+			"AdvancePodSeq",
+			func(id string) error { return s.AdvancePodSeq(ctx, id, 7) },
+			func(s *sessionstore.Session) { s.PodSeq = 7 },
+			false,
+		},
+		{
+			"AppendPodEvent",
+			func(id string) error { _, err := s.AppendPodEvent(ctx, id, "x", "", time.Now(), nil, 8); return err },
+			func(s *sessionstore.Session) { s.EventSeq++; s.PodSeq = 8 },
+			false,
+		},
 	}
 
 	for i := range cases {
@@ -466,6 +487,7 @@ func testUpdatesChangeOnlyTheirFields(t *testing.T, open Opener) {
 		must(t, s.UpdateSessionApprover(ctx, id, "subject"))
 		must(t, s.UpdateSessionSuspended(ctx, id, api.StateSuspended, base))
 		must(t, s.UpdateSessionStatus(ctx, id, api.StateRunning))
+		must(t, s.UpdateSessionLink(ctx, id, "exec", "stream", 3))
 		_, err := s.NextTurnSeq(ctx, id)
 		must(t, err)
 		_, err = s.AppendSessionEvent(ctx, id, "x", "", time.Now(), nil)
@@ -919,4 +941,99 @@ func testFinishSessionSavesTheEndWithItsEvents(t *testing.T, open Opener) {
 
 	_, err = s.FinishSession(ctx, "missing", api.StateEnded, nil)
 	wantErr(t, "FinishSession on an unknown session", err, sessionstore.ErrNotFound)
+}
+
+func testPodSeqOnlyMovesForward(t *testing.T, open Opener) {
+	ctx := context.Background()
+	s := openStore(t, open)
+	create(t, s, sessionstore.Session{ID: "s1", ClientID: "stub", ConversationRef: "c1"})
+	must(t, s.UpdateSessionLink(ctx, "s1", "exec", "stream", 4))
+	must(t, s.AdvancePodSeq(ctx, "s1", 6))
+	must(t, s.AdvancePodSeq(ctx, "s1", 5))
+	if got := get(t, s, "s1").PodSeq; got != 6 {
+		t.Errorf("pod seq after advancing to 6 then 5 = %d, want 6", got)
+	}
+	_, err := s.AppendPodEvent(ctx, "s1", "x", "", time.Now(), nil, 2)
+	must(t, err)
+	if got := get(t, s, "s1").PodSeq; got != 6 {
+		t.Errorf("pod seq after an event from pod seq 2 = %d, want 6", got)
+	}
+	wantErr(t, "AdvancePodSeq on an unknown session", s.AdvancePodSeq(ctx, "missing", 1), sessionstore.ErrNotFound)
+	_, err = s.AppendPodEvent(ctx, "missing", "x", "", time.Now(), nil, 1)
+	wantErr(t, "AppendPodEvent on an unknown session", err, sessionstore.ErrNotFound)
+}
+
+func testPodEventAndPodSeqAreOneWrite(t *testing.T, open Opener) {
+	ctx := context.Background()
+	s := openStore(t, open)
+	create(t, s, sessionstore.Session{ID: "s1", ClientID: "stub", ConversationRef: "c1"})
+	at := time.Unix(1700000000, 0).UTC()
+	seq, err := s.AppendPodEvent(ctx, "s1", "agent_message", "t1", at, []byte{7}, 12)
+	must(t, err)
+	got := get(t, s, "s1")
+	if seq != 1 || got.EventSeq != 1 || got.PodSeq != 12 {
+		t.Fatalf("after AppendPodEvent: seq %d, event seq %d, pod seq %d; want 1, 1, 12", seq, got.EventSeq, got.PodSeq)
+	}
+	evs, err := s.ListSessionEvents(ctx, "s1", 0, 10)
+	must(t, err)
+	want := []sessionstore.SessionEvent{{SessionID: "s1", Seq: 1, Type: "agent_message", TurnID: "t1", At: at, Payload: []byte{7}}}
+	if d := cmp.Diff(want, evs); d != "" {
+		t.Errorf("events (-want +got):\n%s", d)
+	}
+}
+
+func testPodCommandsOutbox(t *testing.T, open Opener) {
+	ctx := context.Background()
+	s := openStore(t, open)
+	create(t, s, sessionstore.Session{ID: "s1", ClientID: "stub", ConversationRef: "c1"})
+	create(t, s, sessionstore.Session{ID: "s2", ClientID: "stub", ConversationRef: "c2"})
+
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "prompt", Key: "t1", TurnID: "t1", Payload: []byte{1}}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "permission", Key: "c1", TurnID: "t1", Payload: []byte{2}}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "prompt", Key: "t2", TurnID: "t2", Payload: []byte{3}}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s1", Kind: "permission", Key: "c1", TurnID: "t1", Payload: []byte{4}}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s2", Kind: "prompt", Key: "t1", TurnID: "t1", Payload: []byte{5}}))
+
+	got, err := s.ListPodCommands(ctx, "s1")
+	must(t, err)
+	want := []sessionstore.PodCommand{
+		{SessionID: "s1", Kind: "prompt", Key: "t1", TurnID: "t1", Payload: []byte{1}},
+		{SessionID: "s1", Kind: "permission", Key: "c1", TurnID: "t1", Payload: []byte{4}},
+		{SessionID: "s1", Kind: "prompt", Key: "t2", TurnID: "t2", Payload: []byte{3}},
+	}
+	if d := cmp.Diff(want, got); d != "" {
+		t.Errorf("commands of s1 (-want +got):\n%s", d)
+	}
+
+	must(t, s.DeletePodCommandsForTurn(ctx, "s1", "t1"))
+	must(t, s.DeletePodCommand(ctx, "s1", "prompt", "missing"))
+	got, err = s.ListPodCommands(ctx, "s1")
+	must(t, err)
+	if len(got) != 1 || got[0].Key != "t2" {
+		t.Errorf("commands after deleting turn t1 = %+v, want only t2", got)
+	}
+
+	_, err = s.FinishSession(ctx, "s1", api.StateEnded, nil)
+	must(t, err)
+	got, err = s.ListPodCommands(ctx, "s1")
+	must(t, err)
+	if len(got) != 0 {
+		t.Errorf("an ended session kept its commands: %+v", got)
+	}
+	got, err = s.ListPodCommands(ctx, "s2")
+	must(t, err)
+	if len(got) != 1 {
+		t.Errorf("ending s1 changed the commands of s2: %+v", got)
+	}
+	must(t, s.DeletePodCommand(ctx, "s2", "prompt", "t1"))
+	if got, _ := s.ListPodCommands(ctx, "s2"); len(got) != 0 {
+		t.Errorf("DeletePodCommand left %+v", got)
+	}
+
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s2", Kind: "prompt", Key: "t3", TurnID: "t3"}))
+	must(t, s.PutPodCommand(ctx, sessionstore.PodCommand{SessionID: "s2", Kind: "permission", Key: "c3", TurnID: "t3"}))
+	must(t, s.DeletePodCommands(ctx, "s2"))
+	if got, _ := s.ListPodCommands(ctx, "s2"); len(got) != 0 {
+		t.Errorf("DeletePodCommands left %+v", got)
+	}
 }

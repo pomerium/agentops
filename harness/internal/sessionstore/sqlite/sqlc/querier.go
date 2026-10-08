@@ -9,7 +9,11 @@ import (
 )
 
 type Querier interface {
+	AdvancePodSeq(ctx context.Context, arg AdvancePodSeqParams) (int64, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) error
+	DeletePodCommand(ctx context.Context, arg DeletePodCommandParams) error
+	DeletePodCommandsForSession(ctx context.Context, sessionID string) error
+	DeletePodCommandsForTurn(ctx context.Context, arg DeletePodCommandsForTurnParams) error
 	FinishSession(ctx context.Context, arg FinishSessionParams) (int64, error)
 	GetLatestSessionByConversation(ctx context.Context, arg GetLatestSessionByConversationParams) (Session, error)
 	GetLiveSessionByConversation(ctx context.Context, arg GetLiveSessionByConversationParams) (Session, error)
@@ -17,12 +21,15 @@ type Querier interface {
 	InsertSessionEvent(ctx context.Context, arg InsertSessionEventParams) error
 	ListActiveSessions(ctx context.Context) ([]Session, error)
 	ListLiveSessionsByClient(ctx context.Context, arg ListLiveSessionsByClientParams) ([]Session, error)
+	ListPodCommands(ctx context.Context, sessionID string) ([]PodCommand, error)
 	ListSessionEvents(ctx context.Context, arg ListSessionEventsParams) ([]SessionEvent, error)
 	ListSessionsByClient(ctx context.Context, arg ListSessionsByClientParams) ([]Session, error)
 	NextSessionEventSeq(ctx context.Context, id string) (int64, error)
 	NextTurnSeq(ctx context.Context, id string) (int64, error)
+	PutPodCommand(ctx context.Context, arg PutPodCommandParams) error
 	UpdateSessionACP(ctx context.Context, arg UpdateSessionACPParams) error
 	UpdateSessionApprover(ctx context.Context, arg UpdateSessionApproverParams) error
+	UpdateSessionLink(ctx context.Context, arg UpdateSessionLinkParams) (int64, error)
 	UpdateSessionRun(ctx context.Context, arg UpdateSessionRunParams) error
 	UpdateSessionRunExpiry(ctx context.Context, arg UpdateSessionRunExpiryParams) error
 	UpdateSessionSandbox(ctx context.Context, arg UpdateSessionSandboxParams) error

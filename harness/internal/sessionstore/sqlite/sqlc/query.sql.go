@@ -9,6 +9,25 @@ import (
 	"context"
 )
 
+const advancePodSeq = `-- name: AdvancePodSeq :execrows
+UPDATE sessions
+SET pod_seq = MAX(pod_seq, CAST(?1 AS INTEGER))
+WHERE id = ?2
+`
+
+type AdvancePodSeqParams struct {
+	PodSeq int64  `json:"pod_seq"`
+	ID     string `json:"id"`
+}
+
+func (q *Queries) AdvancePodSeq(ctx context.Context, arg AdvancePodSeqParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, advancePodSeq, arg.PodSeq, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const createSession = `-- name: CreateSession :exec
 INSERT INTO sessions (
     id, client_id, conversation_ref,
@@ -49,6 +68,47 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 	return err
 }
 
+const deletePodCommand = `-- name: DeletePodCommand :exec
+DELETE FROM pod_commands
+WHERE session_id = ? AND kind = ? AND key = ?
+`
+
+type DeletePodCommandParams struct {
+	SessionID string `json:"session_id"`
+	Kind      string `json:"kind"`
+	Key       string `json:"key"`
+}
+
+func (q *Queries) DeletePodCommand(ctx context.Context, arg DeletePodCommandParams) error {
+	_, err := q.db.ExecContext(ctx, deletePodCommand, arg.SessionID, arg.Kind, arg.Key)
+	return err
+}
+
+const deletePodCommandsForSession = `-- name: DeletePodCommandsForSession :exec
+DELETE FROM pod_commands
+WHERE session_id = ?
+`
+
+func (q *Queries) DeletePodCommandsForSession(ctx context.Context, sessionID string) error {
+	_, err := q.db.ExecContext(ctx, deletePodCommandsForSession, sessionID)
+	return err
+}
+
+const deletePodCommandsForTurn = `-- name: DeletePodCommandsForTurn :exec
+DELETE FROM pod_commands
+WHERE session_id = ? AND turn_id = ?
+`
+
+type DeletePodCommandsForTurnParams struct {
+	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id"`
+}
+
+func (q *Queries) DeletePodCommandsForTurn(ctx context.Context, arg DeletePodCommandsForTurnParams) error {
+	_, err := q.db.ExecContext(ctx, deletePodCommandsForTurn, arg.SessionID, arg.TurnID)
+	return err
+}
+
 const finishSession = `-- name: FinishSession :execrows
 UPDATE sessions
 SET status = ?, updated_at = ?
@@ -70,7 +130,7 @@ func (q *Queries) FinishSession(ctx context.Context, arg FinishSessionParams) (i
 }
 
 const getLatestSessionByConversation = `-- name: GetLatestSessionByConversation :one
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
 WHERE client_id = ? AND conversation_ref = ?
 ORDER BY created_at DESC
 LIMIT 1
@@ -105,12 +165,15 @@ func (q *Queries) GetLatestSessionByConversation(ctx context.Context, arg GetLat
 		&i.SuspendedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Executor,
+		&i.StreamID,
+		&i.PodSeq,
 	)
 	return i, err
 }
 
 const getLiveSessionByConversation = `-- name: GetLiveSessionByConversation :one
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
 WHERE client_id = ? AND conversation_ref = ?
   AND status NOT IN ('ended', 'interrupted')
 ORDER BY created_at DESC
@@ -146,12 +209,15 @@ func (q *Queries) GetLiveSessionByConversation(ctx context.Context, arg GetLiveS
 		&i.SuspendedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Executor,
+		&i.StreamID,
+		&i.PodSeq,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
 WHERE id = ?
 `
 
@@ -179,6 +245,9 @@ func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
 		&i.SuspendedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Executor,
+		&i.StreamID,
+		&i.PodSeq,
 	)
 	return i, err
 }
@@ -210,7 +279,7 @@ func (q *Queries) InsertSessionEvent(ctx context.Context, arg InsertSessionEvent
 }
 
 const listActiveSessions = `-- name: ListActiveSessions :many
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
 WHERE status NOT IN ('ended', 'interrupted')
 ORDER BY created_at
 `
@@ -245,6 +314,9 @@ func (q *Queries) ListActiveSessions(ctx context.Context) ([]Session, error) {
 			&i.SuspendedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Executor,
+			&i.StreamID,
+			&i.PodSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -260,7 +332,7 @@ func (q *Queries) ListActiveSessions(ctx context.Context) ([]Session, error) {
 }
 
 const listLiveSessionsByClient = `-- name: ListLiveSessionsByClient :many
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
 WHERE client_id = ? AND status NOT IN ('ended', 'interrupted') AND updated_at >= ?
 ORDER BY created_at DESC
 `
@@ -300,6 +372,44 @@ func (q *Queries) ListLiveSessionsByClient(ctx context.Context, arg ListLiveSess
 			&i.SuspendedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Executor,
+			&i.StreamID,
+			&i.PodSeq,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPodCommands = `-- name: ListPodCommands :many
+SELECT session_id, kind, key, turn_id, payload FROM pod_commands
+WHERE session_id = ?
+ORDER BY rowid
+`
+
+func (q *Queries) ListPodCommands(ctx context.Context, sessionID string) ([]PodCommand, error) {
+	rows, err := q.db.QueryContext(ctx, listPodCommands, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PodCommand{}
+	for rows.Next() {
+		var i PodCommand
+		if err := rows.Scan(
+			&i.SessionID,
+			&i.Kind,
+			&i.Key,
+			&i.TurnID,
+			&i.Payload,
 		); err != nil {
 			return nil, err
 		}
@@ -358,7 +468,7 @@ func (q *Queries) ListSessionEvents(ctx context.Context, arg ListSessionEventsPa
 }
 
 const listSessionsByClient = `-- name: ListSessionsByClient :many
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
 WHERE client_id = ? AND updated_at >= ?
 ORDER BY created_at DESC
 `
@@ -398,6 +508,9 @@ func (q *Queries) ListSessionsByClient(ctx context.Context, arg ListSessionsByCl
 			&i.SuspendedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Executor,
+			&i.StreamID,
+			&i.PodSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -440,6 +553,31 @@ func (q *Queries) NextTurnSeq(ctx context.Context, id string) (int64, error) {
 	return turn_seq, err
 }
 
+const putPodCommand = `-- name: PutPodCommand :exec
+INSERT INTO pod_commands (session_id, kind, key, turn_id, payload)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT (session_id, kind, key) DO UPDATE SET turn_id = excluded.turn_id, payload = excluded.payload
+`
+
+type PutPodCommandParams struct {
+	SessionID string `json:"session_id"`
+	Kind      string `json:"kind"`
+	Key       string `json:"key"`
+	TurnID    string `json:"turn_id"`
+	Payload   []byte `json:"payload"`
+}
+
+func (q *Queries) PutPodCommand(ctx context.Context, arg PutPodCommandParams) error {
+	_, err := q.db.ExecContext(ctx, putPodCommand,
+		arg.SessionID,
+		arg.Kind,
+		arg.Key,
+		arg.TurnID,
+		arg.Payload,
+	)
+	return err
+}
+
 const updateSessionACP = `-- name: UpdateSessionACP :exec
 UPDATE sessions
 SET acp_session_id = ?, status = ?, updated_at = ?
@@ -478,6 +616,34 @@ type UpdateSessionApproverParams struct {
 func (q *Queries) UpdateSessionApprover(ctx context.Context, arg UpdateSessionApproverParams) error {
 	_, err := q.db.ExecContext(ctx, updateSessionApprover, arg.ApproverSubject, arg.UpdatedAt, arg.ID)
 	return err
+}
+
+const updateSessionLink = `-- name: UpdateSessionLink :execrows
+UPDATE sessions
+SET executor = ?, stream_id = ?, pod_seq = ?, updated_at = ?
+WHERE id = ?
+`
+
+type UpdateSessionLinkParams struct {
+	Executor  string `json:"executor"`
+	StreamID  string `json:"stream_id"`
+	PodSeq    int64  `json:"pod_seq"`
+	UpdatedAt int64  `json:"updated_at"`
+	ID        string `json:"id"`
+}
+
+func (q *Queries) UpdateSessionLink(ctx context.Context, arg UpdateSessionLinkParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateSessionLink,
+		arg.Executor,
+		arg.StreamID,
+		arg.PodSeq,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const updateSessionRun = `-- name: UpdateSessionRun :exec

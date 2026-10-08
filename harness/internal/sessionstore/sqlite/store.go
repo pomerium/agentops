@@ -108,6 +108,9 @@ func sessionFromRow(r sqlcgen.Session) sessionstore.Session {
 		SuspendedAt:      fromUnix(r.SuspendedAt),
 		CreatedAt:        fromUnix(r.CreatedAt),
 		UpdatedAt:        fromUnix(r.UpdatedAt),
+		Executor:         r.Executor,
+		StreamID:         r.StreamID,
+		PodSeq:           r.PodSeq,
 	}
 }
 
@@ -265,6 +268,14 @@ func (s *Store) NextTurnSeq(ctx context.Context, sessionID string) (int64, error
 }
 
 func (s *Store) AppendSessionEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte) (int64, error) {
+	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, 0)
+}
+
+func (s *Store) AppendPodEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error) {
+	return s.appendEvent(ctx, sessionID, eventType, turnID, at, payload, podSeq)
+}
+
+func (s *Store) appendEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error) {
 	if payload == nil {
 		payload = []byte{}
 	}
@@ -278,14 +289,21 @@ func (s *Store) AppendSessionEvent(ctx context.Context, sessionID, eventType, tu
 			return err
 		}
 		seq = n
-		return q.InsertSessionEvent(ctx, sqlcgen.InsertSessionEventParams{
+		if err := q.InsertSessionEvent(ctx, sqlcgen.InsertSessionEventParams{
 			SessionID: sessionID,
 			Seq:       n,
 			EventType: eventType,
 			TurnID:    turnID,
 			At:        at.UnixMilli(),
 			Payload:   payload,
-		})
+		}); err != nil {
+			return err
+		}
+		if podSeq > 0 {
+			_, err := q.AdvancePodSeq(ctx, sqlcgen.AdvancePodSeqParams{PodSeq: podSeq, ID: sessionID})
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err
@@ -311,6 +329,9 @@ func (s *Store) FinishSession(ctx context.Context, sessionID string, status api.
 				return err
 			}
 			return sessionstore.ErrConflict
+		}
+		if err := q.DeletePodCommandsForSession(ctx, sessionID); err != nil {
+			return err
 		}
 		for _, ev := range events {
 			seq, err := q.NextSessionEventSeq(ctx, sessionID)
@@ -377,4 +398,62 @@ func (s *Store) inTx(ctx context.Context, fn func(q *sqlcgen.Queries) error) err
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) UpdateSessionLink(ctx context.Context, id, executor, streamID string, podSeq int64) error {
+	n, err := s.q.UpdateSessionLink(ctx, sqlcgen.UpdateSessionLinkParams{
+		Executor: executor, StreamID: streamID, PodSeq: podSeq, UpdatedAt: time.Now().Unix(), ID: id,
+	})
+	return oneRow(n, err)
+}
+
+func (s *Store) AdvancePodSeq(ctx context.Context, id string, podSeq int64) error {
+	n, err := s.q.AdvancePodSeq(ctx, sqlcgen.AdvancePodSeqParams{PodSeq: podSeq, ID: id})
+	return oneRow(n, err)
+}
+
+func oneRow(n int64, err error) error {
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sessionstore.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) PutPodCommand(ctx context.Context, cmd sessionstore.PodCommand) error {
+	payload := cmd.Payload
+	if payload == nil {
+		payload = []byte{}
+	}
+	return s.q.PutPodCommand(ctx, sqlcgen.PutPodCommandParams{
+		SessionID: cmd.SessionID, Kind: cmd.Kind, Key: cmd.Key, TurnID: cmd.TurnID, Payload: payload,
+	})
+}
+
+func (s *Store) ListPodCommands(ctx context.Context, sessionID string) ([]sessionstore.PodCommand, error) {
+	rows, err := s.q.ListPodCommands(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]sessionstore.PodCommand, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, sessionstore.PodCommand{
+			SessionID: r.SessionID, Kind: r.Kind, Key: r.Key, TurnID: r.TurnID, Payload: r.Payload,
+		})
+	}
+	return out, nil
+}
+
+func (s *Store) DeletePodCommand(ctx context.Context, sessionID, kind, key string) error {
+	return s.q.DeletePodCommand(ctx, sqlcgen.DeletePodCommandParams{SessionID: sessionID, Kind: kind, Key: key})
+}
+
+func (s *Store) DeletePodCommandsForTurn(ctx context.Context, sessionID, turnID string) error {
+	return s.q.DeletePodCommandsForTurn(ctx, sqlcgen.DeletePodCommandsForTurnParams{SessionID: sessionID, TurnID: turnID})
+}
+
+func (s *Store) DeletePodCommands(ctx context.Context, sessionID string) error {
+	return s.q.DeletePodCommandsForSession(ctx, sessionID)
 }

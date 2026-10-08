@@ -36,6 +36,18 @@ type Session struct {
 	SuspendedAt      time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+
+	Executor string
+	StreamID string
+	PodSeq   int64
+}
+
+type PodCommand struct {
+	SessionID string
+	Kind      string
+	Key       string
+	TurnID    string
+	Payload   []byte
 }
 
 type SessionEvent struct {
@@ -68,18 +80,30 @@ type Sessions interface {
 	UpdateSessionRunExpiry(ctx context.Context, id string, runExpiresAt time.Time) error
 	UpdateSessionApprover(ctx context.Context, id, approverSubject string) error
 	UpdateSessionSuspended(ctx context.Context, id string, status api.SessionState, suspendedAt time.Time) error
+	UpdateSessionLink(ctx context.Context, id, executor, streamID string, podSeq int64) error
+	AdvancePodSeq(ctx context.Context, id string, podSeq int64) error
 	NextTurnSeq(ctx context.Context, sessionID string) (int64, error)
 }
 
 type Events interface {
 	AppendSessionEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte) (int64, error)
+	AppendPodEvent(ctx context.Context, sessionID, eventType, turnID string, at time.Time, payload []byte, podSeq int64) (int64, error)
 	ListSessionEvents(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]SessionEvent, error)
 	FinishSession(ctx context.Context, sessionID string, status api.SessionState, events []NewSessionEvent) ([]int64, error)
+}
+
+type PodCommands interface {
+	PutPodCommand(ctx context.Context, cmd PodCommand) error
+	ListPodCommands(ctx context.Context, sessionID string) ([]PodCommand, error)
+	DeletePodCommand(ctx context.Context, sessionID, kind, key string) error
+	DeletePodCommandsForTurn(ctx context.Context, sessionID, turnID string) error
+	DeletePodCommands(ctx context.Context, sessionID string) error
 }
 
 type Store interface {
 	Sessions
 	Events
+	PodCommands
 	Ping(ctx context.Context) error
 	Close() error
 }
