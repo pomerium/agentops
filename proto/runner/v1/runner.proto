@@ -35,7 +35,9 @@ message RunnerClientFrame {
     Join join = 4;
     // Starts the events. The runner sends ReplayStart, then the events after
     // Replay.after, and then each new event. Before Replay, the runner sends no
-    // events. Send Replay again after each new AgentIO stream.
+    // events. Send Replay again after each new AgentIO stream. Each Replay gets
+    // exactly one ReplayStart. After it, the runner sends no event of an
+    // earlier Replay.
     Replay replay = 5;
     agentlink.v1.AgentIOAck ack = 6;
     agentlink.v1.Prompt prompt = 7;

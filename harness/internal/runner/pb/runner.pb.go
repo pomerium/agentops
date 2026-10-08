@@ -160,7 +160,9 @@ type RunnerClientFrame_Join struct {
 type RunnerClientFrame_Replay struct {
 	// Starts the events. The runner sends ReplayStart, then the events after
 	// Replay.after, and then each new event. Before Replay, the runner sends no
-	// events. Send Replay again after each new AgentIO stream.
+	// events. Send Replay again after each new AgentIO stream. Each Replay gets
+	// exactly one ReplayStart. After it, the runner sends no event of an
+	// earlier Replay.
 	Replay *Replay `protobuf:"bytes,5,opt,name=replay,proto3,oneof"`
 }
 
