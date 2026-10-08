@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -58,9 +57,13 @@ type AgentLink interface {
 type AttachHandle interface {
 	AwaitAttach(ctx context.Context) error
 	AwaitReady(ctx context.Context) error
-	SpawnAgent(ctx context.Context) error
-	AwaitAgentIO(ctx context.Context) (io.Writer, io.Reader, error)
+	SpawnAgent(ctx context.Context, params *agentlinkpb.SessionParams) error
+	StreamID() []byte
+	Inbox() <-chan *agentlinkpb.AgentIOFrame
+	Ack(seq uint64)
+	Send(f *agentlinkpb.AgentIOFrame)
 	Shutdown(reason string)
+	Done() <-chan struct{}
 }
 
 type serverAgentLink struct{ srv *agentlink.Server }
@@ -116,8 +119,6 @@ type Orchestrator struct {
 	cfg       options
 	log       *slog.Logger
 	tel       *telemetry.Component
-
-	openSession func(ctx context.Context, tel *telemetry.Component, sink EventSink, agentStdin io.Writer, agentStdout io.Reader, closeFn func() error, params SessionParams) (*Session, error)
 }
 
 func New(claims ClaimClient, pods PodGetter, sandboxes SandboxClient, link AgentLink, opts ...Option) *Orchestrator {
@@ -143,8 +144,7 @@ func New(claims ClaimClient, pods PodGetter, sandboxes SandboxClient, link Agent
 	}
 	return &Orchestrator{
 		claims: claims, pods: pods, sandboxes: sandboxes, link: link, cfg: cfg, log: log,
-		tel:         telemetry.New(log, "sandbox", slog.LevelDebug),
-		openSession: OpenSession,
+		tel: telemetry.New(log, "sandbox", slog.LevelDebug),
 	}
 }
 
@@ -290,6 +290,12 @@ func WithOnDelayed(f func(waited time.Duration)) SupervisionOption {
 }
 
 func (o *Orchestrator) Expect(runID string, prepared *Prepared, opts ...SupervisionOption) (*Attachment, error) {
+	return o.expect(runID, prepared.Executor, prepared.SandboxName, sandboxConfig(prepared.spec), false, opts)
+}
+
+func (o *Orchestrator) expect(runID string, seal agenticrun.Executor, podName string, cfg *agentlinkpb.SandboxConfig,
+	adopted bool, opts []SupervisionOption, linkOpts ...agentlink.ExpectOption,
+) (*Attachment, error) {
 	if o.link == nil {
 		return nil, errors.New("no agent link configured")
 	}
@@ -298,11 +304,11 @@ func (o *Orchestrator) Expect(runID string, prepared *Prepared, opts ...Supervis
 		opt(&sup)
 	}
 	att := &Attachment{runID: runID, link: o.link, down: sup.OnDown, onDelayed: sup.OnDelayed}
-	handle, err := o.link.Expect(runID, prepared.Executor, sandboxConfig(prepared.spec),
+	linkOpts = append(linkOpts,
 		agentlink.WithOnAttached(
 			func(attempt uint32, agentRunning bool) {
 				att.cancelGrace()
-				o.log.Info("sandbox attached", "run_id", runID, "pod", prepared.SandboxName,
+				o.log.Info("sandbox attached", "run_id", runID, "pod", podName,
 					"attempt", attempt, "agent_running", agentRunning)
 				if att.spawned.Load() && !agentRunning {
 					att.fire("sidecar_restarted")
@@ -310,22 +316,23 @@ func (o *Orchestrator) Expect(runID string, prepared *Prepared, opts ...Supervis
 			}),
 		agentlink.WithOnLost(func(cause error) {
 			o.log.Warn("sandbox tunnel lost; holding the session open",
-				"run_id", runID, "pod", prepared.SandboxName,
+				"run_id", runID, "pod", podName,
 				"grace", o.cfg.attachGrace.String(), "err", cause)
 			att.startGrace(o.cfg.attachGrace)
 		}),
 		agentlink.WithOnError(func(reason string, cause error) {
 			o.log.Error("sandbox reported a terminal error",
-				"run_id", runID, "pod", prepared.SandboxName, "reason", reason, "err", cause)
+				"run_id", runID, "pod", podName, "reason", reason, "err", cause)
 			att.fire(reason)
 		}),
-		agentlink.WithOnAgentExit(func(code int32) {
-			o.log.Info("sandbox agent exited; ending the session",
-				"run_id", runID, "pod", prepared.SandboxName, "exit_code", code)
-			att.fire("agent_exited")
-		}),
 	)
+	if adopted {
+		att.spawned.Store(true)
+		att.startGrace(o.cfg.attachGrace)
+	}
+	handle, err := o.link.Expect(runID, seal, cfg, linkOpts...)
 	if err != nil {
+		att.cancelGrace()
 		return nil, err
 	}
 	att.handle = handle
@@ -361,7 +368,7 @@ func (a *Attachment) cancelGrace() {
 	a.mu.Unlock()
 }
 
-func (o *Orchestrator) Activate(ctx context.Context, sink EventSink, prepared *Prepared, att *Attachment) (*Session, error) {
+func (o *Orchestrator) Activate(ctx context.Context, prepared *Prepared, att *Attachment) (*Session, error) {
 	ctx, op := o.tel.Start(ctx, "Activate", "session_id", prepared.spec.SessionID)
 	defer op.Complete()
 
@@ -395,29 +402,13 @@ func (o *Orchestrator) Activate(ctx context.Context, sink EventSink, prepared *P
 	if err := att.handle.AwaitReady(attachCtx); err != nil {
 		return fail(fmt.Errorf("await sandbox ready: %w", err))
 	}
-	if err := att.handle.SpawnAgent(ctx); err != nil {
+	if err := att.handle.SpawnAgent(ctx, sessionParams(prepared.spec)); err != nil {
 		return fail(fmt.Errorf("spawn agent: %w", err))
 	}
 	att.spawned.Store(true)
-	stdin, stdout, err := att.handle.AwaitAgentIO(attachCtx)
-	if err != nil {
-		return fail(fmt.Errorf("await agent io: %w", err))
-	}
-
-	closeAll := func() error {
-		att.handle.Shutdown("session_end")
-		att.Forget()
-		return nil
-	}
-	session, err := o.openSession(ctx, o.tel, sink, stdin, stdout, closeAll, SessionParams{
-		Cwd:             sandboxCwd,
-		MCPServers:      RewriteMCPServers(prepared.spec.Endpoints),
-		SystemPrompt:    prepared.spec.SystemPrompt,
-		SessionConfig:   prepared.spec.Template.Spec.SessionConfig,
-		ResumeSessionID: prepared.spec.ResumeACPSessionID,
-	})
-	if err != nil {
-		_ = closeAll()
+	session := &Session{att: att}
+	if err := session.awaitReady(attachCtx); err != nil {
+		_ = session.Close()
 		if !errors.Is(err, ErrResumeUnavailable) {
 			release()
 		}
@@ -426,6 +417,48 @@ func (o *Orchestrator) Activate(ctx context.Context, sink EventSink, prepared *P
 
 	o.tel.Debug(ctx, "acp session live", "claim", claimName, "pod", sandboxName, "acp_session_id", session.ID())
 	return session, nil
+}
+
+type AdoptSpec struct {
+	RunID        string
+	ClaimName    string
+	SandboxName  string
+	Executor     agenticrun.Executor
+	Launch       LaunchSpec
+	ACPSessionID string
+	StreamID     []byte
+	ResumeAfter  uint64
+}
+
+func (o *Orchestrator) Adopt(ctx context.Context, spec AdoptSpec, opts ...SupervisionOption) (*Session, error) {
+	pod, err := o.pods.Get(ctx, spec.SandboxName)
+	if err != nil {
+		return nil, fmt.Errorf("re-read pod %q: %w", spec.SandboxName, err)
+	}
+	if string(pod.UID) != spec.Executor.PodUID {
+		return nil, fmt.Errorf("pod %q was replaced (uid %s != sealed %s)", spec.SandboxName, pod.UID, spec.Executor.PodUID)
+	}
+	att, err := o.expect(spec.RunID, spec.Executor, spec.SandboxName, sandboxConfig(spec.Launch), true, opts,
+		agentlink.WithStreamID(spec.StreamID), agentlink.WithResumeAfter(spec.ResumeAfter))
+	if err != nil {
+		return nil, err
+	}
+	o.log.InfoContext(ctx, "waiting for an adopted sandbox to attach again",
+		"run_id", spec.RunID, "pod", spec.SandboxName, "resume_after", spec.ResumeAfter, "grace", o.cfg.attachGrace.String())
+	return &Session{att: att, acpID: spec.ACPSessionID}, nil
+}
+
+func sessionParams(spec LaunchSpec) *agentlinkpb.SessionParams {
+	params := &agentlinkpb.SessionParams{
+		Cwd:             sandboxCwd,
+		McpServers:      RewriteMCPServers(spec.Endpoints),
+		SystemPrompt:    spec.SystemPrompt,
+		ResumeSessionId: spec.ResumeACPSessionID,
+	}
+	if spec.Template != nil {
+		params.Config = spec.Template.Spec.SessionConfig
+	}
+	return params
 }
 
 var ErrAttachTimeout = errors.New("the sandbox never connected back to the agent link")

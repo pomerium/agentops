@@ -36,21 +36,12 @@ func TestRewriteMCPServers(t *testing.T) {
 		"querty": "http://127.0.0.1:9102/base/path?tenant=t1",
 	}
 	for _, s := range servers {
-		if s.Http == nil {
-			t.Fatalf("server %+v is not HTTP", s)
-		}
-		want, ok := wantURLs[s.Http.Name]
+		want, ok := wantURLs[s.GetName()]
 		if !ok {
-			t.Fatalf("unexpected server name %q", s.Http.Name)
+			t.Fatalf("unexpected server name %q", s.GetName())
 		}
-		if s.Http.Url != want {
-			t.Errorf("server %s url = %q, want %q", s.Http.Name, s.Http.Url, want)
-		}
-		if s.Http.Headers == nil {
-			t.Errorf("server %s headers are nil; want empty slice", s.Http.Name)
-		}
-		if len(s.Http.Headers) != 0 {
-			t.Errorf("server %s carries %d headers into the agent: %v", s.Http.Name, len(s.Http.Headers), s.Http.Headers)
+		if s.GetUrl() != want {
+			t.Errorf("server %s url = %q, want %q", s.GetName(), s.GetUrl(), want)
 		}
 	}
 }
@@ -67,8 +58,8 @@ func TestSidecarEndpointNameIsNamespaced(t *testing.T) {
 	}
 
 	servers := sandbox.RewriteMCPServers([]sandbox.ProxiedEndpoint{ep})
-	if servers[0].Http.Name != "anthropic" {
-		t.Errorf("agent-facing MCP server name = %q, want anthropic (unchanged)", servers[0].Http.Name)
+	if servers[0].GetName() != "anthropic" {
+		t.Errorf("agent-facing MCP server name = %q, want anthropic (unchanged)", servers[0].GetName())
 	}
 }
 

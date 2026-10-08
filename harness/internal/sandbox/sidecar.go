@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/url"
 
-	acp "github.com/coder/acp-go-sdk"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 )
 
 const MCPPortBase uint32 = 9100
@@ -22,8 +22,8 @@ type ProxiedEndpoint struct {
 	DialAddress string
 }
 
-func RewriteMCPServers(endpoints []ProxiedEndpoint) []acp.McpServer {
-	servers := make([]acp.McpServer, 0, len(endpoints))
+func RewriteMCPServers(endpoints []ProxiedEndpoint) []*agentlinkpb.McpServer {
+	servers := make([]*agentlinkpb.McpServer, 0, len(endpoints))
 	for _, ep := range endpoints {
 		localURL := fmt.Sprintf("http://127.0.0.1:%d", ep.ListenPort)
 		if u, err := url.Parse(ep.UpstreamURL); err == nil {
@@ -32,14 +32,7 @@ func RewriteMCPServers(endpoints []ProxiedEndpoint) []acp.McpServer {
 				localURL = fmt.Sprintf("http://127.0.0.1:%d", ep.ListenPort)
 			}
 		}
-		servers = append(servers, acp.McpServer{
-			Http: &acp.McpServerHttpInline{
-				Name:    ep.Name,
-				Type:    "http",
-				Url:     localURL,
-				Headers: []acp.HttpHeader{},
-			},
-		})
+		servers = append(servers, &agentlinkpb.McpServer{Name: ep.Name, Url: localURL})
 	}
 	return servers
 }
