@@ -67,6 +67,7 @@ type Server struct {
 	log           *slog.Logger
 	tel           *telemetry.Component
 	inflight      sync.WaitGroup
+	seen          seenEvents
 }
 
 func New(signingSecret string, app App, opts ...Option) *Server {
@@ -195,12 +196,47 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if retry := r.Header.Get("X-Slack-Retry-Num"); event.Type == slackevents.CallbackEvent && retry == "" {
-		s.dispatchCallback(r.Context(), event)
-	} else if retry != "" {
-		s.tel.Debug(r.Context(), "ignoring retried event", "retry_num", retry, "reason", r.Header.Get("X-Slack-Retry-Reason"))
+	if event.Type == slackevents.CallbackEvent {
+		if id := eventID(event); id != "" && !s.seen.first(id, time.Now()) {
+			s.tel.Debug(r.Context(), "ignoring an event already received", "event_id", id,
+				"retry_num", r.Header.Get("X-Slack-Retry-Num"), "reason", r.Header.Get("X-Slack-Retry-Reason"))
+		} else {
+			s.dispatchCallback(r.Context(), event)
+		}
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func eventID(event slackevents.EventsAPIEvent) string {
+	if cb, ok := event.Data.(*slackevents.EventsAPICallbackEvent); ok {
+		return cb.EventID
+	}
+	return ""
+}
+
+const seenEventsFor = time.Hour
+
+type seenEvents struct {
+	mu sync.Mutex
+	at map[string]time.Time
+}
+
+func (s *seenEvents) first(id string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.at == nil {
+		s.at = map[string]time.Time{}
+	}
+	for k, at := range s.at {
+		if now.Sub(at) > seenEventsFor {
+			delete(s.at, k)
+		}
+	}
+	if _, seen := s.at[id]; seen {
+		return false
+	}
+	s.at[id] = now
+	return true
 }
 
 func (s *Server) dispatchCallback(ctx context.Context, event slackevents.EventsAPIEvent) {

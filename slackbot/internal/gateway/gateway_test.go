@@ -271,24 +271,47 @@ func TestEventURLVerification(t *testing.T) {
 	}
 }
 
-func TestEventRetryIsNotRedispatched(t *testing.T) {
-	app := &fakeApp{}
-	srv := newServer(app)
-	inner := `{"type":"event_callback","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","ts":"2.0","thread_ts":"1.0","text":"hi"}}`
-	body := []byte(inner)
-	req := signedRequest(t, "/slack/events", "application/json", body)
-	req.Header.Set("X-Slack-Retry-Num", "1")
+func postEvent(t *testing.T, srv *gateway.Server, body string, retry string) {
+	t.Helper()
+	req := signedRequest(t, "/slack/events", "application/json", []byte(body))
+	if retry != "" {
+		req.Header.Set("X-Slack-Retry-Num", retry)
+		req.Header.Set("X-Slack-Retry-Reason", "http_timeout")
+	}
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	time.Sleep(20 * time.Millisecond)
+}
+
+func TestARetryOfAnEventAlreadyReceivedIsNotRedispatched(t *testing.T) {
+	app := &fakeApp{}
+	srv := newServer(app)
+	body := `{"type":"event_callback","event_id":"Ev1","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","ts":"2.0","thread_ts":"1.0","text":"hi"}}`
+	postEvent(t, srv, body, "")
+	postEvent(t, srv, body, "1")
+	if err := srv.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	app.mu.Lock()
-	n := len(app.messages)
-	app.mu.Unlock()
-	if n != 0 {
-		t.Errorf("a retried event must not be re-dispatched; got %d messages", n)
+	defer app.mu.Unlock()
+	if len(app.messages) != 1 {
+		t.Errorf("an event delivered twice was handled %d times, want once", len(app.messages))
+	}
+}
+
+func TestARetryTheBotNeverSawIsHandled(t *testing.T) {
+	app := &fakeApp{}
+	srv := newServer(app)
+	postEvent(t, srv, `{"type":"event_callback","event_id":"Ev2","team_id":"T1","event":{"type":"message","user":"U1","channel":"C1","text":"<@U0BOT> help","ts":"1.0"}}`, "1")
+	if err := srv.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	if len(app.mentions) != 1 {
+		t.Fatalf("a retry whose first delivery never arrived was dropped: %+v", app.mentions)
 	}
 }
 
