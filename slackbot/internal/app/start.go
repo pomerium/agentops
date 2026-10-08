@@ -251,7 +251,7 @@ func (a *App) readCarryover(ctx context.Context, channel, threadTS, beforeTS str
 		a.tel.Debug(ctx, "untagged bot messages look like chrome; check message metadata plumbing",
 			"count", n)
 	}
-	entries, capped := capEntries(sessionTranscript(replies, seedCarry(beforeTS, a.botUserID)))
+	entries, capped := capEntries(transcriptMessages(replies, seedCarry(beforeTS, a.botUserID)))
 	flags.truncated = flags.truncated || capped
 	return replies, entries
 }
