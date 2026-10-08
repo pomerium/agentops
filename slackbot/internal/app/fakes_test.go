@@ -319,7 +319,7 @@ func newFakeFeed() *fakeFeed { return &fakeFeed{} }
 
 func (f *fakeFeed) subscribe(afterSeq int64) *fakeSub {
 	f.mu.Lock()
-	s := &fakeSub{ch: make(chan *pb.Event, len(f.history)+256)}
+	s := &fakeSub{ch: make(chan *pb.Event, len(f.history)+256), done: make(chan struct{})}
 	for _, ev := range f.history {
 		if ev.Seq > afterSeq {
 			s.send(ev)
@@ -369,7 +369,9 @@ func (f *fakeFeed) publish(ev *pb.Event) {
 
 type fakeSub struct {
 	mu     sync.Mutex
+	sendMu sync.Mutex
 	ch     chan *pb.Event
+	done   chan struct{}
 	closed bool
 }
 
@@ -377,22 +379,39 @@ func (s *fakeSub) events() <-chan *pb.Event { return s.ch }
 
 func (s *fakeSub) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.closed = true
-		close(s.ch)
+	if s.closed {
+		s.mu.Unlock()
+		return
 	}
+	s.closed = true
+	close(s.done)
+	s.mu.Unlock()
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	close(s.ch)
 }
 
 func (s *fakeSub) send(ev *pb.Event) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+	select {
+	case <-s.done:
+		return
+	case s.ch <- ev:
+	}
+	if ev.GetSessionEnded() == nil {
 		return
 	}
-	s.ch <- ev
-	if ev.GetSessionEnded() != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
 		s.closed = true
+		close(s.done)
 		close(s.ch)
 	}
 }
@@ -769,5 +788,26 @@ func TestTheFakeReplaysMoreThanOneBuffer(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("subscribe blocked before its reader could start")
+	}
+}
+
+func TestClosingTheFakeUnblocksAFullFeed(t *testing.T) {
+	feed := newFakeFeed()
+	sub := feed.subscribe(0)
+	for seq := 1; seq <= cap(sub.ch); seq++ {
+		feed.publish(&pb.Event{Seq: int64(seq)})
+	}
+	go feed.publish(&pb.Event{Seq: 1000})
+	time.Sleep(20 * time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() {
+		sub.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close could not interrupt a send blocked on a full feed")
 	}
 }
