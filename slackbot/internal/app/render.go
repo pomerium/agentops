@@ -91,7 +91,9 @@ func startsInSpace(s string) bool {
 func (a *App) startConsumer(t *thread, ackTS string, afterSeq int64) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(context.Background()))
 	t.stop = cancel
-	t.render = newRenderer()
+	if t.render == nil {
+		t.render = newRenderer()
+	}
 	go func() {
 		defer cancel()
 		a.consume(ctx, t, ackTS, afterSeq)
@@ -116,6 +118,7 @@ func (a *App) consume(ctx context.Context, t *thread, ackTS string, afterSeq int
 	if ackTS == "" {
 		ackTS = t.threadTS
 	}
+	inTurn := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -127,10 +130,25 @@ func (a *App) consume(ctx context.Context, t *thread, ackTS string, afterSeq int
 			if ctx.Err() != nil {
 				return
 			}
-			t.applyMeta(func(m *sessionMeta) { m.LastSeq = max(m.LastSeq, ev.GetSeq()) })
+			var atBoundary bool
+			atBoundary, inTurn = turnBoundary(ev, inTurn)
+			if atBoundary {
+				t.applyMeta(func(m *sessionMeta) { m.LastSeq = max(m.LastSeq, ev.GetSeq()) })
+			}
 			a.renderEvent(ctx, t, ackTS, ev)
 		}
 	}
+}
+
+func turnBoundary(ev *pb.Event, inTurn bool) (atBoundary, stillInTurn bool) {
+	switch ev.GetPayload().(type) {
+	case *pb.Event_TurnCompleted, *pb.Event_TurnFailed, *pb.Event_SessionEnded:
+		return true, false
+	}
+	if ev.GetTurnId() != "" {
+		return false, true
+	}
+	return !inTurn, inTurn
 }
 
 func (a *App) subscribe(ctx context.Context, t *thread, afterSeq int64) (*client.Subscription, error) {
@@ -309,7 +327,7 @@ func (a *App) endTurn(ctx context.Context, t *thread, turnID string) {
 		a.showFinal(ctx, t, text)
 	}
 	a.clearBusy(ctx, t)
-	a.saveMeta(ctx, t, func(*sessionMeta) {})
+	a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS = "", "" })
 	t.render.mu.Lock()
 	finalTS, reacted := t.render.curTS, t.render.reacted
 	t.render.reacted = false
@@ -359,6 +377,7 @@ func (a *App) showIntermediary(ctx context.Context, t *thread, seg string) {
 	t.render.curTS = ts
 	t.render.reacted = true
 	t.render.mu.Unlock()
+	a.rememberAnswer(ctx, t, ts)
 	if err := a.poster.AddReaction(ctx, t.channel, ts, reactionBusy); err != nil {
 		a.log.DebugContext(ctx, "add busy reaction failed", "ts", ts, "err", err)
 	}
@@ -388,6 +407,7 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) {
 		}
 		if firstTS == "" {
 			firstTS = ts
+			a.rememberAnswer(ctx, t, ts)
 		}
 	}
 	if firstTS != "" {
@@ -395,6 +415,13 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) {
 		t.render.curTS = firstTS
 		t.render.mu.Unlock()
 	}
+}
+
+func (a *App) rememberAnswer(ctx context.Context, t *thread, ts string) {
+	t.render.mu.Lock()
+	turnID := t.render.turnID
+	t.render.mu.Unlock()
+	a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS = turnID, ts })
 }
 
 func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequest) {

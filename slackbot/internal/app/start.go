@@ -152,6 +152,9 @@ func threadFromMeta(view *pb.SessionView, m sessionMeta) *thread {
 		metaState:   m,
 	}
 	t.render = newRenderer()
+	if m.AnswerTurn != "" && m.AnswerTS != "" {
+		t.render.turnID, t.render.curTS, t.render.reacted = m.AnswerTurn, m.AnswerTS, true
+	}
 	t.setState(view.GetState())
 	return t
 }
