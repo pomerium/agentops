@@ -301,6 +301,30 @@ func TestAgentOutputUsesTheRightDeliveryPath(t *testing.T) {
 	}
 }
 
+func TestATurnsMessageKeepsEveryPartOfTheAnswer(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "First finding.", Final: false})
+	first := f.poster.waitForPost(t, "First finding.")
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.2", Text: "Second finding.", Final: true})
+	final := f.poster.waitForUpdate(t, "Second finding.")
+
+	if final.ts != first.ts {
+		t.Errorf("the final part went to %q, want the turn's message %q", final.ts, first.ts)
+	}
+	if !strings.Contains(final.text, "First finding.") {
+		t.Errorf("the turn's message lost its earlier part: %q", final.text)
+	}
+
+	f.api.emit("sess-1", "t2", &pb.AgentMessage{PartId: "t2.1", Text: "A new turn.", Final: true})
+	next := f.poster.waitForPost(t, "A new turn.")
+	if strings.Contains(next.text, "finding") {
+		t.Errorf("a new turn carried the last turn's parts: %q", next.text)
+	}
+}
+
 func TestSessionEndedIsRenderedAndReleasesTheThread(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
