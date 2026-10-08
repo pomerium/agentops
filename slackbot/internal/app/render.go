@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/cenkalti/backoff/v7"
@@ -28,6 +29,7 @@ type renderer struct {
 	curTS   string
 	reacted bool
 	turnID  string
+	text    string
 	permTS  map[string]string
 }
 
@@ -42,6 +44,27 @@ func (r *renderer) beginTurn(turnID string) {
 	r.turnID = turnID
 	r.curTS = ""
 	r.reacted = false
+	r.text = ""
+}
+
+func (r *renderer) appendPart(part string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.text != "" && part != "" && !endsInSpace(r.text) && !startsInSpace(part) {
+		r.text += "\n\n"
+	}
+	r.text += part
+	return r.text
+}
+
+func endsInSpace(s string) bool {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return unicode.IsSpace(r)
+}
+
+func startsInSpace(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsSpace(r)
 }
 
 func (a *App) startConsumer(t *thread, ackTS string, afterSeq int64) {
@@ -130,11 +153,12 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 
 	case *pb.Event_AgentMessage:
 		t.render.beginTurn(ev.GetTurnId())
+		text := t.render.appendPart(p.AgentMessage.GetText())
 		if p.AgentMessage.GetFinal() {
-			a.showFinal(ctx, t, p.AgentMessage.GetText())
+			a.showFinal(ctx, t, text)
 			return
 		}
-		a.showIntermediary(ctx, t, p.AgentMessage.GetText())
+		a.showIntermediary(ctx, t, text)
 
 	case *pb.Event_AgentThought:
 		a.log.DebugContext(ctx, "agent thought",
