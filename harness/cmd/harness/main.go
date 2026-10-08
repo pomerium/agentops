@@ -119,6 +119,7 @@ func run(log *slog.Logger) error {
 		agentlink.WithHeartbeatInterval(cfg.Harness.HeartbeatInterval),
 		agentlink.WithHeartbeatMissLimit(cfg.Harness.HeartbeatMissLimit),
 		agentlink.WithLogger(log),
+		agentlink.WithStartupHold(),
 	)
 	if err != nil {
 		return err
@@ -126,11 +127,6 @@ func run(log *slog.Logger) error {
 	if advisory := agentlink.BindAdvisory(cfg.Harness.GRPCAddr); advisory != "" {
 		log.Warn(advisory)
 	}
-	stopAgentLink, err := serveAgentLink(linkSrv, cfg.Harness.GRPCAddr, log)
-	if err != nil {
-		return err
-	}
-	defer stopAgentLink()
 
 	claimClient, err := sandbox.NewClaimClient(restCfg, cfg.Harness.Namespace)
 	if err != nil {
@@ -176,11 +172,18 @@ func run(log *slog.Logger) error {
 		harnessapi.WithLogger(log),
 	)
 
-	reconciled := api.ReconcileOnStartup(ctx)
-	go func() {
-		<-reconciled
-		runSweeper(ctx, api)
-	}()
+	stopAgentLink, err := serveAgentLink(linkSrv, cfg.Harness.GRPCAddr, log)
+	if err != nil {
+		return err
+	}
+	defer stopAgentLink()
+
+	if !awaitReconcile(ctx, api.ReconcileOnStartup(ctx)) {
+		log.Info("shutting down during startup reconcile")
+		return nil
+	}
+	linkSrv.EndStartupHold()
+	go runSweeper(ctx, api)
 
 	stopAPI, err := serveClientAPI(ctx, cfg, api, st, crCache, log)
 	if err != nil {
@@ -191,6 +194,15 @@ func run(log *slog.Logger) error {
 	<-ctx.Done()
 	log.Info("shutting down")
 	return nil
+}
+
+func awaitReconcile(ctx context.Context, reconciled <-chan struct{}) bool {
+	select {
+	case <-reconciled:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func serveClientAPI(ctx context.Context, cfg config.Config, impl *harnessapi.Service,

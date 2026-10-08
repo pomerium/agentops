@@ -434,4 +434,12 @@ func encodeExecutor(e agenticrun.Executor) string {
 	return string(data)
 }
 
+func decodeExecutor(s string) (agenticrun.Executor, error) {
+	var e agenticrun.Executor
+	if err := json.Unmarshal([]byte(s), &e); err != nil {
+		return agenticrun.Executor{}, err
+	}
+	return e, e.Validate()
+}
+
 func turnName(n int64) string { return "t" + strconv.FormatInt(n, 10) }
