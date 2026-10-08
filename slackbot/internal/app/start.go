@@ -110,15 +110,12 @@ func startFailureText(err error, template string) string {
 	}
 }
 
-var (
-	errNoSlackState   = errors.New("this session's thread carries no readable Slack state")
-	errBindingClaimed = errors.New("another session claimed this binding")
-)
+var errBindingClaimed = errors.New("another session claimed this binding")
 
 func (a *App) adopt(ctx context.Context, view *pb.SessionView, atTS string) (*thread, error) {
-	m, ok := a.loadMeta(ctx, view)
-	if !ok {
-		return nil, errNoSlackState
+	m, err := a.loadMeta(ctx, view)
+	if err != nil {
+		return nil, err
 	}
 	t := threadFromMeta(view, m)
 	ok, flipped := a.registerThread(t)

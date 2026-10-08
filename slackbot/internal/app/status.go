@@ -200,8 +200,8 @@ func (a *App) ReconcileOnStartup(ctx context.Context) {
 		if view.GetState() == api.StateSuspended {
 			continue
 		}
-		m, ok := a.loadMeta(ctx, view)
-		if !ok {
+		m, err := a.loadMeta(ctx, view)
+		if err != nil {
 			a.tel.Debug(ctx, "startup reconcile: no Slack state in this session's thread", "session", view.GetId())
 			continue
 		}

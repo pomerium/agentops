@@ -40,8 +40,8 @@ func (a *App) sweepWatched(ctx context.Context, since time.Time) {
 		if view.GetState() == api.StateSuspended {
 			continue
 		}
-		m, ok := a.loadMeta(ctx, view)
-		if !ok || !m.Watching {
+		m, err := a.loadMeta(ctx, view)
+		if err != nil || !m.Watching {
 			continue
 		}
 		a.renderWatchedEnding(ctx, view, m)
