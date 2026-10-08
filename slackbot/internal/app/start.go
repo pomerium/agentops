@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"strings"
@@ -24,6 +25,7 @@ type startSpec struct {
 	threadLink      string
 	ackTS           string
 	joinedAt        string
+	catchupFrom     string
 	flipFrom        string
 }
 
@@ -84,7 +86,7 @@ func (a *App) startSession(ctx context.Context, spec startSpec) *thread {
 		m.TeamID = in.TeamID
 		m.Multiplayer = m.Multiplayer || spec.joinedAt != ""
 		if m.LastSeenTS == "" {
-			m.LastSeenTS = spec.joinedAt
+			m.LastSeenTS = cmp.Or(spec.catchupFrom, spec.joinedAt)
 		}
 	})
 	a.flipRoom(ctx, t, flipped, spec.flipFrom)
@@ -207,6 +209,7 @@ func (a *App) startJoin(ctx context.Context, in gateway.MentionInvocation, solo 
 		threadLink:      threadLink,
 		ackTS:           in.MessageTS,
 		joinedAt:        joinedAt,
+		catchupFrom:     bareJoinCursor(joinedAt, in.Prompt),
 		flipFrom:        priorTS(replies, in.MessageTS),
 	})
 }
@@ -257,6 +260,13 @@ func (a *App) readCarryover(ctx context.Context, channel, threadTS, beforeTS str
 	entries, capped := capEntries(transcriptMessages(replies, seedCarry(beforeTS, a.botUserID)))
 	flags.truncated = flags.truncated || capped
 	return replies, entries
+}
+
+func bareJoinCursor(joinedAt, request string) string {
+	if joinedAt == "" || strings.TrimSpace(request) != "" {
+		return ""
+	}
+	return threadStartCursor
 }
 
 func consentPrompt(request, originKind string, carried int, link string) string {
