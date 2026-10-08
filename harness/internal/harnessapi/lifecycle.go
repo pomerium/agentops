@@ -43,6 +43,8 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 	sessionID := b.sessionID
 	<-b.ready
 	<-b.consumed
+	b.permMu.Lock()
+	b.sendMu.Lock()
 	_ = b.session.Close()
 
 	b.sink.supersedeAll(ctx)
@@ -55,6 +57,8 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 	if err := s.store.DeletePodCommands(ctx, sessionID); err != nil {
 		s.log.WarnContext(ctx, "could not clear the commands of a stopped session", "session", sessionID, "err", err)
 	}
+	b.sendMu.Unlock()
+	b.permMu.Unlock()
 
 	suspended := false
 	if spec.suspend != pb.Reason_REASON_UNSPECIFIED {

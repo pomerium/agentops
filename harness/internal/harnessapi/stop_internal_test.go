@@ -327,3 +327,54 @@ func TestAnEndWhoseEventsWereNotSavedCanBeRetried(t *testing.T) {
 		t.Errorf("the retried end recorded %v, want it to close with state_changed and session_ended", kinds)
 	}
 }
+
+type pausedCommandSave struct {
+	Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *pausedCommandSave) PutPodCommand(ctx context.Context, cmd sessionstore.PodCommand) error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return s.Store.PutPodCommand(ctx, cmd)
+}
+
+func TestAStopWaitsForAnAcceptedPromptSave(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	sess, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	save := &pausedCommandSave{Store: st, entered: make(chan struct{}), release: make(chan struct{})}
+	svc.store = save
+	sent := make(chan error, 1)
+	go func() {
+		_, err := svc.startTurn(ctx, sess, "old work")
+		sent <- err
+	}()
+	<-save.entered
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(save.release)
+	<-sent
+	<-stopped
+
+	cmds, err := st.ListPodCommands(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListPodCommands: %v", err)
+	}
+	if len(cmds) != 0 {
+		t.Errorf("a stopped session kept saved commands: %v", cmds)
+	}
+}
