@@ -1,13 +1,3 @@
-// Package mdsplit splits Markdown text into size-bounded parts on structural
-// boundaries. It is used to fit agent output into Slack messages (and the
-// section blocks within them), each of which has a hard byte ceiling.
-//
-// Splitting prefers, in order: between paragraphs (blank-line-separated
-// blocks), then between lines, then — only for a single line longer than the
-// limit — between runes. A fenced code block is never cut in the middle; an
-// oversized one is re-split with its fence repeated so each part stays a valid
-// code block. A table is likewise kept whole, repeating its header + separator
-// row when it must be split, so neither half renders as broken.
 package mdsplit
 
 import (
@@ -15,9 +5,6 @@ import (
 	"unicode/utf8"
 )
 
-// Split breaks text into the fewest parts each at most limit bytes. It always
-// returns at least one part. When every structural block already fits, joining
-// the parts reproduces the input exactly.
 func Split(text string, limit int) []string {
 	if limit <= 0 || len(text) <= limit {
 		return []string{text}
@@ -51,10 +38,6 @@ func Split(text string, limit int) []string {
 	return parts
 }
 
-// blocks tokenizes text into the units that should ideally stay together: each
-// fenced code block is one unit, and every other paragraph (a run of non-blank
-// lines plus its trailing blank line) is one unit. Concatenating the units
-// reproduces the input.
 func blocks(text string) []string {
 	lines := strings.SplitAfter(text, "\n")
 	var out []string
@@ -68,7 +51,7 @@ func blocks(text string) []string {
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
-		if line == "" { // trailing artifact of SplitAfter
+		if line == "" {
 			continue
 		}
 		trimmed := strings.TrimSpace(line)
@@ -89,7 +72,7 @@ func blocks(text string) []string {
 		}
 
 		cur.WriteString(line)
-		if trimmed == "" { // blank line closes the current paragraph
+		if trimmed == "" {
 			flush()
 		}
 	}
@@ -97,8 +80,6 @@ func blocks(text string) []string {
 	return out
 }
 
-// splitBlock hard-splits a single block that exceeds the limit, choosing the
-// strategy that keeps the block's structure readable.
 func splitBlock(blk string, limit int) []string {
 	if marker := fenceMarker(strings.TrimSpace(firstLine(blk))); marker != "" {
 		return splitCodeBlock(blk, marker, limit)
@@ -109,14 +90,11 @@ func splitBlock(blk string, limit int) []string {
 	return packLines(strings.SplitAfter(blk, "\n"), limit)
 }
 
-// splitCodeBlock splits an oversized fenced block, repeating the opening fence
-// and a closing fence on every part.
 func splitCodeBlock(blk, marker string, limit int) []string {
 	lines := strings.SplitAfter(blk, "\n")
 	open := lines[0]
 	rest := lines[1:]
 
-	// Peel off the trailing closing fence so we can re-add it per part.
 	closeLine := marker
 	for last := len(rest) - 1; last >= 0; last-- {
 		if rest[last] == "" {
@@ -129,10 +107,10 @@ func splitCodeBlock(blk, marker string, limit int) []string {
 		break
 	}
 
-	overhead := len(open) + len(closeLine) + 1 // +1 for the newline before close
+	overhead := len(open) + len(closeLine) + 1
 	budget := limit - overhead
 	if budget <= 0 {
-		budget = limit / 2 // degenerate: fence longer than the limit
+		budget = limit / 2
 	}
 
 	var parts []string
@@ -152,8 +130,6 @@ func splitCodeBlock(blk, marker string, limit int) []string {
 	return parts
 }
 
-// splitTable splits an oversized table, repeating the header and separator rows
-// on every part.
 func splitTable(blk string, limit int) []string {
 	lines := nonEmpty(strings.SplitAfter(blk, "\n"))
 	if len(lines) < 2 {
@@ -177,8 +153,6 @@ func splitTable(blk string, limit int) []string {
 	return parts
 }
 
-// packLines greedily concatenates lines into parts of at most limit bytes,
-// rune-splitting any single line that is itself too long.
 func packLines(lines []string, limit int) []string {
 	var parts []string
 	var cur strings.Builder
@@ -206,7 +180,6 @@ func packLines(lines []string, limit int) []string {
 	return parts
 }
 
-// runeSplit cuts s into pieces of at most limit bytes, never inside a rune.
 func runeSplit(s string, limit int) []string {
 	var parts []string
 	for len(s) > limit {
@@ -214,7 +187,7 @@ func runeSplit(s string, limit int) []string {
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}
-		if cut == 0 { // a single rune wider than the limit; cut anyway
+		if cut == 0 {
 			cut = limit
 		}
 		parts = append(parts, s[:cut])
@@ -226,7 +199,6 @@ func runeSplit(s string, limit int) []string {
 	return parts
 }
 
-// fenceMarker returns the backtick/tilde run that opens a code fence, or "".
 func fenceMarker(trimmed string) string {
 	for _, c := range []byte{'`', '~'} {
 		if n := runLen(trimmed, c); n >= 3 {
@@ -236,8 +208,6 @@ func fenceMarker(trimmed string) string {
 	return ""
 }
 
-// isClosingFence reports whether trimmed is a closing fence for marker: the
-// same character, at least as long, and nothing else on the line.
 func isClosingFence(trimmed, marker string) bool {
 	if marker == "" || trimmed == "" {
 		return false
@@ -249,8 +219,6 @@ func isClosingFence(trimmed, marker string) bool {
 	return len(trimmed) >= len(marker)
 }
 
-// isTable reports whether blk is a pipe table: its second non-blank line is a
-// separator row (dashes, optional colons and pipes).
 func isTable(blk string) bool {
 	lines := nonEmpty(strings.SplitAfter(blk, "\n"))
 	if len(lines) < 2 {

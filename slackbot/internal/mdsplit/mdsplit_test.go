@@ -5,10 +5,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/pomerium/agentops/internal/mdsplit"
+	"github.com/pomerium/agentops/slackbot/internal/mdsplit"
 )
 
-// Text already within the limit is returned as a single, untouched part.
 func TestSplitShortTextUnchanged(t *testing.T) {
 	in := "# Title\n\nA short paragraph.\n"
 	got := mdsplit.Split(in, 1000)
@@ -17,7 +16,6 @@ func TestSplitShortTextUnchanged(t *testing.T) {
 	}
 }
 
-// Every emitted part stays within the byte limit.
 func TestSplitEveryPartWithinLimit(t *testing.T) {
 	limit := 200
 	var b strings.Builder
@@ -31,8 +29,6 @@ func TestSplitEveryPartWithinLimit(t *testing.T) {
 	}
 }
 
-// Splitting on paragraph boundaries is lossless: rejoining the parts of a
-// document whose blocks each fit reproduces the original exactly.
 func TestSplitParagraphsAreLossless(t *testing.T) {
 	var b strings.Builder
 	for range 30 {
@@ -48,8 +44,6 @@ func TestSplitParagraphsAreLossless(t *testing.T) {
 	}
 }
 
-// A fenced code block that fits within the limit is never cut in the middle —
-// it lands whole inside one part.
 func TestSplitKeepsCodeBlockIntact(t *testing.T) {
 	pre := strings.Repeat("filler line\n", 20) + "\n"
 	code := "```go\nfunc main() {\n\tprintln(\"hi\")\n}\n```\n"
@@ -69,8 +63,6 @@ func TestSplitKeepsCodeBlockIntact(t *testing.T) {
 	}
 }
 
-// An oversized code block is split, but each part stays a self-contained fenced
-// block (opening fence + closing fence), so neither half renders as broken.
 func TestSplitReFencesOversizedCodeBlock(t *testing.T) {
 	var body strings.Builder
 	for range 100 {
@@ -94,8 +86,6 @@ func TestSplitReFencesOversizedCodeBlock(t *testing.T) {
 	}
 }
 
-// A markdown table that fits within the limit is kept in a single part — its
-// rows are never scattered across messages.
 func TestSplitKeepsTableIntact(t *testing.T) {
 	pre := strings.Repeat("intro line\n", 15) + "\n"
 	table := "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n"
@@ -112,8 +102,6 @@ func TestSplitKeepsTableIntact(t *testing.T) {
 	}
 }
 
-// An oversized table repeats its header + separator row on each part so every
-// piece reads as a valid standalone table.
 func TestSplitRepeatsTableHeaderWhenOversized(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("| name | value |\n| --- | --- |\n")
@@ -134,8 +122,6 @@ func TestSplitRepeatsTableHeaderWhenOversized(t *testing.T) {
 	}
 }
 
-// A single line longer than the limit is the degenerate case: it still gets
-// cut, on rune boundaries, with no part exceeding the limit.
 func TestSplitHardSplitsOversizedLine(t *testing.T) {
 	in := strings.Repeat("x", 1000)
 	parts := mdsplit.Split(in, 256)
@@ -152,9 +138,8 @@ func TestSplitHardSplitsOversizedLine(t *testing.T) {
 	}
 }
 
-// Multi-byte runes are never cut mid-rune.
 func TestSplitRuneSafe(t *testing.T) {
-	in := strings.Repeat("héllo wörld ", 100) // mixed multi-byte runes
+	in := strings.Repeat("héllo wörld ", 100)
 	for i, p := range mdsplit.Split(in, 50) {
 		if !utf8.ValidString(p) {
 			t.Errorf("part %d contains an invalid UTF-8 sequence: %q", i, p)

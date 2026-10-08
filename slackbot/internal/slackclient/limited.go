@@ -4,54 +4,40 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v7"
 	"github.com/slack-go/slack"
 	"golang.org/x/time/rate"
 )
 
-// Sender is the underlying Slack sender Limited wraps (implemented by
-// *Poster).
 type Sender interface {
 	PostMessage(ctx context.Context, channelID string, opts ...slack.MsgOption) (string, error)
 	PostEphemeral(ctx context.Context, channelID, userID string, opts ...slack.MsgOption) (string, error)
 	UpdateMessage(ctx context.Context, channelID, ts string, opts ...slack.MsgOption) (string, error)
+	DeleteMessage(ctx context.Context, channelID, ts string) error
 	AddReaction(ctx context.Context, channelID, timestamp, emoji string) error
 	RemoveReaction(ctx context.Context, channelID, timestamp, emoji string) error
 	Respond(ctx context.Context, responseURL string, replaceOriginal bool, text string, blocks []slack.Block) error
-	ThreadReplies(ctx context.Context, channelID, threadTS string, max int) ([]slack.Message, error)
+	ThreadReplies(ctx context.Context, channelID, threadTS, since string, max int) ([]slack.Message, error)
 	Permalink(ctx context.Context, channelID, ts string) (string, error)
 }
 
-// Limits are the token-bucket parameters for each Slack Web API budget the
-// wrapper models.
 type Limits struct {
-	// PostPerChannel paces chat.postMessage / chat.postEphemeral per channel
-	// (Slack's special tier: ~1 message/sec/channel, short bursts tolerated).
-	PostPerChannel rate.Limit
-	PostBurst      int
-	// UpdateFinal paces guaranteed chat.update calls (a turn's final flush and
-	// pre-rollover updates) per channel.
-	UpdateFinal      rate.Limit
-	UpdateFinalBurst int
-	// UpdateStream paces coalesced (droppable) chat.update calls per channel.
-	// It is a separate bucket from UpdateFinal so a chatty stream can never
-	// consume the budget a final answer needs.
+	PostPerChannel    rate.Limit
+	PostBurst         int
+	UpdateFinal       rate.Limit
+	UpdateFinalBurst  int
 	UpdateStream      rate.Limit
 	UpdateStreamBurst int
-	// Reactions paces reactions.add/remove (Tier 3), shared across channels.
-	Reactions      rate.Limit
-	ReactionsBurst int
-	// Global is a workspace-wide backstop across all guaranteed sends.
-	Global      rate.Limit
-	GlobalBurst int
+	Reactions         rate.Limit
+	ReactionsBurst    int
+	Global            rate.Limit
+	GlobalBurst       int
 }
 
-// DefaultLimits approximates Slack's documented budgets, deliberately
-// conservative: chat.postMessage is ~1/sec/channel; chat.update and
-// reactions.* are Tier 3 (~50/min), with the update budget split between
-// guaranteed finals and droppable streams.
 func DefaultLimits() Limits {
 	return Limits{
 		PostPerChannel: rate.Every(1100 * time.Millisecond), PostBurst: 3,
@@ -62,34 +48,16 @@ func DefaultLimits() Limits {
 	}
 }
 
-// rateLimitedRetries bounds how many Slack 429s a guaranteed send absorbs
-// (sleeping each Retry-After) before giving up and returning the error.
 const rateLimitedRetries = 3
 
-// workerPollInterval is the fallback cadence at which the coalescing worker
-// re-checks parked updates when no new ones arrive to wake it (e.g. after the
-// stream bucket ran dry mid-drain).
 const workerPollInterval = 100 * time.Millisecond
 
-// pendingUpdate is the latest parked coalesced update for one message.
 type pendingUpdate struct {
 	channel string
 	ts      string
 	opts    []slack.MsgOption
 }
 
-// Limited enforces Slack's posting rate limits over a Sender with two delivery
-// classes:
-//
-//   - Guaranteed — posts, reactions, ephemeral/webhook responses, and final
-//     message updates. These wait for budget (and honor 429 Retry-After) but
-//     are never dropped.
-//   - Coalesced — mid-turn streaming updates via UpdateMessageDebounced. Each
-//     message has a single pending slot: a newer update replaces the parked one
-//     (last-one-wins; intermediate content is eaten, never queued). A worker
-//     drains slots round-robin so one chatty message can't starve others, and
-//     only when its bucket has spare capacity right now, so coalesced traffic
-//     never delays guaranteed sends.
 type Limited struct {
 	next Sender
 	log  *slog.Logger
@@ -98,23 +66,21 @@ type Limited struct {
 	reactions *rate.Limiter
 
 	mu        sync.Mutex
-	posts     map[string]*rate.Limiter // channel -> chat.postMessage bucket
-	updFinal  map[string]*rate.Limiter // channel -> guaranteed chat.update bucket
-	updStream map[string]*rate.Limiter // channel -> coalesced chat.update bucket
+	posts     map[string]*rate.Limiter
+	updFinal  map[string]*rate.Limiter
+	updStream map[string]*rate.Limiter
 	pending   map[string]*pendingUpdate
-	order     []string               // round-robin queue of pending keys
-	sendMu    map[string]*sync.Mutex // per-message lock: a final update waits out an in-flight coalesced send
+	order     []string
+	sendMu    map[string]*sync.Mutex
 
 	lim  Limits
 	wake chan struct{}
 }
 
-// NewLimited wraps next with DefaultLimits.
 func NewLimited(next Sender, log *slog.Logger) *Limited {
 	return NewLimitedWith(next, DefaultLimits(), log)
 }
 
-// NewLimitedWith wraps next with explicit limits. log may be nil.
 func NewLimitedWith(next Sender, lim Limits, log *slog.Logger) *Limited {
 	if log == nil {
 		log = slog.Default()
@@ -138,8 +104,6 @@ func NewLimitedWith(next Sender, lim Limits, log *slog.Logger) *Limited {
 
 func updateKey(channel, ts string) string { return channel + "|" + ts }
 
-// limiterFor returns the lazily created bucket for a channel from the given
-// class map.
 func (l *Limited) limiterFor(m map[string]*rate.Limiter, channel string, limit rate.Limit, burst int) *rate.Limiter {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -151,7 +115,6 @@ func (l *Limited) limiterFor(m map[string]*rate.Limiter, channel string, limit r
 	return lim
 }
 
-// keyMu returns the per-message send lock for key.
 func (l *Limited) keyMu(key string) *sync.Mutex {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -163,8 +126,6 @@ func (l *Limited) keyMu(key string) *sync.Mutex {
 	return mu
 }
 
-// guaranteed waits for the class and global buckets, then sends, absorbing a
-// bounded number of 429s (sleeping each Retry-After). It never drops the send.
 func (l *Limited) guaranteed(ctx context.Context, bucket *rate.Limiter, send func(context.Context) error) error {
 	if err := l.global.Wait(ctx); err != nil {
 		return err
@@ -172,20 +133,27 @@ func (l *Limited) guaranteed(ctx context.Context, bucket *rate.Limiter, send fun
 	if err := bucket.Wait(ctx); err != nil {
 		return err
 	}
-	for attempt := 0; ; attempt++ {
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
 		err := send(ctx)
 		var rl *slack.RateLimitedError
-		if errors.As(err, &rl) && attempt < rateLimitedRetries {
-			l.log.WarnContext(ctx, "slack rate limited; retrying", "retry_after", rl.RetryAfter, "attempt", attempt+1)
-			select {
-			case <-time.After(rl.RetryAfter):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			continue
+		if errors.As(err, &rl) {
+			return struct{}{}, backoff.RetryAfter(rl.RetryAfter, err)
 		}
-		return err
+		return struct{}{}, backoff.Permanent(err)
+	},
+		backoff.WithBackOff(backoff.NewConstantBackOff(0)),
+		backoff.WithMaxTries(rateLimitedRetries+1),
+		backoff.WithMaxElapsedTime(0),
+		backoff.WithNotify(func(err error, next time.Duration) {
+			l.log.WarnContext(ctx, "slack rate limited; retrying", "retry_after", next, "err", err)
+		}))
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
 	}
+	if re := backoff.AsRetryError(err); re != nil {
+		return re.LastErr
+	}
+	return err
 }
 
 func (l *Limited) PostMessage(ctx context.Context, channelID string, opts ...slack.MsgOption) (string, error) {
@@ -210,11 +178,6 @@ func (l *Limited) PostEphemeral(ctx context.Context, channelID, userID string, o
 	return ts, err
 }
 
-// UpdateMessage is the guaranteed update path (a turn's final flush). It
-// cancels any pending coalesced update for the same message — without this, a
-// parked stale update could land after the final one and resurrect mid-turn
-// narration — and waits out an in-flight coalesced send for the message so the
-// final content always lands last.
 func (l *Limited) UpdateMessage(ctx context.Context, channelID, ts string, opts ...slack.MsgOption) (string, error) {
 	key := updateKey(channelID, ts)
 	l.cancelPending(key)
@@ -232,10 +195,27 @@ func (l *Limited) UpdateMessage(ctx context.Context, channelID, ts string, opts 
 	return newTS, err
 }
 
-// UpdateMessageDebounced parks a coalesced update for the message; see the
-// type comment for its drop/last-one-wins semantics. The send happens
-// asynchronously (the passed ctx is not used for it), so a turn-scoped ctx
-// cancelling cannot lose a still-relevant update.
+func (l *Limited) DeleteMessage(ctx context.Context, channelID, ts string) error {
+	key := updateKey(channelID, ts)
+	l.cancelPending(key)
+	mu := l.keyMu(key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	bucket := l.limiterFor(l.updFinal, channelID, l.lim.UpdateFinal, l.lim.UpdateFinalBurst)
+	err := l.guaranteed(ctx, bucket, func(ctx context.Context) error {
+		return l.next.DeleteMessage(ctx, channelID, ts)
+	})
+	if err == nil {
+		l.mu.Lock()
+		if l.sendMu[key] == mu {
+			delete(l.sendMu, key)
+		}
+		l.mu.Unlock()
+	}
+	return err
+}
+
 func (l *Limited) UpdateMessageDebounced(_ context.Context, channelID, ts string, opts ...slack.MsgOption) {
 	key := updateKey(channelID, ts)
 	l.mu.Lock()
@@ -262,8 +242,6 @@ func (l *Limited) RemoveReaction(ctx context.Context, channelID, timestamp, emoj
 	})
 }
 
-// Respond goes through the global backstop only: response_url webhooks have
-// their own generous per-URL budget on Slack's side.
 func (l *Limited) Respond(ctx context.Context, responseURL string, replaceOriginal bool, text string, blocks []slack.Block) error {
 	if err := l.global.Wait(ctx); err != nil {
 		return err
@@ -271,14 +249,11 @@ func (l *Limited) Respond(ctx context.Context, responseURL string, replaceOrigin
 	return l.next.Respond(ctx, responseURL, replaceOriginal, text, blocks)
 }
 
-// ThreadReplies and Permalink are low-volume reads (one fetch and a few
-// permalinks per loop-in session), so like Respond they go through the global
-// backstop only.
-func (l *Limited) ThreadReplies(ctx context.Context, channelID, threadTS string, max int) ([]slack.Message, error) {
+func (l *Limited) ThreadReplies(ctx context.Context, channelID, threadTS, since string, max int) ([]slack.Message, error) {
 	if err := l.global.Wait(ctx); err != nil {
 		return nil, err
 	}
-	return l.next.ThreadReplies(ctx, channelID, threadTS, max)
+	return l.next.ThreadReplies(ctx, channelID, threadTS, since, max)
 }
 
 func (l *Limited) Permalink(ctx context.Context, channelID, ts string) (string, error) {
@@ -288,7 +263,6 @@ func (l *Limited) Permalink(ctx context.Context, channelID, ts string) (string, 
 	return l.next.Permalink(ctx, channelID, ts)
 }
 
-// cancelPending drops the parked coalesced update for key, if any.
 func (l *Limited) cancelPending(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -296,29 +270,28 @@ func (l *Limited) cancelPending(key string) {
 		return
 	}
 	delete(l.pending, key)
-	for i, k := range l.order {
-		if k == key {
-			l.order = append(l.order[:i], l.order[i+1:]...)
-			break
-		}
+	if i := slices.Index(l.order, key); i >= 0 {
+		l.order = slices.Delete(l.order, i, i+1)
 	}
 }
 
-// runWorker drains parked coalesced updates for the lifetime of the process
-// (the wrapper is built once at startup).
 func (l *Limited) runWorker() {
 	for {
+		l.mu.Lock()
+		idle := len(l.pending) == 0
+		l.mu.Unlock()
+		var poll <-chan time.Time
+		if !idle {
+			poll = time.After(workerPollInterval)
+		}
 		select {
 		case <-l.wake:
-		case <-time.After(workerPollInterval):
+		case <-poll:
 		}
 		l.drain()
 	}
 }
 
-// drain sends parked updates while any key has budget, visiting keys in FIFO
-// order (round-robin: a sent or skipped key goes to the back via re-parking,
-// so a hot key can't shadow the others).
 func (l *Limited) drain() {
 	for {
 		up, key, ok := l.nextSendable()
@@ -327,14 +300,10 @@ func (l *Limited) drain() {
 		}
 		mu := l.keyMu(key)
 		mu.Lock()
-		// Sends use a background ctx: the parking caller's request ctx is long
-		// gone, and a turn-scoped cancellation must not lose the update.
 		_, err := l.next.UpdateMessage(context.Background(), up.channel, up.ts, up.opts...)
 		mu.Unlock()
 		if err != nil {
 			l.log.Debug("coalesced update failed; re-parking", "channel", up.channel, "ts", up.ts, "err", err)
-			// Re-park unless a newer update (or a cancel) replaced the slot, then
-			// back off until the next wake/poll.
 			l.mu.Lock()
 			if _, exists := l.pending[key]; !exists {
 				l.pending[key] = up
@@ -346,9 +315,6 @@ func (l *Limited) drain() {
 	}
 }
 
-// nextSendable pops the first parked key whose stream bucket (and the global
-// backstop) has a token available right now. Keys without budget are rotated
-// to the back; it reports !ok once no key is currently sendable.
 func (l *Limited) nextSendable() (*pendingUpdate, string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -357,7 +323,7 @@ func (l *Limited) nextSendable() (*pendingUpdate, string, bool) {
 		l.order = l.order[1:]
 		up, ok := l.pending[key]
 		if !ok {
-			continue // cancelled
+			continue
 		}
 		bucket, exists := l.updStream[up.channel]
 		if !exists {
@@ -365,7 +331,7 @@ func (l *Limited) nextSendable() (*pendingUpdate, string, bool) {
 			l.updStream[up.channel] = bucket
 		}
 		if !bucket.Allow() {
-			l.order = append(l.order, key) // no budget now; rotate to the back
+			l.order = append(l.order, key)
 			continue
 		}
 		delete(l.pending, key)

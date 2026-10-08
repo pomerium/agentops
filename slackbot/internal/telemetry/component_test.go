@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pomerium/agentops/harness/internal/telemetry"
+	"github.com/pomerium/agentops/slackbot/internal/telemetry"
 )
 
 func capture(level slog.Level) (*slog.Logger, *bytes.Buffer) {

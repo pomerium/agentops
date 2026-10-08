@@ -12,21 +12,19 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// sentMsg records one delivered post/update with its rendered content.
 type sentMsg struct {
 	channel string
 	ts      string
 	text    string
 }
 
-// fakeSender is a scriptable Sender: optional per-call latency (to simulate
-// the Slack API round-trip) and scripted PostMessage errors.
 type fakeSender struct {
 	mu             sync.Mutex
 	latency        time.Duration
-	postErrs       []error // popped per PostMessage call; nil entry = success
+	postErrs       []error
 	posts          []sentMsg
 	updates        []sentMsg
+	deletes        []sentMsg
 	repliesCalls   []string
 	permalinkCalls []string
 }
@@ -77,13 +75,23 @@ func (f *fakeSender) UpdateMessage(_ context.Context, channel, ts string, opts .
 	return ts, nil
 }
 
+func (f *fakeSender) DeleteMessage(_ context.Context, channel, ts string) error {
+	if f.latency > 0 {
+		time.Sleep(f.latency)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deletes = append(f.deletes, sentMsg{channel: channel, ts: ts})
+	return nil
+}
+
 func (f *fakeSender) AddReaction(context.Context, string, string, string) error    { return nil }
 func (f *fakeSender) RemoveReaction(context.Context, string, string, string) error { return nil }
 func (f *fakeSender) Respond(context.Context, string, bool, string, []slack.Block) error {
 	return nil
 }
 
-func (f *fakeSender) ThreadReplies(_ context.Context, channel, threadTS string, _ int) ([]slack.Message, error) {
+func (f *fakeSender) ThreadReplies(_ context.Context, channel, threadTS, _ string, _ int) ([]slack.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.repliesCalls = append(f.repliesCalls, channel+"|"+threadTS)
@@ -130,8 +138,6 @@ func (f *fakeSender) updatesFor(ts string) int {
 	return n
 }
 
-// openLimits never throttles anything — for tests exercising semantics, not
-// pacing.
 func openLimits() Limits {
 	return Limits{
 		PostPerChannel: rate.Inf, PostBurst: 1,
@@ -142,8 +148,6 @@ func openLimits() Limits {
 	}
 }
 
-// A storm of debounced updates for one message collapses: far fewer calls
-// reach Slack and the LAST content is what lands (last-one-wins, never queued).
 func TestLimitedCoalescesUpdateStorm(t *testing.T) {
 	f := &fakeSender{latency: 5 * time.Millisecond}
 	l := NewLimitedWith(f, openLimits(), nil)
@@ -165,12 +169,10 @@ func TestLimitedCoalescesUpdateStorm(t *testing.T) {
 	}
 }
 
-// Parked coalesced updates must never block or consume the guaranteed path:
-// with the stream bucket fully closed, a PostMessage still goes out.
 func TestLimitedStormDoesNotBlockGuaranteed(t *testing.T) {
 	f := &fakeSender{}
 	lim := openLimits()
-	lim.UpdateStream, lim.UpdateStreamBurst = 0, 0 // stream bucket closed: parked updates can never send
+	lim.UpdateStream, lim.UpdateStreamBurst = 0, 0
 	l := NewLimitedWith(f, lim, nil)
 
 	for i := range 10 {
@@ -187,13 +189,10 @@ func TestLimitedStormDoesNotBlockGuaranteed(t *testing.T) {
 	}
 }
 
-// A guaranteed UpdateMessage (a turn's final flush) cancels any pending
-// coalesced update for the same message, so stale narration can't land after
-// the final answer.
 func TestLimitedFinalUpdateCancelsPending(t *testing.T) {
 	f := &fakeSender{}
 	lim := openLimits()
-	lim.UpdateStream, lim.UpdateStreamBurst = 0, 0 // park the stale update forever
+	lim.UpdateStream, lim.UpdateStreamBurst = 0, 0
 	l := NewLimitedWith(f, lim, nil)
 
 	l.UpdateMessageDebounced(context.Background(), "C1", "ts1", slack.MsgOptionText("stale narration", false))
@@ -213,14 +212,12 @@ func TestLimitedFinalUpdateCancelsPending(t *testing.T) {
 	if pending != 0 {
 		t.Errorf("pending coalesced update should be cancelled by the final update, %d left", pending)
 	}
-	time.Sleep(150 * time.Millisecond) // give the worker a chance to misbehave
+	time.Sleep(150 * time.Millisecond)
 	if got := f.updateCount(); got != 1 {
 		t.Errorf("stale update resurrected after the final one: %d updates", got)
 	}
 }
 
-// One chatty message can't starve another: while key A is stormed
-// continuously, a single parked update for key B still gets through.
 func TestLimitedRoundRobinAcrossKeys(t *testing.T) {
 	f := &fakeSender{latency: 5 * time.Millisecond}
 	l := NewLimitedWith(f, openLimits(), nil)
@@ -251,7 +248,6 @@ func TestLimitedRoundRobinAcrossKeys(t *testing.T) {
 	}
 }
 
-// Guaranteed sends honor Slack 429s: wait RetryAfter, retry, succeed.
 func TestLimitedRetriesRateLimited(t *testing.T) {
 	f := &fakeSender{postErrs: []error{&slack.RateLimitedError{RetryAfter: 5 * time.Millisecond}, nil}}
 	l := NewLimitedWith(f, openLimits(), nil)
@@ -264,13 +260,11 @@ func TestLimitedRetriesRateLimited(t *testing.T) {
 	}
 }
 
-// ThreadReplies and Permalink pass through to the wrapped sender (gated only
-// by the global backstop).
 func TestLimitedThreadRepliesAndPermalinkPassThrough(t *testing.T) {
 	f := &fakeSender{}
 	l := NewLimitedWith(f, openLimits(), nil)
 
-	msgs, err := l.ThreadReplies(context.Background(), "C1", "1.0", 10)
+	msgs, err := l.ThreadReplies(context.Background(), "C1", "1.0", "", 10)
 	if err != nil || len(msgs) != 1 || msgs[0].Text != "root" {
 		t.Errorf("ThreadReplies = (%v, %v), want the wrapped sender's reply", msgs, err)
 	}

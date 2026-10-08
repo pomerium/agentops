@@ -20,6 +20,9 @@ BUF            ?= go tool buf
 HARNESS_DIR ?= harness
 HARNESS_GO  ?= cd $(HARNESS_DIR) && GOWORK=off go
 
+SLACKBOT_DIR ?= slackbot
+SLACKBOT_GO  ?= cd $(SLACKBOT_DIR) && GOWORK=off go
+
 # Kustomize overlay to render/apply: dev or prod.
 OVERLAY ?= dev
 
@@ -34,11 +37,13 @@ CHART_DIR ?= deploy/helm
 build:
 	go build ./...
 	$(HARNESS_GO) build ./...
+	$(SLACKBOT_GO) build ./...
 
 ## test: run the test suite.
 test:
 	go test ./...
 	$(HARNESS_GO) test ./...
+	$(SLACKBOT_GO) test ./...
 
 ## test-e2e: run the opt-in end-to-end harness tests (needs Docker + an
 ## Anthropic key in ANTHROPIC_API_KEY or ~/tmp/keys/claude_api_key.txt). These
@@ -51,6 +56,7 @@ test-e2e:
 vet:
 	go vet ./...
 	$(HARNESS_GO) vet ./...
+	$(SLACKBOT_GO) vet ./...
 
 ## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
 ## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
@@ -125,6 +131,7 @@ proto-lint:
 tidy:
 	go mod tidy
 	$(HARNESS_GO) mod tidy
+	$(SLACKBOT_GO) mod tidy
 
 ## docker-build: build the app container image (local tag).
 docker-build:
