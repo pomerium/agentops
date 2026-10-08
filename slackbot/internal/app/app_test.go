@@ -401,6 +401,23 @@ func TestStartupFollowsALiveSessionFromWhereItsThreadLeftOff(t *testing.T) {
 	waitFor(t, "the owner's next turn", func() bool { return len(f.api.promptRequests()) == 1 })
 }
 
+func TestStartupFollowsASessionPastAPauseItMissed(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateRunning, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1", "last_seq": 1,
+	})
+	f.api.emit("old-1", "t1", &pb.TurnCompleted{})
+	f.api.setState("old-1", api.StateRunning, api.StateSuspended, api.ReasonIdle)
+	f.api.emit("old-1", "", &pb.Suspended{Reason: api.ReasonIdle})
+	f.api.setState("old-1", api.StateSuspended, api.StateRunning, noReason)
+	f.api.emit("old-1", "t2", &pb.AgentMessage{PartId: "t2.1", Text: "continued after the pause", Final: true})
+
+	f.app.ReconcileOnStartup(context.Background())
+	f.poster.waitForPost(t, "continued after the pause")
+	f.api.emit("old-1", "t3", &pb.AgentMessage{PartId: "t3.1", Text: "and still followed", Final: true})
+	f.poster.waitForPost(t, "and still followed")
+}
+
 func TestStartupLeavesTheSessionsItAlreadyFollowsAlone(t *testing.T) {
 	f := newFixture(t)
 	f.app.HandleMention(context.Background(), mention(f, "ship it"))

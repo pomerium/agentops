@@ -234,6 +234,7 @@ func (f *fakeAPI) emit(sessionID, turnID string, payload proto.Message) {
 	ev := &pb.Event{SessionId: sessionID, Seq: f.seq, TurnId: turnID, Timestamp: timestamppb.Now()}
 	setPayload(ev, payload)
 	if view, ok := f.sessions[sessionID]; ok {
+		view.LastSeq = ev.Seq
 		if p := ev.GetStateChanged(); p != nil {
 			view.State = p.GetNew()
 		}
