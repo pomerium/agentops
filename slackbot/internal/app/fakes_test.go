@@ -494,6 +494,7 @@ func (p *fakePoster) UpdateMessage(_ context.Context, channelID, ts string, opts
 		if p.posted[i].Timestamp == ts {
 			p.posted[i].Text = sent.text
 			p.posted[i].Metadata = sent.meta
+			p.posted[i].Edited = &slack.Edited{User: "UBOT", Timestamp: p.clock.next()}
 		}
 	}
 	return ts, nil

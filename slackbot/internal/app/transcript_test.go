@@ -183,6 +183,22 @@ func TestSessionTranscriptSinceCarriesUntaggedBotMessages(t *testing.T) {
 	}
 }
 
+func TestCatchupCarriesAPeerAnswerFinishedAfterTheCursor(t *testing.T) {
+	answer := ourTaggedAnswer("1.0002", "peer", "checking staging …")
+	answer.Text = "staging failed; do not promote"
+	answer.Edited = &slack.Edited{User: "U0BOT", Timestamp: "1.0004"}
+
+	got := sessionTranscript([]slack.Message{answer}, catchupCarry("1.0003", "1.0005", "U0BOT", "self", "UA"))
+	if !strings.Contains(texts(got), "staging failed; do not promote") {
+		t.Fatalf("a peer's answer finished after the cursor was skipped:\n%s", texts(got))
+	}
+
+	answer.Edited.Timestamp = "1.00025"
+	if got := sessionTranscript([]slack.Message{answer}, catchupCarry("1.0003", "1.0005", "U0BOT", "self", "UA")); len(got) != 0 {
+		t.Errorf("an answer finished before the cursor was carried again:\n%s", texts(got))
+	}
+}
+
 func TestComposeCatchupBlockEmptyDelta(t *testing.T) {
 	if got := composeCatchupBlock(nil, false); got != "" {
 		t.Errorf("an empty delta must produce no block, got %q", got)
