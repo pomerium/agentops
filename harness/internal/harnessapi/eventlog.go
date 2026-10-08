@@ -65,9 +65,12 @@ func (l *durableLog) append(ctx context.Context, ev *pb.Event, podSeq uint64) er
 
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	var seq int64
-	if podSeq > 0 {
+	switch {
+	case podSeq > 0 && ev.GetTurnId() != "" && (ev.GetTurnCompleted() != nil || ev.GetTurnFailed() != nil):
+		seq, err = l.store.AppendPodTurnEnd(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body, int64(podSeq))
+	case podSeq > 0:
 		seq, err = l.store.AppendPodEvent(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body, int64(podSeq))
-	} else {
+	default:
 		seq, err = l.store.AppendSessionEvent(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body)
 	}
 	if err != nil {

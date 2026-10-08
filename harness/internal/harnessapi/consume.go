@@ -150,9 +150,6 @@ func (s *Service) handleEvent(ctx context.Context, b *binding, ev *agentlinkpb.A
 	b.session.Ack(seq)
 	if ev.GetTurnFinished() != nil {
 		b.leave(turnID)
-		if err := s.store.DeletePodCommandsForTurn(ctx, b.sessionID, turnID); err != nil {
-			s.log.WarnContext(ctx, "could not clear the commands of a finished turn", "session", b.sessionID, "turn_id", turnID, "err", err)
-		}
 	}
 	return true
 }
