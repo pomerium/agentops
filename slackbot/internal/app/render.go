@@ -174,7 +174,7 @@ func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.St
 			a.markBusy(ctx, t)
 		}
 		a.swapReaction(ctx, t.channel, ackTS, reactionStarting, reactionReady)
-		a.editStatus(ctx, t, readyStatusFor(t.busy.Load() > 0))
+		a.editStatus(ctx, t, readyStatusFor(t.busy.Load() > 0, t.multiplayer()))
 		a.updateApprovalDM(ctx, t)
 	case api.StateSuspended:
 		switch p.GetReason() {
