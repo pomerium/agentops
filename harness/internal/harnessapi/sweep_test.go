@@ -10,7 +10,6 @@ import (
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
-	"github.com/pomerium/agentops/harness/internal/sandbox"
 )
 
 func TestIdleSweepWarnsThenSuspends(t *testing.T) {
@@ -63,7 +62,7 @@ func TestIdleSweepNeverReapsMidTurn(t *testing.T) {
 
 	release := make(chan struct{})
 	started := make(chan struct{})
-	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error) {
+	h.launcher.session.setScript(func(ctx context.Context, sink *fakeAgent, text string) (acp.StopReason, error) {
 		close(started)
 		<-release
 		sink.AgentMessage(ctx, "eventually: "+text)

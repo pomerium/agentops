@@ -6,10 +6,9 @@ import (
 	"testing"
 	"time"
 
-	acp "github.com/coder/acp-go-sdk"
-
 	"github.com/pomerium/agentops/harness/api"
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
@@ -27,12 +26,15 @@ func (quietLauncher) LeaseLength() time.Duration             { return 0 }
 
 type idleSession struct{}
 
-func (idleSession) ID() string { return "acp" }
-func (idleSession) Prompt(context.Context, string) (acp.StopReason, error) {
-	return acp.StopReasonEndTurn, nil
-}
-func (idleSession) Cancel(context.Context) error { return nil }
-func (idleSession) Close() error                 { return nil }
+func (idleSession) ID() string                              { return "acp" }
+func (idleSession) StreamID() []byte                        { return []byte("stream") }
+func (idleSession) ReadySeq() uint64                        { return 1 }
+func (idleSession) Inbox() <-chan *agentlinkpb.AgentIOFrame { return nil }
+func (idleSession) Done() <-chan struct{}                   { return nil }
+func (idleSession) Ack(uint64)                              {}
+func (idleSession) Prompt(string, uint64, string)           {}
+func (idleSession) Decide(string, string, bool)             {}
+func (idleSession) Close() error                            { return nil }
 
 func attach(svc *Service, b *binding) bool {
 	o := &owner{}
@@ -42,6 +44,7 @@ func attach(svc *Service, b *binding) bool {
 func readyBinding(svc *Service, sessionID string) *binding {
 	b := newBinding(sessionID, "claim", idleSession{}, newLogSink(svc, sessionID, time.Minute))
 	close(b.ready)
+	close(b.consumed)
 	return b
 }
 

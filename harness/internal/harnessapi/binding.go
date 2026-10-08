@@ -1,15 +1,20 @@
 package harnessapi
 
 import (
+	"cmp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 )
 
 type binding struct {
 	sessionID string
 	owner     *owner
 	claimName string
+	runID     string
 	session   LiveSession
 	sink      *logSink
 
@@ -17,13 +22,18 @@ type binding struct {
 
 	done chan struct{}
 
-	mu      sync.Mutex
-	closed  bool
-	settled *sync.Cond
-	issued  uint64
-	serving uint64
+	consumed chan struct{}
 
-	busy atomic.Int32
+	mu     sync.Mutex
+	closed bool
+	turns  []string
+
+	permMu sync.Mutex
+
+	sendMu  sync.Mutex
+	gated   bool
+	syncing bool
+	held    []*agentlinkpb.Prompt
 
 	lastActivity atomic.Int64
 
@@ -40,10 +50,21 @@ func newBinding(sessionID, claimName string, session LiveSession, sink *logSink)
 		sink:      sink,
 		ready:     make(chan struct{}),
 		done:      make(chan struct{}),
+		consumed:  make(chan struct{}),
 	}
-	b.settled = sync.NewCond(&b.mu)
 	b.touch()
 	return b
+}
+
+func (b *binding) release() {
+	if b.gated || b.syncing {
+		return
+	}
+	slices.SortFunc(b.held, func(x, y *agentlinkpb.Prompt) int { return cmp.Compare(x.GetTurnSeq(), y.GetTurnSeq()) })
+	for _, p := range b.held {
+		b.session.Prompt(p.GetTurnId(), p.GetTurnSeq(), p.GetText())
+	}
+	b.held = nil
 }
 
 func (b *binding) touch() {
@@ -52,62 +73,59 @@ func (b *binding) touch() {
 }
 
 func (b *binding) idleFor(now time.Time) time.Duration {
-	if b.busy.Load() > 0 {
+	b.mu.Lock()
+	busy := len(b.turns) > 0
+	b.mu.Unlock()
+	if busy {
 		return 0
 	}
 	return now.Sub(time.Unix(0, b.lastActivity.Load()))
 }
 
-func (b *binding) enter() (uint64, bool) {
+func (b *binding) enter(turnID string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed {
-		return 0, false
+		return false
 	}
-	b.busy.Add(1)
+	if !slices.Contains(b.turns, turnID) {
+		b.turns = append(b.turns, turnID)
+	}
 	b.touch()
-	ticket := b.issued
-	b.issued++
-	return ticket, true
+	return true
 }
 
-func (b *binding) awaitTurn(ticket uint64) {
+func (b *binding) leave(turnID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for b.serving != ticket {
-		b.settled.Wait()
+	if i := slices.Index(b.turns, turnID); i >= 0 {
+		b.turns = slices.Delete(b.turns, i, i+1)
 	}
+	b.touch()
 }
 
-func (b *binding) leave() {
+func (b *binding) setOutstanding(turnIDs []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.touch()
-	b.serving++
-	b.busy.Add(-1)
-	b.settled.Broadcast()
+	b.turns = slices.Clone(turnIDs)
 }
 
-func (b *binding) forfeit(ticket uint64) {
-	b.awaitTurn(ticket)
-	b.leave()
+func (b *binding) outstanding() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.turns)
 }
 
 func (b *binding) close(ifIdleFor time.Duration) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.closed || ifIdleFor > 0 && b.idleFor(time.Now()) < ifIdleFor {
+	if b.closed {
+		return false
+	}
+	if ifIdleFor > 0 && (len(b.turns) > 0 || time.Since(time.Unix(0, b.lastActivity.Load())) < ifIdleFor) {
 		return false
 	}
 	b.closed = true
 	close(b.done)
 	return true
-}
-
-func (b *binding) drain() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for b.busy.Load() > 0 {
-		b.settled.Wait()
-	}
 }

@@ -17,9 +17,11 @@ import (
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/agenttemplate"
 	"github.com/pomerium/agentops/harness/internal/apiserver"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
+	"github.com/pomerium/agentops/harness/internal/runner"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 	"github.com/pomerium/agentops/harness/internal/sessionstore/sqlite"
@@ -68,13 +70,254 @@ func (f *fakeTemplates) ClientBinding(_ context.Context, subject string) (*v1alp
 	return nil, fmt.Errorf("%w: %q", agenttemplate.ErrNoBinding, subject)
 }
 
+type toolCallEvent struct {
+	ID       string
+	Title    string
+	Status   string
+	Kind     string
+	RawInput any
+	Update   bool
+}
+
+type usageEvent struct {
+	InputTokens       int64
+	OutputTokens      int64
+	CachedReadTokens  int64
+	CachedWriteTokens int64
+	ThoughtTokens     int64
+	TotalTokens       int64
+	ContextWindow     int64
+	ContextUsed       int64
+	CostUSD           float64
+}
+
+type permissionOption struct {
+	ID   string
+	Name string
+	Kind string
+}
+
+type permissionRequest struct {
+	ToolCallID string
+	Title      string
+	Options    []permissionOption
+}
+
+type permissionDecision struct {
+	OptionID  string
+	Cancelled bool
+}
+
+type fakeAgent struct {
+	sess   *fakeLiveSession
+	run    *fakeRun
+	turnID string
+	agg    *runner.Aggregator
+}
+
+func (a *fakeAgent) AgentMessage(_ context.Context, text string) {
+	a.agg.Update(acp.UpdateAgentMessageText(text))
+}
+
+func (a *fakeAgent) AgentThought(_ context.Context, text string) {
+	a.agg.Update(acp.UpdateAgentThoughtText(text))
+}
+
+func (a *fakeAgent) ToolCall(_ context.Context, ev toolCallEvent) {
+	if ev.Update {
+		opts := []acp.ToolCallUpdateOpt{acp.WithUpdateStatus(acp.ToolCallStatus(ev.Status))}
+		if ev.Title != "" {
+			opts = append(opts, acp.WithUpdateTitle(ev.Title))
+		}
+		a.agg.Update(acp.UpdateToolCall(acp.ToolCallId(ev.ID), opts...))
+		return
+	}
+	opts := []acp.ToolCallStartOpt{acp.WithStartKind(acp.ToolKind(ev.Kind)), acp.WithStartStatus(acp.ToolCallStatus(ev.Status))}
+	if ev.RawInput != nil {
+		opts = append(opts, acp.WithStartRawInput(ev.RawInput))
+	}
+	a.agg.Update(acp.StartToolCall(acp.ToolCallId(ev.ID), ev.Title, opts...))
+}
+
+func (a *fakeAgent) Usage(_ context.Context, ev usageEvent) {
+	a.run.emit(a.turnID, &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_Usage{Usage: &agentlinkpb.Usage{
+		InputTokens: ev.InputTokens, OutputTokens: ev.OutputTokens, CachedReadTokens: ev.CachedReadTokens,
+		CachedWriteTokens: ev.CachedWriteTokens, ThoughtTokens: ev.ThoughtTokens, TotalTokens: ev.TotalTokens,
+		ContextWindow: ev.ContextWindow, ContextUsed: ev.ContextUsed, CostUsd: ev.CostUSD,
+	}}})
+}
+
+func (a *fakeAgent) Permission(ctx context.Context, req permissionRequest) (permissionDecision, error) {
+	summary := req.Title
+	if summary == "" {
+		summary = a.agg.Title(req.ToolCallID)
+	}
+	pr := &agentlinkpb.PermissionRequest{
+		RequestId: req.ToolCallID, ToolCallId: req.ToolCallID, Summary: summary, TurnId: a.turnID,
+	}
+	for _, o := range req.Options {
+		pr.Options = append(pr.Options, &agentlinkpb.PermissionOption{Id: o.ID, Name: o.Name, Kind: o.Kind})
+	}
+	answer := a.run.awaitDecision(pr)
+	a.run.emit(a.turnID, &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_PermissionRequest{PermissionRequest: pr}})
+	select {
+	case d := <-answer:
+		return permissionDecision{OptionID: d.GetOptionId(), Cancelled: d.GetCancelled()}, nil
+	case <-ctx.Done():
+		return permissionDecision{Cancelled: true}, ctx.Err()
+	}
+}
+
 type fakeLiveSession struct {
 	mu      sync.Mutex
 	prompts []string
-	script  func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error)
-	sink    sandbox.EventSink
+	script  func(ctx context.Context, sink *fakeAgent, text string) (acp.StopReason, error)
 	id      string
 	closed  bool
+	run     *fakeRun
+}
+
+type fakeRun struct {
+	sess     *fakeLiveSession
+	ctx      context.Context
+	cancel   context.CancelFunc
+	queue    chan *agentlinkpb.Prompt
+	readySeq uint64
+	stream   []byte
+
+	mu            sync.Mutex
+	seq           uint64
+	acked         uint64
+	lastTurn      uint64
+	running       string
+	queued        []string
+	pending       []*agentlinkpb.PermissionRequest
+	decisions     map[string]chan *agentlinkpb.PermissionDecision
+	log           []*agentlinkpb.AgentEvent
+	inbox         chan *agentlinkpb.AgentIOFrame
+	done          chan struct{}
+	dropPrompts   bool
+	dropDecisions bool
+	closeOnce     sync.Once
+}
+
+func (s *fakeLiveSession) start(readySeq uint64, stream []byte) *fakeRun {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &fakeRun{
+		sess: s, ctx: ctx, cancel: cancel, queue: make(chan *agentlinkpb.Prompt, 64),
+		readySeq: readySeq, seq: readySeq, stream: stream,
+		decisions: map[string]chan *agentlinkpb.PermissionDecision{},
+	}
+	r.attach(readySeq)
+	s.mu.Lock()
+	s.run, s.closed = r, false
+	s.mu.Unlock()
+	go r.work()
+	return r
+}
+
+func (r *fakeRun) attach(after uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	inbox := make(chan *agentlinkpb.AgentIOFrame, 4096)
+	state := &agentlinkpb.AgentState{LastTurnSeq: r.lastTurn, PendingPermissions: append([]*agentlinkpb.PermissionRequest(nil), r.pending...)}
+	if r.running != "" {
+		state.OutstandingTurnIds = append(state.OutstandingTurnIds, r.running)
+	}
+	state.OutstandingTurnIds = append(state.OutstandingTurnIds, r.queued...)
+	inbox <- &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_State{State: state}}
+	for _, ev := range r.log {
+		if ev.GetSeq() > after {
+			inbox <- &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Event{Event: ev}}
+		}
+	}
+	r.inbox, r.done = inbox, make(chan struct{})
+}
+
+func (r *fakeRun) work() {
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case p := <-r.queue:
+			r.mu.Lock()
+			r.running = p.GetTurnId()
+			r.queued = r.queued[1:]
+			r.mu.Unlock()
+			r.runTurn(p)
+			r.mu.Lock()
+			r.running = ""
+			r.mu.Unlock()
+		}
+	}
+}
+
+func (r *fakeRun) runTurn(p *agentlinkpb.Prompt) {
+	r.sess.mu.Lock()
+	r.sess.prompts = append(r.sess.prompts, p.GetText())
+	script := r.sess.script
+	r.sess.mu.Unlock()
+	agent := &fakeAgent{sess: r.sess, run: r, turnID: p.GetTurnId()}
+	agent.agg = runner.NewAggregator(func(turnID string, ev *agentlinkpb.AgentEvent) { r.emit(turnID, ev) })
+	agent.agg.Begin(p.GetTurnId())
+	var stop acp.StopReason
+	var err error
+	if script != nil {
+		stop, err = script(r.ctx, agent, p.GetText())
+	} else {
+		agent.AgentMessage(r.ctx, "done: "+p.GetText())
+		stop = acp.StopReasonEndTurn
+	}
+	agent.agg.End()
+	finished := &agentlinkpb.TurnFinished{StopReason: string(stop)}
+	if err != nil {
+		finished = &agentlinkpb.TurnFinished{Error: err.Error()}
+	}
+	r.emit(p.GetTurnId(), &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_TurnFinished{TurnFinished: finished}})
+}
+
+func (r *fakeRun) emit(turnID string, ev *agentlinkpb.AgentEvent) {
+	r.mu.Lock()
+	r.seq++
+	ev.Seq, ev.TurnId = r.seq, turnID
+	r.log = append(r.log, ev)
+	inbox := r.inbox
+	r.mu.Unlock()
+	select {
+	case inbox <- &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Event{Event: ev}}:
+	case <-r.ctx.Done():
+	}
+}
+
+func (r *fakeRun) awaitDecision(req *agentlinkpb.PermissionRequest) <-chan *agentlinkpb.PermissionDecision {
+	ch := make(chan *agentlinkpb.PermissionDecision, 1)
+	r.mu.Lock()
+	r.decisions[req.GetRequestId()] = ch
+	r.pending = append(r.pending, req)
+	r.mu.Unlock()
+	return ch
+}
+
+func (r *fakeRun) exit(code int32) {
+	r.emit("", &agentlinkpb.AgentEvent{Payload: &agentlinkpb.AgentEvent_Exited{Exited: &agentlinkpb.AgentExited{ExitCode: code}}})
+}
+
+func (r *fakeRun) ackedSeq() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.acked
+}
+
+func (r *fakeRun) setDrops(prompts, decisions bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dropPrompts, r.dropDecisions = prompts, decisions
+}
+
+func (s *fakeLiveSession) current() *fakeRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.run
 }
 
 func (s *fakeLiveSession) ID() string {
@@ -84,29 +327,82 @@ func (s *fakeLiveSession) ID() string {
 	return s.id
 }
 
-func (s *fakeLiveSession) Prompt(ctx context.Context, text string) (acp.StopReason, error) {
-	s.mu.Lock()
-	s.prompts = append(s.prompts, text)
-	script, sink := s.script, s.sink
-	s.mu.Unlock()
-	if script != nil {
-		return script(ctx, sink, text)
-	}
+func (s *fakeLiveSession) StreamID() []byte { return s.current().stream }
 
-	sink.AgentMessage(ctx, "done: "+text)
-	return acp.StopReasonEndTurn, nil
+func (s *fakeLiveSession) ReadySeq() uint64 { return s.current().readySeq }
+
+func (s *fakeLiveSession) Inbox() <-chan *agentlinkpb.AgentIOFrame {
+	r := s.current()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inbox
 }
 
-func (s *fakeLiveSession) Cancel(context.Context) error { return nil }
+func (s *fakeLiveSession) Done() <-chan struct{} {
+	r := s.current()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.done
+}
+
+func (s *fakeLiveSession) Ack(seq uint64) {
+	r := s.current()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.acked = max(r.acked, seq)
+}
+
+func (s *fakeLiveSession) Prompt(turnID string, turnSeq uint64, text string) {
+	r := s.current()
+	r.mu.Lock()
+	if r.dropPrompts || turnSeq <= r.lastTurn {
+		r.mu.Unlock()
+		return
+	}
+	r.lastTurn = turnSeq
+	r.queued = append(r.queued, turnID)
+	r.mu.Unlock()
+	r.queue <- &agentlinkpb.Prompt{TurnId: turnID, TurnSeq: turnSeq, Text: text}
+}
+
+func (s *fakeLiveSession) Decide(requestID, optionID string, cancelled bool) {
+	r := s.current()
+	r.mu.Lock()
+	if r.dropDecisions {
+		r.mu.Unlock()
+		return
+	}
+	ch := r.decisions[requestID]
+	delete(r.decisions, requestID)
+	for i, p := range r.pending {
+		if p.GetRequestId() == requestID {
+			r.pending = append(r.pending[:i:i], r.pending[i+1:]...)
+			break
+		}
+	}
+	r.mu.Unlock()
+	if ch != nil {
+		ch <- &agentlinkpb.PermissionDecision{RequestId: requestID, OptionId: optionID, Cancelled: cancelled}
+	}
+}
 
 func (s *fakeLiveSession) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
+	r := s.run
+	s.mu.Unlock()
+	if r != nil {
+		r.closeOnce.Do(func() {
+			r.cancel()
+			r.mu.Lock()
+			close(r.done)
+			r.mu.Unlock()
+		})
+	}
 	return nil
 }
 
-func (s *fakeLiveSession) setScript(f func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error)) {
+func (s *fakeLiveSession) setScript(f func(ctx context.Context, sink *fakeAgent, text string) (acp.StopReason, error)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.script = f
@@ -179,7 +475,7 @@ func (l *fakeLauncher) Expect(runID string, _ *sandbox.Prepared, opts ...sandbox
 	return &sandbox.Attachment{}, nil
 }
 
-func (l *fakeLauncher) Activate(ctx context.Context, sink sandbox.EventSink, _ *sandbox.Prepared, _ *sandbox.Attachment) (harnessapi.LiveSession, error) {
+func (l *fakeLauncher) Activate(ctx context.Context, _ *sandbox.Prepared, _ *sandbox.Attachment) (harnessapi.LiveSession, error) {
 	l.mu.Lock()
 	gate, activateErr := l.gate, l.activateErr
 	l.mu.Unlock()
@@ -193,11 +489,7 @@ func (l *fakeLauncher) Activate(ctx context.Context, sink sandbox.EventSink, _ *
 	if activateErr != nil {
 		return nil, activateErr
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.session.mu.Lock()
-	l.session.sink = sink
-	l.session.mu.Unlock()
+	l.session.start(1, []byte("fake-stream"))
 	return l.session, nil
 }
 

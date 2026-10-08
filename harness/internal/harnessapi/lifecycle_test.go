@@ -12,8 +12,6 @@ import (
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
 	"github.com/pomerium/agentops/harness/internal/harnessapi"
-	"github.com/pomerium/agentops/harness/internal/sandbox"
-	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
 func TestStubClientDrivesFullLifecycle(t *testing.T) {
@@ -68,13 +66,13 @@ func TestStubClientDrivesFullLifecycle(t *testing.T) {
 	_, at = rec.waitFor("turn_completed", at)
 
 	agent := h.launcher.session
-	agent.setScript(func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error) {
+	agent.setScript(func(ctx context.Context, sink *fakeAgent, text string) (acp.StopReason, error) {
 		sink.AgentMessage(ctx, "looking at it")
-		sink.ToolCall(ctx, sandbox.ToolCallEvent{ID: "tc-1", Title: "Read file", Kind: "read", Status: "in_progress"})
-		decision, err := sink.Permission(ctx, sandbox.PermissionRequest{
+		sink.ToolCall(ctx, toolCallEvent{ID: "tc-1", Title: "Read file", Kind: "read", Status: "in_progress"})
+		decision, err := sink.Permission(ctx, permissionRequest{
 			ToolCallID: "tc-1",
 			Title:      "Write to main.go",
-			Options: []sandbox.PermissionOption{
+			Options: []permissionOption{
 				{ID: "allow", Name: "Allow", Kind: "allow_once"},
 				{ID: "deny", Name: "Deny", Kind: "reject_once"},
 			},
@@ -86,7 +84,7 @@ func TestStubClientDrivesFullLifecycle(t *testing.T) {
 			sink.AgentMessage(ctx, "stopped")
 			return acp.StopReasonCancelled, nil
 		}
-		sink.Usage(ctx, sandbox.UsageEvent{InputTokens: 100, OutputTokens: 20, TotalTokens: 120})
+		sink.Usage(ctx, usageEvent{InputTokens: 100, OutputTokens: 20, TotalTokens: 120})
 		sink.AgentMessage(ctx, "decided: "+decision.OptionID)
 		return acp.StopReasonEndTurn, nil
 	})
@@ -345,7 +343,7 @@ func TestOverlappingPromptsKeepTheirReplies(t *testing.T) {
 	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
 
 	firstEntered, secondEntered, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error) {
+	h.launcher.session.setScript(func(ctx context.Context, sink *fakeAgent, text string) (acp.StopReason, error) {
 		sink.AgentMessage(ctx, text+" reply")
 		if text == "first" {
 			close(firstEntered)
@@ -458,7 +456,7 @@ func TestTurnsFinishBeforeTheSessionEnds(t *testing.T) {
 	ref := byID(launchRunning(t, h, "stub:conv-1").GetId())
 
 	entered, release := make(chan struct{}), make(chan struct{})
-	h.launcher.session.setScript(func(ctx context.Context, sink sandbox.EventSink, text string) (acp.StopReason, error) {
+	h.launcher.session.setScript(func(ctx context.Context, sink *fakeAgent, text string) (acp.StopReason, error) {
 		if text == "first" {
 			close(entered)
 			select {
@@ -510,7 +508,7 @@ func TestTurnsFinishBeforeTheSessionEnds(t *testing.T) {
 	}
 }
 
-type failingACPStore struct{ sessionstore.Sessions }
+type failingACPStore struct{ harnessapi.Store }
 
 func (failingACPStore) UpdateSessionACP(context.Context, string, string, api.SessionState) error {
 	return errors.New("the database is unavailable")
@@ -519,7 +517,7 @@ func (failingACPStore) UpdateSessionACP(context.Context, string, string, api.Ses
 func TestALaunchThatCannotRecordRunningStops(t *testing.T) {
 	ctx := as(stubClient)
 	h := newHarness(t)
-	h.svc = harnessapi.New(failingACPStore{Sessions: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+	h.svc = harnessapi.New(failingACPStore{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
 		harnessapi.WithLogger(testLogger(t)))
 
 	created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
@@ -535,13 +533,13 @@ func TestALaunchThatCannotRecordRunningStops(t *testing.T) {
 }
 
 type heldRunningWrite struct {
-	sessionstore.Sessions
+	harnessapi.Store
 	entered chan struct{}
 	release chan struct{}
 }
 
 func (s heldRunningWrite) UpdateSessionACP(ctx context.Context, id, acpID string, state api.SessionState) error {
-	if err := s.Sessions.UpdateSessionACP(ctx, id, acpID, state); err != nil {
+	if err := s.Store.UpdateSessionACP(ctx, id, acpID, state); err != nil {
 		return err
 	}
 	close(s.entered)
@@ -552,11 +550,11 @@ func (s heldRunningWrite) UpdateSessionACP(ctx context.Context, id, acpID string
 func TestTheOpeningPromptRunsBeforeALaterOne(t *testing.T) {
 	ctx := as(stubClient)
 	h := newHarness(t)
-	held := heldRunningWrite{Sessions: h.store, entered: make(chan struct{}), release: make(chan struct{})}
+	held := heldRunningWrite{Store: h.store, entered: make(chan struct{}), release: make(chan struct{})}
 	h.svc = harnessapi.New(held, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
 		harnessapi.WithLogger(testLogger(t)))
 	seen := make(chan string, 2)
-	h.launcher.session.setScript(func(_ context.Context, _ sandbox.EventSink, text string) (acp.StopReason, error) {
+	h.launcher.session.setScript(func(_ context.Context, _ *fakeAgent, text string) (acp.StopReason, error) {
 		seen <- text
 		return acp.StopReasonEndTurn, nil
 	})
@@ -591,7 +589,7 @@ func TestTheOpeningPromptRunsBeforeALaterOne(t *testing.T) {
 	}
 }
 
-type refusedTurnSeq struct{ sessionstore.Sessions }
+type refusedTurnSeq struct{ harnessapi.Store }
 
 func (refusedTurnSeq) NextTurnSeq(context.Context, string) (int64, error) {
 	return 0, errors.New("the turn could not be allocated")
@@ -600,7 +598,7 @@ func (refusedTurnSeq) NextTurnSeq(context.Context, string) (int64, error) {
 func TestALaunchThatCannotAllocateItsOpeningTurnFails(t *testing.T) {
 	ctx := as(stubClient)
 	h := newHarness(t)
-	h.svc = harnessapi.New(refusedTurnSeq{Sessions: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+	h.svc = harnessapi.New(refusedTurnSeq{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
 		harnessapi.WithLogger(testLogger(t)))
 
 	created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{

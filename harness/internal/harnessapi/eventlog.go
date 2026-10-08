@@ -17,6 +17,8 @@ import (
 type EventLog interface {
 	Append(ctx context.Context, ev *pb.Event) error
 
+	AppendFromPod(ctx context.Context, ev *pb.Event, podSeq uint64) error
+
 	Finish(ctx context.Context, sessionID string, status api.SessionState, events []*pb.Event) error
 
 	History(ctx context.Context, sessionID string, afterSeq int64, limit int) ([]*pb.Event, error)
@@ -46,6 +48,14 @@ func NewEventLog(st sessionstore.Events) EventLog {
 }
 
 func (l *durableLog) Append(ctx context.Context, ev *pb.Event) error {
+	return l.append(ctx, ev, 0)
+}
+
+func (l *durableLog) AppendFromPod(ctx context.Context, ev *pb.Event, podSeq uint64) error {
+	return l.append(ctx, ev, podSeq)
+}
+
+func (l *durableLog) append(ctx context.Context, ev *pb.Event, podSeq uint64) error {
 	kind := api.Kind(ev)
 
 	body, err := proto.Marshal(&pb.Event{Payload: ev.GetPayload()})
@@ -54,7 +64,15 @@ func (l *durableLog) Append(ctx context.Context, ev *pb.Event) error {
 	}
 
 	at := time.Now().UTC().Truncate(time.Millisecond)
-	seq, err := l.store.AppendSessionEvent(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body)
+	var seq int64
+	switch {
+	case podSeq > 0 && ev.GetTurnId() != "" && (ev.GetTurnCompleted() != nil || ev.GetTurnFailed() != nil):
+		seq, err = l.store.AppendPodTurnEnd(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body, int64(podSeq))
+	case podSeq > 0:
+		seq, err = l.store.AppendPodEvent(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body, int64(podSeq))
+	default:
+		seq, err = l.store.AppendSessionEvent(ctx, ev.GetSessionId(), kind, ev.GetTurnId(), at, body)
+	}
 	if err != nil {
 		return fmt.Errorf("append %s to session %s: %w", kind, ev.GetSessionId(), err)
 	}

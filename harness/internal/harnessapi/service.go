@@ -9,13 +9,11 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
-	acp "github.com/coder/acp-go-sdk"
 
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
@@ -23,6 +21,7 @@ import (
 	"github.com/pomerium/agentops/harness/api/server"
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	"github.com/pomerium/agentops/harness/internal/agenticrun"
+	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	"github.com/pomerium/agentops/harness/internal/agenttemplate"
 	"github.com/pomerium/agentops/harness/internal/apiserver"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
@@ -32,15 +31,20 @@ import (
 
 type LiveSession interface {
 	ID() string
-	Prompt(ctx context.Context, text string) (acp.StopReason, error)
-	Cancel(ctx context.Context) error
+	StreamID() []byte
+	ReadySeq() uint64
+	Inbox() <-chan *agentlinkpb.AgentIOFrame
+	Done() <-chan struct{}
+	Ack(seq uint64)
+	Prompt(turnID string, turnSeq uint64, text string)
+	Decide(requestID, optionID string, cancelled bool)
 	Close() error
 }
 
 type Launcher interface {
 	Prepare(ctx context.Context, spec sandbox.LaunchSpec) (*sandbox.Prepared, error)
 	Expect(runID string, prepared *sandbox.Prepared, opts ...sandbox.SupervisionOption) (*sandbox.Attachment, error)
-	Activate(ctx context.Context, sink sandbox.EventSink, prepared *sandbox.Prepared, att *sandbox.Attachment) (LiveSession, error)
+	Activate(ctx context.Context, prepared *sandbox.Prepared, att *sandbox.Attachment) (LiveSession, error)
 	Teardown(ctx context.Context, claimName string) error
 
 	Suspend(ctx context.Context, claimName string) error
@@ -113,9 +117,14 @@ func (c *options) applyDefaults() {
 	}
 }
 
+type Store interface {
+	sessionstore.Sessions
+	sessionstore.PodCommands
+}
+
 type Service struct {
 	cfg       options
-	store     sessionstore.Sessions
+	store     Store
 	events    EventLog
 	launcher  Launcher
 	templates Templates
@@ -139,7 +148,7 @@ type Service struct {
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*Service)(nil)
 
-func New(st sessionstore.Sessions, ev EventLog, l Launcher, t Templates, runs agenticrun.RunClient, opts ...Option) *Service {
+func New(st Store, ev EventLog, l Launcher, t Templates, runs agenticrun.RunClient, opts ...Option) *Service {
 	var cfg options
 	for _, opt := range opts {
 		opt(&cfg)
@@ -269,15 +278,24 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 		if b == nil {
 			return "", api.Errorf(api.ErrInvalidState, "session %s is not attached to this process", sess.ID)
 		}
-		turnID, err := s.nextTurnID(ctx, sess.ID)
+		b.sendMu.Lock()
+		turnID, n, err := s.nextTurn(ctx, sess.ID)
 		if err != nil {
+			b.sendMu.Unlock()
 			return "", err
 		}
-		ticket, ok := b.enter()
-		if !ok {
+		if !b.enter(turnID) {
+			b.sendMu.Unlock()
 			return "", api.Errorf(api.ErrInvalidState, "session %s is not attached to this process", sess.ID)
 		}
-		go s.runTurn(context.WithoutCancel(ctx), b, ticket, turnID, content)
+		ctx = context.WithoutCancel(ctx)
+		if err := s.sendPrompt(ctx, b, turnID, uint64(n), content); err != nil {
+			b.sendMu.Unlock()
+			b.leave(turnID)
+			return "", api.Errorf(api.ErrUnavailable, "save turn %s of session %s: %v", turnID, sess.ID, err)
+		}
+		b.sendMu.Unlock()
+		s.extendLease(ctx, b)
 		return turnID, nil
 
 	case api.StateSuspended:
@@ -301,7 +319,7 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 			o.cancel()
 			return "", err
 		}
-		turnID, err := s.nextTurnID(ctx, sess.ID)
+		turnID, n, err := s.nextTurn(ctx, sess.ID)
 		if err != nil {
 			o.cancel()
 			s.settle(ctx, sess.ID, o)
@@ -313,6 +331,7 @@ func (s *Service) startTurn(ctx context.Context, sess sessionstore.Session, cont
 			approvalPrompt: content + continuationClause,
 			agentPrompt:    content,
 			turnID:         turnID,
+			turnSeq:        uint64(n),
 		})
 		return turnID, nil
 
@@ -371,9 +390,24 @@ func (s *Service) RespondPermission(ctx context.Context, req *pb.RespondPermissi
 	if b == nil {
 		return nil, api.Errorf(api.ErrUnknownRequest, "session %s is not live", sess.ID)
 	}
-	if err := b.sink.resolvePermission(req.GetRequestId(), sandbox.PermissionDecision{OptionID: req.GetOptionId()}); err != nil {
+	b.permMu.Lock()
+	defer b.permMu.Unlock()
+	if err := b.sink.validate(req.GetRequestId(), req.GetOptionId()); err != nil {
 		return nil, err
 	}
+	w, ok := b.sink.take(req.GetRequestId())
+	if !ok {
+		return nil, api.Errorf(api.ErrUnknownRequest, "permission request %q is unknown or already resolved", req.GetRequestId())
+	}
+	ctx = context.WithoutCancel(ctx)
+	if err := s.saveDecision(ctx, b, w.turnID, req.GetRequestId(), req.GetOptionId(), false); err != nil {
+		b.sink.restore(req.GetRequestId(), w, time.Until(w.deadline))
+		return nil, api.Errorf(api.ErrUnavailable, "save the decision for permission request %q: %v", req.GetRequestId(), err)
+	}
+	s.emit(ctx, sess.ID, &pb.Event{TurnId: w.turnID, Payload: &pb.Event_PermissionResolved{PermissionResolved: &pb.PermissionResolved{
+		RequestId: req.GetRequestId(), Resolution: &pb.PermissionResolved_OptionId{OptionId: req.GetOptionId()},
+	}}})
+	b.session.Decide(req.GetRequestId(), req.GetOptionId(), false)
 	s.resolved.record(sess.ID, req.GetRequestId())
 	return &pb.RespondPermissionResponse{}, nil
 }
@@ -557,18 +591,31 @@ func storedTemplate(sess sessionstore.Session) (*v1alpha1.AgentTemplate, string,
 }
 
 func (s *Service) emit(ctx context.Context, sessionID string, ev *pb.Event) {
+	if err := s.emitPod(ctx, sessionID, ev, 0); err != nil {
+		s.log.ErrorContext(ctx, "could not record a session event; clients will see a gap",
+			"session", sessionID, "event", api.Kind(ev), "err", err)
+	}
+}
+
+func (s *Service) emitPod(ctx context.Context, sessionID string, ev *pb.Event, podSeq uint64) error {
+	if podSeq == 0 {
+		ctx = context.WithoutCancel(ctx)
+	}
+	return s.recordEvent(ctx, sessionID, ev, podSeq)
+}
+
+func (s *Service) recordEvent(ctx context.Context, sessionID string, ev *pb.Event, podSeq uint64) error {
 	ev.SessionId = sessionID
-	ctx = context.WithoutCancel(ctx)
 	defer s.lockEvents(sessionID)()
 	current, err := s.store.GetSession(ctx, sessionID)
 	if err == nil && api.Terminal(current.Status) {
 		s.tel.Debug(ctx, "the session has ended; dropping a later event", "session", sessionID, "event", api.Kind(ev))
-		return
+		return nil
 	}
-	if err := s.events.Append(ctx, ev); err != nil {
-		s.log.ErrorContext(ctx, "could not record a session event; clients will see a gap",
-			"session", sessionID, "event", api.Kind(ev), "err", err)
+	if podSeq > 0 {
+		return s.events.AppendFromPod(ctx, ev, podSeq)
 	}
+	return s.events.Append(ctx, ev)
 }
 
 func (s *Service) lockEvents(sessionID string) func() {
@@ -613,12 +660,12 @@ func (s *Service) setState(ctx context.Context, sessionID string, from, to api.S
 	return true
 }
 
-func (s *Service) nextTurnID(ctx context.Context, sessionID string) (string, error) {
+func (s *Service) nextTurn(ctx context.Context, sessionID string) (string, int64, error) {
 	n, err := s.store.NextTurnSeq(ctx, sessionID)
 	if err != nil {
-		return "", api.Errorf(api.ErrUnavailable, "allocate a turn for session %s: %v", sessionID, err)
+		return "", 0, api.Errorf(api.ErrUnavailable, "allocate a turn for session %s: %v", sessionID, err)
 	}
-	return "t" + strconv.FormatInt(n, 10), nil
+	return turnName(n), n, nil
 }
 
 func viewOf(sess sessionstore.Session) *pb.SessionView {

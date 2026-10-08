@@ -23,8 +23,8 @@ func (l orchestratorLauncher) Expect(runID string, prepared *sandbox.Prepared, o
 	return l.o.Expect(runID, prepared, opts...)
 }
 
-func (l orchestratorLauncher) Activate(ctx context.Context, sink sandbox.EventSink, prepared *sandbox.Prepared, att *sandbox.Attachment) (LiveSession, error) {
-	s, err := l.o.Activate(ctx, sink, prepared, att)
+func (l orchestratorLauncher) Activate(ctx context.Context, prepared *sandbox.Prepared, att *sandbox.Attachment) (LiveSession, error) {
+	s, err := l.o.Activate(ctx, prepared, att)
 	if err != nil {
 		return nil, err
 	}

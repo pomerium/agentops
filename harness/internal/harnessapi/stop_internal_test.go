@@ -13,7 +13,7 @@ import (
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
-func runningService(t *testing.T, l Launcher) (*Service, sessionstore.Sessions) {
+func runningService(t *testing.T, l Launcher) (*Service, Store) {
 	t.Helper()
 	st := openStore(t)
 	if err := st.CreateSession(context.Background(), sessionstore.Session{
@@ -140,8 +140,8 @@ func TestAStoppedBindingRunsNoMoreTurns(t *testing.T) {
 	b := svc.lookup("s1")
 	svc.stopSession(context.Background(), "s1", stopSpec{end: api.EndEnded})
 
-	if _, ok := b.enter(); ok {
-		b.leave()
+	if b.enter("t9") {
+		b.leave("t9")
 		t.Error("a stopped binding accepted another turn")
 	}
 }
@@ -325,5 +325,56 @@ func TestAnEndWhoseEventsWereNotSavedCanBeRetried(t *testing.T) {
 	}
 	if n := len(kinds); n < 2 || kinds[n-2] != "state_changed" || kinds[n-1] != "session_ended" {
 		t.Errorf("the retried end recorded %v, want it to close with state_changed and session_ended", kinds)
+	}
+}
+
+type pausedCommandSave struct {
+	Store
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *pausedCommandSave) PutPodCommand(ctx context.Context, cmd sessionstore.PodCommand) error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return s.Store.PutPodCommand(ctx, cmd)
+}
+
+func TestAStopWaitsForAnAcceptedPromptSave(t *testing.T) {
+	ctx := context.Background()
+	svc, st := runningService(t, quietLauncher{})
+	sess, err := st.GetSession(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	save := &pausedCommandSave{Store: st, entered: make(chan struct{}), release: make(chan struct{})}
+	svc.store = save
+	sent := make(chan error, 1)
+	go func() {
+		_, err := svc.startTurn(ctx, sess, "old work")
+		sent <- err
+	}()
+	<-save.entered
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		svc.stopSession(ctx, "s1", stopSpec{suspend: api.ReasonIdle, end: api.EndIdle})
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(save.release)
+	<-sent
+	<-stopped
+
+	cmds, err := st.ListPodCommands(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListPodCommands: %v", err)
+	}
+	if len(cmds) != 0 {
+		t.Errorf("a stopped session kept saved commands: %v", cmds)
 	}
 }

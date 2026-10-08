@@ -41,11 +41,24 @@ func (s *Service) stopOwned(ctx context.Context, sessionID string, want *owner, 
 func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool {
 	ctx = context.WithoutCancel(ctx)
 	sessionID := b.sessionID
-	_ = b.session.Close()
 	<-b.ready
+	<-b.consumed
+	b.permMu.Lock()
+	b.sendMu.Lock()
+	_ = b.session.Close()
 
-	b.sink.supersedeAll()
-	b.drain()
+	b.sink.supersedeAll(ctx)
+	for _, turnID := range b.outstanding() {
+		s.emit(ctx, sessionID, &pb.Event{TurnId: turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{
+			Reason: "the session stopped before this turn finished",
+		}}})
+		b.leave(turnID)
+	}
+	if err := s.store.DeletePodCommands(ctx, sessionID); err != nil {
+		s.log.WarnContext(ctx, "could not clear the commands of a stopped session", "session", sessionID, "err", err)
+	}
+	b.sendMu.Unlock()
+	b.permMu.Unlock()
 
 	suspended := false
 	if spec.suspend != pb.Reason_REASON_UNSPECIFIED {
@@ -327,6 +340,7 @@ func (s *Service) Shutdown() {
 	}
 	s.mu.Unlock()
 	for _, b := range live {
-		_ = b.session.Close()
+		<-b.consumed
+		b.sink.stop()
 	}
 }
