@@ -472,6 +472,40 @@ func TestStartupWatchesASessionThatPausedWhileTheBotWasDown(t *testing.T) {
 	f.poster.waitForPost(t, "approval ran out")
 }
 
+func TestARestartMidAnswerKeepsTheAnswerInOneMessage(t *testing.T) {
+	f := newFixture(t)
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+	f.api.setState("sess-1", api.StatePending, api.StateRunning, noReason)
+	waitForState(t, f, "sess-1", api.StateRunning)
+
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "First finding.", Final: false})
+	answer := f.poster.waitForPost(t, "First finding.")
+	f.api.emit("sess-1", "", &pb.LaunchStalled{})
+	f.poster.waitForUpdate(t, "hasn't connected back")
+	f.app.Shutdown()
+	waitFor(t, "the old consumer to stop", func() bool { return f.api.openStreams("sess-1") == 0 })
+
+	restarted := slackapp.New(f.api.serve(t), f.poster, f.resolver,
+		slackapp.WithBotUserID("UBOT"), slackapp.WithHomeTeamID("T1"))
+	t.Cleanup(restarted.Shutdown)
+	restarted.ReconcileOnStartup(context.Background())
+	waitFor(t, "the new consumer", func() bool { return f.api.openStreams("sess-1") == 1 })
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.2", Text: "Second finding.", Final: true})
+
+	waitFor(t, "the whole answer in the turn's message", func() bool {
+		for _, u := range f.poster.updatesTo(answer.ts) {
+			if !u.debounced && strings.Contains(u.text, "First finding.") && strings.Contains(u.text, "Second finding.") {
+				return true
+			}
+		}
+		return false
+	})
+	if n := len(f.poster.postsContaining("finding")); n != 1 {
+		t.Errorf("the answer was split across %d messages", n)
+	}
+}
+
 func TestStartupLeavesTheSessionsItAlreadyFollowsAlone(t *testing.T) {
 	f := newFixture(t)
 	f.app.HandleMention(context.Background(), mention(f, "ship it"))
