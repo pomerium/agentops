@@ -340,6 +340,16 @@ func TestSessionEndedIsRenderedAndReleasesTheThread(t *testing.T) {
 	}
 }
 
+func TestASessionsEventsArriveAfterTheHarnessWasBrieflyUnavailable(t *testing.T) {
+	f := newFixture(t)
+	f.api.failSubscribes(api.ErrUnavailable)
+
+	f.app.HandleMention(context.Background(), mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "made it through", Final: true})
+	f.poster.waitForPost(t, "made it through")
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

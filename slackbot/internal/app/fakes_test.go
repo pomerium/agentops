@@ -42,6 +42,7 @@ type fakeAPI struct {
 	promptErr    error
 	templates    []string
 	templatesErr error
+	subscribeErr []error
 }
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*fakeAPI)(nil)
@@ -186,8 +187,20 @@ func (f *fakeAPI) ListEvents(_ context.Context, req *pb.ListEventsRequest) (*pb.
 	return &pb.ListEventsResponse{Events: feed.after(req.GetAfterSeq())}, nil
 }
 
+func (f *fakeAPI) failSubscribes(errs ...error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribeErr = append(f.subscribeErr, errs...)
+}
+
 func (f *fakeAPI) Subscribe(ctx context.Context, req *pb.SubscribeRequest, stream *connect.ServerStream[pb.SubscribeResponse]) error {
 	f.mu.Lock()
+	if len(f.subscribeErr) > 0 {
+		err := f.subscribeErr[0]
+		f.subscribeErr = f.subscribeErr[1:]
+		f.mu.Unlock()
+		return err
+	}
 	feed, ok := f.feeds[req.GetRef().GetSessionId()]
 	f.mu.Unlock()
 	if !ok {
