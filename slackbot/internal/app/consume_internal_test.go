@@ -387,3 +387,41 @@ func TestAReplayedApprovalRequestDoesNotTouchARunningSession(t *testing.T) {
 		t.Fatalf("replaying an old approval request sent %d DMs and ended the running session %d times", p.dms, c.ends)
 	}
 }
+
+type catchupApprovalAPI struct {
+	harnessapipbconnect.HarnessAPIServiceClient
+	ends int
+}
+
+func (c *catchupApprovalAPI) ListEvents(_ context.Context, r *pb.ListEventsRequest) (*pb.ListEventsResponse, error) {
+	all := []*pb.Event{
+		{Seq: 2, Payload: &pb.Event_ApprovalRequired{ApprovalRequired: &pb.ApprovalRequired{ApprovalUrl: "https://approval.example/run"}}},
+		{Seq: 3, Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: api.StateRunning, New: api.StateSuspended}}},
+	}
+	out := &pb.ListEventsResponse{}
+	for _, ev := range all {
+		if ev.GetSeq() > r.GetAfterSeq() {
+			out.Events = append(out.Events, ev)
+		}
+	}
+	return out, nil
+}
+
+func (c *catchupApprovalAPI) EndSession(context.Context, *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
+	c.ends++
+	return &pb.EndSessionResponse{}, nil
+}
+
+func TestACatchupDoesNotReplayAnApprovalRequestIntoAPausedSession(t *testing.T) {
+	c := &catchupApprovalAPI{}
+	p := &replayApprovalPoster{}
+	a := New(c, p, nil)
+	view := &pb.SessionView{Id: "s1", State: api.StateSuspended, LastSeq: 3}
+	m := sessionMeta{ChannelID: "C1", ThreadTS: "1.0", TeamID: "T1", UserID: "U1", LastSeq: 1}
+	if !a.renderMissed(context.Background(), view, m, true) {
+		t.Fatal("the catch-up failed")
+	}
+	if c.ends != 0 || p.dms != 0 {
+		t.Fatalf("a catch-up sent %d approval DMs and ended the paused session %d times", p.dms, c.ends)
+	}
+}
