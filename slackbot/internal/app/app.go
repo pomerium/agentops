@@ -122,6 +122,7 @@ type thread struct {
 	render        *renderer
 	stop          context.CancelFunc
 	replayThrough int64
+	adoptedState  api.SessionState
 }
 
 type idleNotice struct {
@@ -141,6 +142,13 @@ func (t *thread) setState(s api.SessionState) { t.state.Store(&s) }
 
 func (t *thread) pastPause(seq int64) bool {
 	return seq <= t.replayThrough
+}
+
+func (t *thread) pastApproval(seq int64) bool {
+	if seq > t.replayThrough {
+		return false
+	}
+	return t.adoptedState != api.StateAwaitingApproval || t.meta().ApprovalMessageTS != ""
 }
 
 func (t *thread) owns(userID, teamID string) bool {
