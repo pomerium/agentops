@@ -430,7 +430,10 @@ func tsBefore(ts string, d time.Duration) string {
 			return ts
 		}
 	}
-	at := time.Unix(s, us*1000).Add(-d)
+	return slackTS(time.Unix(s, us*1000).Add(-d))
+}
+
+func slackTS(at time.Time) string {
 	if at.Unix() < 0 {
 		return "0.000000"
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
 
@@ -94,7 +95,7 @@ func (a *App) loadMeta(ctx context.Context, view *pb.SessionView) (sessionMeta, 
 	if !ok {
 		return sessionMeta{}, errNoSlackState
 	}
-	msgs, err := a.poster.ThreadReplies(ctx, channelID, threadTS, "", maxThreadRead)
+	msgs, err := a.poster.ThreadReplies(ctx, channelID, threadTS, a.sessionStart(ctx, view.GetId()), maxThreadRead)
 	if err != nil {
 		return sessionMeta{}, fmt.Errorf("read the thread of session %s: %w", view.GetId(), err)
 	}
@@ -104,6 +105,14 @@ func (a *App) loadMeta(ctx context.Context, view *pb.SessionView) (sessionMeta, 
 		}
 	}
 	return sessionMeta{}, errNoSlackState
+}
+
+func (a *App) sessionStart(ctx context.Context, sessionID string) string {
+	res, err := a.api.ListEvents(ctx, &pb.ListEventsRequest{Ref: a.ref(sessionID), Limit: 1})
+	if err != nil || len(res.GetEvents()) == 0 || res.GetEvents()[0].GetTimestamp() == nil {
+		return ""
+	}
+	return slackTS(res.GetEvents()[0].GetTimestamp().AsTime().Add(-time.Minute))
 }
 
 func identityOf(view *pb.SessionView) (sessionMeta, bool) {
