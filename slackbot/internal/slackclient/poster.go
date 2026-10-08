@@ -52,7 +52,11 @@ func (p *Poster) RemoveReaction(ctx context.Context, channelID, timestamp, emoji
 func (p *Poster) ThreadReplies(ctx context.Context, channelID, threadTS, since string, max int) ([]slack.Message, error) {
 	var out []slack.Message
 	cursor := ""
-	for range maxThreadPages {
+	pages := max/threadPageSize + 1
+	if pages < maxThreadPages {
+		pages = maxThreadPages
+	}
+	for range pages {
 		msgs, hasMore, next, err := p.client.GetConversationRepliesContext(ctx, &slack.GetConversationRepliesParameters{
 			ChannelID:          channelID,
 			Timestamp:          threadTS,
@@ -73,7 +77,7 @@ func (p *Poster) ThreadReplies(ctx context.Context, channelID, threadTS, since s
 		}
 		cursor = next
 	}
-	return nil, fmt.Errorf("%w: more than %d replies in %s/%s", ErrThreadTooLong, maxThreadPages*threadPageSize, channelID, threadTS)
+	return nil, fmt.Errorf("%w: more than %d replies in %s/%s", ErrThreadTooLong, pages*threadPageSize, channelID, threadTS)
 }
 
 const (
