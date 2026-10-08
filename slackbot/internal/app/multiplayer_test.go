@@ -222,6 +222,22 @@ func TestABareJoinsFirstRequestCarriesTheThreadSoFar(t *testing.T) {
 	}
 }
 
+func TestAJoinCarriesTheEndOfALongAnswer(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+	answer := strings.Repeat("x", 4000) + "\nstaging failed; do not promote"
+	f.api.emit("sess-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: answer, Final: true})
+	waitFor(t, "the answer's end in the thread", func() bool {
+		return len(f.poster.postsContaining("staging failed; do not promote")) == 1
+	})
+
+	f.app.HandleMention(context.Background(), mentionIn(f, "U2", "what did staging say?"))
+	waitFor(t, "the join", func() bool { return len(f.api.createRequests()) == 2 })
+	if seed := f.api.createRequests()[1].InitialPrompt; !strings.Contains(seed, "staging failed; do not promote") {
+		t.Fatal("the join lost the visible end of the answer")
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
