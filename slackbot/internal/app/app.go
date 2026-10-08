@@ -209,12 +209,12 @@ func (a *App) handleThreadedMention(ctx context.Context, in gateway.MentionInvoc
 	case err != nil:
 		a.postLookupFailure(ctx, in.ChannelID, in.OriginThreadTS, err)
 	case ok && sess.GetState() == api.StateSuspended:
-		a.reviveDetached(ctx, sess, in, in.MessageTS)
+		a.reviveDetached(ctx, sess, in, in.MessageTS, false)
 	case ok && api.Live(sess.GetState()):
 		a.hintInThread(ctx, in.ChannelID, in.OriginThreadTS, in.UserID,
 			slack.MsgOptionText(msgHintLaunching, false))
 	default:
-		a.startJoin(ctx, in)
+		a.startJoin(ctx, in, false)
 	}
 }
 
@@ -242,7 +242,7 @@ func (a *App) HandleMessage(ctx context.Context, in gateway.ThreadMessage) {
 	case api.StateSuspended:
 		a.reviveThread(ctx, t, gateway.MentionInvocation{
 			TeamID: in.TeamID, UserID: in.UserID, ChannelID: in.ChannelID,
-			ThreadTS: in.ThreadTS, OriginThreadTS: in.ThreadTS,
+			MessageTS: in.MessageTS, ThreadTS: in.ThreadTS, OriginThreadTS: in.ThreadTS,
 			Text: in.Text, Prompt: in.Text,
 		}, in.MessageTS)
 	default:
@@ -273,9 +273,9 @@ func (a *App) hintNoLiveSession(ctx context.Context, in gateway.ThreadMessage) {
 	case sess.GetState() == api.StateSuspended && !m.Multiplayer:
 		a.reviveDetached(ctx, sess, gateway.MentionInvocation{
 			TeamID: in.TeamID, UserID: in.UserID, ChannelID: in.ChannelID,
-			ThreadTS: in.ThreadTS, OriginThreadTS: in.ThreadTS,
+			MessageTS: in.MessageTS, ThreadTS: in.ThreadTS, OriginThreadTS: in.ThreadTS,
 			Text: in.Text, Prompt: in.Text,
-		}, in.MessageTS)
+		}, in.MessageTS, true)
 	case sess.GetState() == api.StateSuspended:
 		a.tel.Debug(ctx, "plain message in a multiplayer thread; not reviving", "session", sess.GetId())
 	case api.Live(sess.GetState()):
@@ -450,7 +450,7 @@ func (a *App) reviveThread(ctx context.Context, t *thread, in gateway.MentionInv
 	a.addReaction(ctx, in.ChannelID, reactTS(in), reactionStarting)
 }
 
-func (a *App) reviveDetached(ctx context.Context, sess *pb.SessionView, in gateway.MentionInvocation, messageTS string) {
+func (a *App) reviveDetached(ctx context.Context, sess *pb.SessionView, in gateway.MentionInvocation, messageTS string, solo bool) {
 	t, err := a.adopt(ctx, sess, in.MessageTS)
 	switch {
 	case errors.Is(err, errBindingClaimed):
@@ -467,7 +467,7 @@ func (a *App) reviveDetached(ctx context.Context, sess *pb.SessionView, in gatew
 			return
 		}
 		a.post(ctx, in.ChannelID, in.OriginThreadTS, slack.MsgOptionText(msgStatusCannotContinue, false))
-		a.startJoin(ctx, in)
+		a.startJoin(ctx, in, solo)
 		return
 	case err != nil:
 		a.log.WarnContext(ctx, "could not adopt a paused thread; not continuing it",
