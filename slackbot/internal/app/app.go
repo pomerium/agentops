@@ -729,6 +729,17 @@ func (a *App) unregisterThread(t *thread) {
 	}
 }
 
+func (a *App) holds(sessionID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, t := range a.threads {
+		if t.sessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) threadForSession(channel, threadTS, sessionID string) *thread {
 	a.mu.Lock()
 	defer a.mu.Unlock()
