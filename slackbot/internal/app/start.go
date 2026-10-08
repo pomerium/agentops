@@ -88,6 +88,9 @@ func (a *App) startSession(ctx context.Context, spec startSpec) *thread {
 		}
 	})
 	a.flipRoom(ctx, t, flipped, spec.flipFrom)
+	if spec.parentSessionID != "" {
+		a.markMultiplayer(ctx, t, len(flipped)+1)
+	}
 	a.postStatus(ctx, t, msgStatusPreparing)
 	a.startConsumer(t, ackTS, 0)
 
