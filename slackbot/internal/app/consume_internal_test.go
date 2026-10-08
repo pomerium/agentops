@@ -303,3 +303,42 @@ func TestARetriedCatchupKeepsTheAnswersEarlierText(t *testing.T) {
 		t.Fatalf("the retry lost part of the answer: %q", p.answer)
 	}
 }
+
+type failedHeadPoster struct {
+	Poster
+	attempts, accepted int
+}
+
+func (p *failedHeadPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	p.attempts++
+	if p.attempts == 1 {
+		return "", errors.New("connection lost")
+	}
+	p.accepted++
+	if p.accepted == 1 {
+		return "tail", nil
+	}
+	return "head", nil
+}
+
+func (*failedHeadPoster) UpdateMessage(_ context.Context, _, ts string, _ ...slack.MsgOption) (string, error) {
+	return ts, nil
+}
+
+func TestARetriedFinalAnswerPostsTheMissingBeginning(t *testing.T) {
+	p := &failedHeadPoster{}
+	a := New(nil, p, nil)
+	th := &thread{channel: "C1", threadTS: "1.0", render: newRenderer()}
+	th.render.beginTurn("t1")
+	text := strings.Repeat("a", maxMessageChars+1)
+	ctx := context.Background()
+	if a.showFinal(ctx, th, text) {
+		t.Fatal("the first piece should have failed")
+	}
+	if !a.showFinal(ctx, th, text) {
+		t.Fatal("the retry failed")
+	}
+	if p.accepted != 2 {
+		t.Fatalf("only %d of the answer's two pieces reached Slack", p.accepted)
+	}
+}
