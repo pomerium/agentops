@@ -150,7 +150,7 @@ func threadFromMeta(view *pb.SessionView, m sessionMeta) *thread {
 	return t
 }
 
-func (a *App) startJoin(ctx context.Context, in gateway.MentionInvocation) {
+func (a *App) startJoin(ctx context.Context, in gateway.MentionInvocation, solo bool) {
 	ctx = telemetry.With(ctx, "origin_thread_ts", in.OriginThreadTS, "origin_kind", originJoin)
 	ctx, op := a.tel.Start(ctx, "startJoin")
 	defer op.Complete()
@@ -183,6 +183,11 @@ func (a *App) startJoin(ctx context.Context, in gateway.MentionInvocation) {
 	a.post(ctx, in.ChannelID, in.OriginThreadTS,
 		slack.MsgOptionText(joinNotice(in.UserID, template, carried, flags), false))
 
+	joinedAt := in.MessageTS
+	if solo && len(roommates) == 0 {
+		joinedAt = ""
+	}
+
 	a.log.InfoContext(ctx, "session joined a thread",
 		"channel", in.ChannelID, "thread_ts", in.OriginThreadTS, "owner", in.UserID,
 		"template", template, "roommates", len(roommates),
@@ -198,7 +203,7 @@ func (a *App) startJoin(ctx context.Context, in gateway.MentionInvocation) {
 		agentPrompt:     composeJoinPrompt(entries, flags, in.Prompt),
 		threadLink:      threadLink,
 		ackTS:           in.MessageTS,
-		joinedAt:        in.MessageTS,
+		joinedAt:        joinedAt,
 		flipFrom:        priorTS(replies, in.MessageTS),
 	})
 }

@@ -243,7 +243,7 @@ func (a *App) startOver(ctx context.Context, t *thread, in gateway.MentionInvoca
 	t.setState(api.StateEnded)
 	a.restateStatus(ctx, t, msgStatusCannotContinue)
 	a.unregisterThread(t)
-	a.startJoin(ctx, in)
+	a.startJoin(ctx, in, !t.multiplayer())
 }
 
 func (a *App) showIntermediary(ctx context.Context, t *thread, seg string) {
