@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -155,6 +156,7 @@ func threadFromMeta(view *pb.SessionView, m sessionMeta) *thread {
 	if m.AnswerTurn != "" && m.AnswerTS != "" {
 		t.render.turnID, t.render.curTS, t.render.reacted = m.AnswerTurn, m.AnswerTS, true
 	}
+	maps.Copy(t.render.permTS, m.PermissionPrompts)
 	t.setState(view.GetState())
 	return t
 }

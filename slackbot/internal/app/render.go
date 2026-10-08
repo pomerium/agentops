@@ -425,6 +425,12 @@ func (a *App) rememberAnswer(ctx context.Context, t *thread, ts string) {
 }
 
 func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequest) {
+	t.render.mu.Lock()
+	_, shown := t.render.permTS[p.GetRequestId()]
+	t.render.mu.Unlock()
+	if shown {
+		return
+	}
 	choices := make([]gateway.PermissionChoice, 0, len(p.GetOptions()))
 	for _, o := range p.GetOptions() {
 		choices = append(choices, gateway.PermissionChoice{OptionID: o.GetId(), Name: o.GetName(), Kind: o.GetKind()})
@@ -444,6 +450,9 @@ func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequ
 	t.render.mu.Lock()
 	t.render.permTS[p.GetRequestId()] = ts
 	t.render.mu.Unlock()
+	a.saveMeta(ctx, t, func(m *sessionMeta) {
+		m.PermissionPrompts = withPermissionPrompt(m.PermissionPrompts, p.GetRequestId(), ts)
+	})
 }
 
 func (a *App) closePermission(ctx context.Context, t *thread, p *pb.PermissionResolved) {
@@ -454,6 +463,9 @@ func (a *App) closePermission(ctx context.Context, t *thread, p *pb.PermissionRe
 	if ts == "" {
 		return
 	}
+	a.saveMeta(ctx, t, func(m *sessionMeta) {
+		m.PermissionPrompts = withPermissionPrompt(m.PermissionPrompts, p.GetRequestId(), "")
+	})
 	text := permissionResolvedText(p)
 	if _, err := a.poster.UpdateMessage(ctx, t.channel, ts,
 		chromeMeta(t.sessionID), slack.MsgOptionText(text, false),
