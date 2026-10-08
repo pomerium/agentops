@@ -118,8 +118,9 @@ func run(log *slog.Logger) error {
 	case err := <-serveErr:
 		return err
 	case <-ctx.Done():
-		log.Info("agent-runner: signal received; shutting down")
+		log.Info("agent-runner: signal received; stopping the agent")
 	}
+	svc.Close()
 	done := make(chan struct{})
 	go func() { gs.GracefulStop(); close(done) }()
 	select {
