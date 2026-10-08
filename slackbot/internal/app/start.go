@@ -157,6 +157,7 @@ func threadFromMeta(view *pb.SessionView, m sessionMeta) *thread {
 	t.adoptedState = view.GetState()
 	if m.AnswerTurn != "" && m.AnswerTS != "" {
 		t.render.turnID, t.render.curTS, t.render.reacted = m.AnswerTurn, m.AnswerTS, true
+		t.render.pieceTS = maps.Clone(m.AnswerPieces)
 	}
 	maps.Copy(t.render.permTS, m.PermissionPrompts)
 	t.setState(view.GetState())

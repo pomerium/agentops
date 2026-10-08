@@ -348,7 +348,7 @@ func (a *App) endTurn(ctx context.Context, t *thread, turnID string) {
 	}
 	a.clearBusy(ctx, t)
 	if delivered {
-		a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS = "", "" })
+		a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS, m.AnswerPieces = "", "", nil })
 	} else {
 		a.log.ErrorContext(ctx, "the turn's answer did not reach Slack after a retry",
 			"session", t.sessionID, "turn_id", turnID)
@@ -459,7 +459,9 @@ func (a *App) showFinal(ctx context.Context, t *thread, seg string) bool {
 		if i == 0 {
 			firstTS = ts
 			a.rememberAnswer(ctx, t, ts)
+			continue
 		}
+		a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerPieces = withAnswerPiece(m.AnswerPieces, i, ts) })
 	}
 	t.render.mu.Lock()
 	if firstTS != "" {
@@ -475,7 +477,12 @@ func (a *App) rememberAnswer(ctx context.Context, t *thread, ts string) {
 	t.render.mu.Lock()
 	turnID := t.render.turnID
 	t.render.mu.Unlock()
-	a.saveMeta(ctx, t, func(m *sessionMeta) { m.AnswerTurn, m.AnswerTS = turnID, ts })
+	a.saveMeta(ctx, t, func(m *sessionMeta) {
+		if m.AnswerTurn != turnID {
+			m.AnswerPieces = nil
+		}
+		m.AnswerTurn, m.AnswerTS = turnID, ts
+	})
 }
 
 func (a *App) askPermission(ctx context.Context, t *thread, p *pb.PermissionRequest) {
