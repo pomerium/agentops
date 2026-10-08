@@ -37,7 +37,7 @@ func Load(getenv func(string) string) (Config, error) {
 			ChannelMapPath:        cmp.Or(getenv("SLACK_CHANNEL_MAP"), "/etc/agentops/channels.yaml"),
 			ChannelMapInterval:    30 * time.Second,
 			HarnessAPIURL:         strings.TrimRight(getenv("HARNESS_API_URL"), "/"),
-			HarnessAPITokenFile:   cmp.Or(getenv("HARNESS_API_TOKEN_FILE"), "/var/run/harness-api/token"),
+			HarnessAPITokenFile:   getenv("HARNESS_API_TOKEN_FILE"),
 			HarnessAPIDialAddress: getenv("HARNESS_API_DIAL_ADDRESS"),
 			HarnessAPICAFile:      getenv("HARNESS_API_CA_FILE"),
 		},
