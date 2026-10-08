@@ -1,6 +1,7 @@
 package harnessapi_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -67,6 +68,7 @@ func TestHistoryReplaysIdenticallyAfterRestart(t *testing.T) {
 	if restarted.GetLastSeq() != after[len(after)-1].Seq {
 		t.Errorf("LastSeq = %d, want %d", restarted.GetLastSeq(), after[len(after)-1].Seq)
 	}
+	h2.launcher.adoptErr = errors.New("the sandbox is gone")
 	<-h2.svc.ReconcileOnStartup(ctx)
 	page, err = h2.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref, AfterSeq: restarted.GetLastSeq()})
 	if err != nil {

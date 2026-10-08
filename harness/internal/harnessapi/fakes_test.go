@@ -437,6 +437,9 @@ type fakeLauncher struct {
 
 	resumeErr   error
 	activateErr error
+
+	adopted  []sandbox.AdoptSpec
+	adoptErr error
 }
 
 func newFakeLauncher() *fakeLauncher {
@@ -490,6 +493,26 @@ func (l *fakeLauncher) Activate(ctx context.Context, _ *sandbox.Prepared, _ *san
 		return nil, activateErr
 	}
 	l.session.start(1, []byte("fake-stream"))
+	return l.session, nil
+}
+
+func (l *fakeLauncher) Adopt(_ context.Context, spec sandbox.AdoptSpec, opts ...sandbox.SupervisionOption) (harnessapi.LiveSession, error) {
+	var sup sandbox.Supervision
+	for _, opt := range opts {
+		opt(&sup)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.adoptErr != nil {
+		return nil, l.adoptErr
+	}
+	l.adopted = append(l.adopted, spec)
+	l.sup = sup
+	if r := l.session.current(); r != nil && r.ctx.Err() == nil {
+		r.attach(spec.ResumeAfter)
+		return l.session, nil
+	}
+	l.session.start(spec.ResumeAfter, spec.StreamID)
 	return l.session, nil
 }
 

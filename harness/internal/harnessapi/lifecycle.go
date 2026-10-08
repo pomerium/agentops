@@ -9,6 +9,7 @@ import (
 
 	"github.com/pomerium/agentops/harness/api"
 	pb "github.com/pomerium/agentops/harness/api/pb"
+	"github.com/pomerium/agentops/harness/internal/sandbox"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
@@ -174,7 +175,7 @@ func (s *Service) ReconcileOnStartup(ctx context.Context) <-chan struct{} {
 
 func (s *Service) reconcile(ctx context.Context, sessions []sessionstore.Session) {
 	ctx = context.WithoutCancel(ctx)
-	interrupted := 0
+	interrupted, adopted := 0, 0
 	for _, sess := range sessions {
 		if sess.Status == api.StateSuspended {
 			continue
@@ -183,13 +184,70 @@ func (s *Service) reconcile(ctx context.Context, sessions []sessionstore.Session
 		if !s.claim(sess.ID, o) {
 			continue
 		}
+		if sess.Status == api.StateRunning && s.adopt(ctx, sess, o) {
+			adopted++
+			continue
+		}
 		if s.interrupt(ctx, sess) {
 			interrupted++
 		}
 		s.settle(ctx, sess.ID, o)
 	}
 	s.log.InfoContext(ctx, "startup reconcile complete",
-		"active_sessions", len(sessions), "interrupted", interrupted)
+		"active_sessions", len(sessions), "adopted", adopted, "interrupted", interrupted)
+}
+
+func (s *Service) adopt(ctx context.Context, sess sessionstore.Session, o *owner) bool {
+	if sess.RunID == "" || sess.StreamID == "" || sess.SandboxClaimName == "" || sess.SandboxName == "" || sess.ACPSessionID == "" {
+		return false
+	}
+	exec, err := decodeExecutor(sess.Executor)
+	if err != nil {
+		s.log.WarnContext(ctx, "startup reconcile: the session's pod is not recorded; it cannot be adopted", "session", sess.ID, "err", err)
+		return false
+	}
+	tmpl, promptAppendix, err := storedTemplate(sess)
+	if err != nil {
+		s.log.WarnContext(ctx, "startup reconcile: the session's template is unreadable; it cannot be adopted", "session", sess.ID, "err", err)
+		return false
+	}
+	live, err := s.launcher.Adopt(ctx, sandbox.AdoptSpec{
+		RunID:       sess.RunID,
+		ClaimName:   sess.SandboxClaimName,
+		SandboxName: sess.SandboxName,
+		Executor:    exec,
+		Launch: sandbox.LaunchSpec{
+			SessionID:    sess.ID,
+			Template:     tmpl,
+			SystemPrompt: composeSystemPrompt(tmpl.Spec.SystemPrompt, promptAppendix),
+			Endpoints:    runIdentityEndpoints(tmpl),
+		},
+		ACPSessionID: sess.ACPSessionID,
+		StreamID:     []byte(sess.StreamID),
+		ResumeAfter:  uint64(sess.PodSeq),
+	}, sandbox.WithOnDown(s.superviseLaunch(ctx, sess.ID, o)))
+	if err != nil {
+		s.log.WarnContext(ctx, "startup reconcile: the session's sandbox cannot be adopted", "session", sess.ID, "err", err)
+		return false
+	}
+	b := newBinding(sess.ID, sess.SandboxClaimName, live, newLogSink(s, sess.ID, s.cfg.permissionTimeout))
+	b.runID = sess.RunID
+	close(b.ready)
+	if !s.register(o, b) {
+		close(b.consumed)
+		_ = live.Close()
+		return false
+	}
+	go s.consume(b)
+	go s.watchRun(ctx, b, sess.RunID)
+	if until, err := s.launcher.ExtendLease(ctx, b.claimName); err == nil {
+		b.leaseUntil.Store(until.UnixNano())
+	} else {
+		s.log.WarnContext(ctx, "startup reconcile: could not extend an adopted sandbox's lease", "session", sess.ID, "err", err)
+	}
+	s.log.InfoContext(ctx, "startup reconcile: adopted a running session; waiting for its sandbox to attach again",
+		"session", sess.ID, "run_id", sess.RunID, "resume_after", sess.PodSeq)
+	return true
 }
 
 func (s *Service) interrupt(ctx context.Context, sess sessionstore.Session) bool {

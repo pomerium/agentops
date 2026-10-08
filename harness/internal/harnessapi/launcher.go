@@ -31,6 +31,14 @@ func (l orchestratorLauncher) Activate(ctx context.Context, prepared *sandbox.Pr
 	return s, nil
 }
 
+func (l orchestratorLauncher) Adopt(ctx context.Context, spec sandbox.AdoptSpec, opts ...sandbox.SupervisionOption) (LiveSession, error) {
+	s, err := l.o.Adopt(ctx, spec, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (l orchestratorLauncher) Teardown(ctx context.Context, claimName string) error {
 	return l.o.Teardown(ctx, claimName)
 }

@@ -45,6 +45,7 @@ type Launcher interface {
 	Prepare(ctx context.Context, spec sandbox.LaunchSpec) (*sandbox.Prepared, error)
 	Expect(runID string, prepared *sandbox.Prepared, opts ...sandbox.SupervisionOption) (*sandbox.Attachment, error)
 	Activate(ctx context.Context, prepared *sandbox.Prepared, att *sandbox.Attachment) (LiveSession, error)
+	Adopt(ctx context.Context, spec sandbox.AdoptSpec, opts ...sandbox.SupervisionOption) (LiveSession, error)
 	Teardown(ctx context.Context, claimName string) error
 
 	Suspend(ctx context.Context, claimName string) error

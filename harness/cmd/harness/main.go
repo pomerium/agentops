@@ -126,11 +126,6 @@ func run(log *slog.Logger) error {
 	if advisory := agentlink.BindAdvisory(cfg.Harness.GRPCAddr); advisory != "" {
 		log.Warn(advisory)
 	}
-	stopAgentLink, err := serveAgentLink(linkSrv, cfg.Harness.GRPCAddr, log)
-	if err != nil {
-		return err
-	}
-	defer stopAgentLink()
 
 	claimClient, err := sandbox.NewClaimClient(restCfg, cfg.Harness.Namespace)
 	if err != nil {
@@ -176,11 +171,14 @@ func run(log *slog.Logger) error {
 		harnessapi.WithLogger(log),
 	)
 
-	reconciled := api.ReconcileOnStartup(ctx)
-	go func() {
-		<-reconciled
-		runSweeper(ctx, api)
-	}()
+	<-api.ReconcileOnStartup(ctx)
+	go runSweeper(ctx, api)
+
+	stopAgentLink, err := serveAgentLink(linkSrv, cfg.Harness.GRPCAddr, log)
+	if err != nil {
+		return err
+	}
+	defer stopAgentLink()
 
 	stopAPI, err := serveClientAPI(ctx, cfg, api, st, crCache, log)
 	if err != nil {
