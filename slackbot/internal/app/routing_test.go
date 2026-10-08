@@ -495,6 +495,22 @@ func TestAPausedSessionWithNoKnownStartInAVeryLongThreadCanContinue(t *testing.T
 	}
 }
 
+func TestContinuingAPausedSessionShowsAnAnswerTheBotMissed(t *testing.T) {
+	f := newFixture(t)
+	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateRunning, map[string]any{
+		"v": 1, "channel_id": "C1", "thread_ts": threadRoot, "user_id": "U1", "team_id": "T1",
+		"watching": true, "last_seq": 0,
+	})
+	f.api.emit("old-1", "t1", &pb.AgentMessage{PartId: "t1.1", Text: "The missed answer.", Final: true})
+	f.api.emit("old-1", "t1", &pb.TurnCompleted{})
+	f.api.setState("old-1", api.StateRunning, api.StateSuspended, api.ReasonIdle)
+	f.api.emit("old-1", "", &pb.Suspended{Reason: api.ReasonIdle})
+
+	f.app.HandleMention(context.Background(), mentionIn(f, "U1", "continue"))
+	f.poster.waitForPost(t, "The missed answer.")
+	waitFor(t, "the continuation", func() bool { return len(f.api.promptRequests()) == 1 })
+}
+
 func TestASlackReadFailureLeavesAPausedSessionPaused(t *testing.T) {
 	f := newFixture(t)
 	f.seedSession("old-1", "slack:C1:168.1:T1:U1", api.StateSuspended, map[string]any{
