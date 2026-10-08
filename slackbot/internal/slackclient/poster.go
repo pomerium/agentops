@@ -2,9 +2,13 @@ package client
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/slack-go/slack"
 )
+
+var ErrThreadTooLong = errors.New("the thread has more replies than one read covers")
 
 type Poster struct {
 	client *slack.Client
@@ -61,11 +65,11 @@ func (p *Poster) ThreadReplies(ctx context.Context, channelID, threadTS, since s
 			out = out[:copy(out, out[len(out)-max:])]
 		}
 		if !hasMore || next == "" {
-			break
+			return out, nil
 		}
 		cursor = next
 	}
-	return out, nil
+	return nil, fmt.Errorf("%w: more than %d replies in %s/%s", ErrThreadTooLong, maxThreadPages*threadPageSize, channelID, threadTS)
 }
 
 const (
