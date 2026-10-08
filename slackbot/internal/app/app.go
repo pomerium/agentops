@@ -382,7 +382,7 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, 
 			"session", t.sessionID, "err", err)
 		return "", false
 	}
-	entries, truncated := capEntries(sessionTranscript(replies,
+	entries, truncated := capEntries(transcriptMessages(replies,
 		catchupCarry(cursor, beforeTS, a.botUserID, t.sessionID, t.ownerUserID)))
 	block := composeCatchupBlock(entries, truncated)
 	if block != "" {
