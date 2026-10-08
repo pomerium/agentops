@@ -104,6 +104,25 @@ func TestCatchupDeltaOnTheNextMention(t *testing.T) {
 	}
 }
 
+func TestAFailedCatchupReadIsCarriedByTheNextTurn(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	twoParticipants(t, f)
+	f.humanSaid("U9", "do not deploy production")
+
+	before := len(f.api.promptRequests())
+	f.poster.failNextReads(1)
+	f.app.HandleMention(ctx, mentionIn(f, "U1", "check staging"))
+	waitFor(t, "U1's turn without a catch-up", func() bool { return len(f.api.promptRequests()) > before })
+
+	before = len(f.api.promptRequests())
+	f.app.HandleMention(ctx, mentionIn(f, "U1", "continue"))
+	waitFor(t, "U1's next turn", func() bool { return len(f.api.promptRequests()) > before })
+	if content := f.api.promptRequests()[before].Content; !strings.Contains(content, "do not deploy production") {
+		t.Errorf("the discussion the failed read missed never reached the agent:\n%s", content)
+	}
+}
+
 func TestOwnOutputIsFilteredFromTheDelta(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
