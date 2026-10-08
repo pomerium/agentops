@@ -378,6 +378,11 @@ func (a *App) catchup(ctx context.Context, t *thread, beforeTS string) (string, 
 	}
 	replies, err := a.poster.ThreadReplies(ctx, t.channel, t.threadTS, "", transcriptFetchMax)
 	if err != nil {
+		a.log.WarnContext(ctx, "read the whole thread for a catch-up failed; reading only what came after the cursor",
+			"session", t.sessionID, "err", err)
+		replies, err = a.poster.ThreadReplies(ctx, t.channel, t.threadTS, cursor, transcriptFetchMax)
+	}
+	if err != nil {
 		a.log.WarnContext(ctx, "read the thread for a catch-up failed; the turn goes without one and the next turn carries it",
 			"session", t.sessionID, "err", err)
 		return "", false
