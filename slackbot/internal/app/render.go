@@ -197,6 +197,9 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 		if exp := p.ApprovalRequired.GetExpiresAt(); exp != nil {
 			t.approvalWindow.Store(int64(time.Until(exp.AsTime())))
 		}
+		if t.pastApproval(ev.GetSeq()) {
+			return
+		}
 		a.deliverApproval(ctx, t, p.ApprovalRequired)
 
 	case *pb.Event_Approved:
