@@ -100,6 +100,7 @@ func (f *fakeAPI) CreateSession(_ context.Context, req *pb.CreateSessionRequest)
 	f.sessions[id] = view
 	f.byConv[req.GetConversationRef()] = id
 	f.feeds[id] = newFakeFeed()
+	f.updated[id] = time.Now()
 	return &pb.CreateSessionResponse{Session: proto.CloneOf(view)}, nil
 }
 
@@ -240,6 +241,7 @@ func (f *fakeAPI) emit(sessionID, turnID string, payload proto.Message) {
 	ev := &pb.Event{SessionId: sessionID, Seq: f.seq, TurnId: turnID, Timestamp: timestamppb.Now()}
 	setPayload(ev, payload)
 	if view, ok := f.sessions[sessionID]; ok {
+		f.updated[sessionID] = time.Now()
 		view.LastSeq = ev.Seq
 		if p := ev.GetStateChanged(); p != nil {
 			view.State = p.GetNew()
@@ -280,6 +282,7 @@ func (f *fakeAPI) seedSession(id, convRef string, state api.SessionState) {
 	}
 	f.byConv[convRef] = id
 	f.feeds[id] = newFakeFeed()
+	f.updated[id] = time.Now()
 }
 
 func (f *fakeAPI) createRequests() []*pb.CreateSessionRequest {
@@ -315,8 +318,8 @@ type fakeFeed struct {
 func newFakeFeed() *fakeFeed { return &fakeFeed{} }
 
 func (f *fakeFeed) subscribe(afterSeq int64) *fakeSub {
-	s := &fakeSub{ch: make(chan *pb.Event, 256)}
 	f.mu.Lock()
+	s := &fakeSub{ch: make(chan *pb.Event, len(f.history)+256)}
 	for _, ev := range f.history {
 		if ev.Seq > afterSeq {
 			s.send(ev)
@@ -721,4 +724,39 @@ func (p *fakePoster) ephemeralTo(userID string) []ephemeralPost {
 		}
 	}
 	return out
+}
+
+func TestTheFakeListsSessionsChangedSinceATime(t *testing.T) {
+	f := newFakeAPI()
+	f.seedSession("s1", "slack:C1:168.1:T1:U1", api.StateSuspended)
+	since := time.Now().Add(-time.Second)
+	f.setState("s1", api.StateSuspended, api.StateEnded, noReason)
+
+	got, err := f.ListSessions(context.Background(), &pb.ListSessionsRequest{UpdatedSince: api.Timestamp(since)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.GetSessions()) != 1 {
+		t.Fatalf("got %d sessions, want the one that changed", len(got.GetSessions()))
+	}
+}
+
+func TestTheFakeReplaysMoreThanOneBuffer(t *testing.T) {
+	feed := newFakeFeed()
+	for seq := int64(1); seq <= 300; seq++ {
+		feed.publish(&pb.Event{Seq: seq})
+	}
+	done := make(chan *fakeSub, 1)
+	go func() { done <- feed.subscribe(0) }()
+	select {
+	case sub := <-done:
+		defer sub.Close()
+		for seq := int64(1); seq <= 300; seq++ {
+			if got := <-sub.events(); got.GetSeq() != seq {
+				t.Fatalf("got seq %d, want %d", got.GetSeq(), seq)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("subscribe blocked before its reader could start")
+	}
 }
