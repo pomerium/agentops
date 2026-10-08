@@ -43,6 +43,7 @@ type fakeAPI struct {
 	templates    []string
 	templatesErr error
 	subscribeErr []error
+	eventPage    int
 }
 
 var _ harnessapipbconnect.HarnessAPIServiceHandler = (*fakeAPI)(nil)
@@ -180,11 +181,16 @@ func (f *fakeAPI) ListTemplates(context.Context, *pb.ListTemplatesRequest) (*pb.
 func (f *fakeAPI) ListEvents(_ context.Context, req *pb.ListEventsRequest) (*pb.ListEventsResponse, error) {
 	f.mu.Lock()
 	feed := f.feeds[f.lookup(req.GetRef())]
+	page := f.eventPage
 	f.mu.Unlock()
 	if feed == nil {
 		return nil, api.ErrNotFound
 	}
-	return &pb.ListEventsResponse{Events: feed.after(req.GetAfterSeq())}, nil
+	events := feed.after(req.GetAfterSeq())
+	if page > 0 && len(events) > page {
+		events = events[:page]
+	}
+	return &pb.ListEventsResponse{Events: events}, nil
 }
 
 func (f *fakeAPI) failSubscribes(errs ...error) {

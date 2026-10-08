@@ -548,6 +548,33 @@ func TestPausedSessionHoldsNoStream(t *testing.T) {
 	}
 }
 
+func TestSweepReadsEveryPageOfAPausedSessionsEvents(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.app.HandleMention(ctx, mention(f, "ship it"))
+	f.poster.waitForPost(t, "Getting ready")
+	f.api.setState("sess-1", api.StatePending, api.StateRunning, noReason)
+	waitForState(t, f, "sess-1", api.StateRunning)
+	f.api.setState("sess-1", api.StateRunning, api.StateSuspended, api.ReasonIdle)
+	f.api.emit("sess-1", "", &pb.Suspended{Reason: api.ReasonIdle})
+	f.poster.waitForPost(t, "paused this session")
+	waitFor(t, "the paused session's stream to close", func() bool {
+		return f.api.openStreams("sess-1") == 0
+	})
+
+	f.api.mu.Lock()
+	f.api.eventPage = 1
+	f.api.mu.Unlock()
+	f.api.setState("sess-1", api.StateSuspended, api.StateEnded, noReason)
+	f.api.emit("sess-1", "", &pb.SessionEnded{Reason: api.EndExpired})
+
+	sweepCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go f.app.RunSweeper(sweepCtx, 20*time.Millisecond)
+
+	f.poster.waitForPost(t, "approval ran out")
+}
+
 func TestSweepRendersTheReleaseCopy(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
