@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,5 +125,60 @@ func TestAReplayedPermissionRequestReusesItsPrompt(t *testing.T) {
 
 	if p.posts != 1 {
 		t.Fatalf("one permission request produced %d prompts", p.posts)
+	}
+}
+
+type flakyPoster struct {
+	Poster
+	failUpdates int
+	updates     int
+}
+
+func (*flakyPoster) PostMessage(context.Context, string, ...slack.MsgOption) (string, error) {
+	return "answer", nil
+}
+
+func (*flakyPoster) AddReaction(context.Context, string, string, string) error { return nil }
+
+func (*flakyPoster) RemoveReaction(context.Context, string, string, string) error { return nil }
+
+func (p *flakyPoster) UpdateMessage(context.Context, string, string, ...slack.MsgOption) (string, error) {
+	p.updates++
+	if p.updates <= p.failUpdates {
+		return "", errors.New("connection lost")
+	}
+	return "answer", nil
+}
+
+func answerPart(final bool) *pb.Event {
+	return &pb.Event{TurnId: "t1", Payload: &pb.Event_AgentMessage{
+		AgentMessage: &pb.AgentMessage{PartId: "t1.1", Text: "the answer", Final: final},
+	}}
+}
+
+func TestTheTurnEndRetriesAFinalAnswerSlackRejected(t *testing.T) {
+	p := &flakyPoster{failUpdates: 1}
+	a := New(nil, p, nil)
+	th := &thread{channel: "C1", threadTS: "1.0", render: newRenderer()}
+	ctx := context.Background()
+	a.renderEvent(ctx, th, "", answerPart(false))
+	a.renderEvent(ctx, th, "", answerPart(true))
+	a.endTurn(ctx, th, "t1")
+	if p.updates < 2 {
+		t.Fatal("a final answer Slack rejected was never sent again")
+	}
+}
+
+func TestAPermissionPromptIsKeptUntilItCloses(t *testing.T) {
+	p := &flakyPoster{failUpdates: 1}
+	a := New(nil, p, nil)
+	th := &thread{channel: "C1", render: newRenderer()}
+	th.render.permTS["r1"] = "prompt"
+	resolved := &pb.PermissionResolved{RequestId: "r1"}
+	ctx := context.Background()
+	a.closePermission(ctx, th, resolved)
+	a.closePermission(ctx, th, resolved)
+	if p.updates != 2 {
+		t.Fatalf("a prompt Slack failed to close was forgotten: %d close attempts", p.updates)
 	}
 }
