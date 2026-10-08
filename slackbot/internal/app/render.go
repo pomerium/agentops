@@ -117,7 +117,7 @@ func (a *App) subscribe(ctx context.Context, t *thread, afterSeq int64) (*client
 func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.Event) {
 	switch p := ev.GetPayload().(type) {
 	case *pb.Event_StateChanged:
-		a.renderState(ctx, t, ackTS, p.StateChanged)
+		a.renderState(ctx, t, ackTS, p.StateChanged, ev.GetSeq())
 
 	case *pb.Event_ApprovalRequired:
 		if exp := p.ApprovalRequired.GetExpiresAt(); exp != nil {
@@ -190,7 +190,7 @@ func (a *App) renderEvent(ctx context.Context, t *thread, ackTS string, ev *pb.E
 	}
 }
 
-func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.StateChanged) {
+func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.StateChanged, seq int64) {
 	if p.GetNew() == api.StateEnded {
 		from := p.GetOld()
 		t.endedFrom.Store(&from)
@@ -213,6 +213,7 @@ func (a *App) renderState(ctx context.Context, t *thread, ackTS string, p *pb.St
 			t.reviveMention.Store(nil)
 			a.drainBusy(ctx, t)
 			a.restateStatus(ctx, t, msgStatusRetryContinue)
+			a.watchSuspended(ctx, t, seq)
 		case api.ReasonResumeUnavailable:
 			a.swapReaction(ctx, t.channel, ackTS, reactionStarting, reactionFailed)
 			in := t.reviveMention.Swap(nil)
