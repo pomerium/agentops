@@ -112,7 +112,13 @@ func run(log *slog.Logger) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+	if err := gw.Wait(shutdownCtx); err != nil {
+		log.Warn("shutting down with Slack actions still running", "err", err)
+	}
+	return nil
 }
 
 const identityLookupTimeout = 15 * time.Second
