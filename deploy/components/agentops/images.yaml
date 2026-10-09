@@ -1,0 +1,5 @@
+images:
+  - path: spec/podTemplate/spec/containers[]/image
+    kind: SandboxTemplate
+  - path: spec/podTemplate/spec/initContainers[]/image
+    kind: SandboxTemplate

@@ -1,0 +1,22 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: any
+spec:
+  podTemplate:
+    spec:
+      containers:
+        - name: sidecar
+          env:
+            - name: SIDECAR_HTTP_ANTHROPIC_UPSTREAM_URL
+              value: https://anthropic.example.com
+            - name: SIDECAR_AGENTIC_AS_URL
+              value: https://agentic.example.com
+            - name: SIDECAR_HARNESS_URL
+              value: https://harness.example.com
+            - name: SIDECAR_HTTP_ANTHROPIC_DIAL_ADDRESS
+              value: pomerium-proxy.pomerium.svc.cluster.local:443
+            - name: SIDECAR_AGENTIC_AS_DIAL_ADDRESS
+              value: pomerium-proxy.pomerium.svc.cluster.local:443
+            - name: SIDECAR_HARNESS_DIAL_ADDRESS
+              value: pomerium-proxy.pomerium.svc.cluster.local:443

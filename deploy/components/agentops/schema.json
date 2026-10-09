@@ -1,0 +1,17 @@
+{
+  "definitions": {
+    "io.x-k8s.agents.extensions.v1beta1.SandboxTemplate": {
+      "type": "object",
+      "x-kubernetes-group-version-kind": [
+        {"group": "extensions.agents.x-k8s.io", "version": "v1beta1", "kind": "SandboxTemplate"}
+      ],
+      "properties": {
+        "spec": {"type": "object", "properties": {
+          "podTemplate": {"type": "object", "properties": {
+            "spec": {"$ref": "#/definitions/io.k8s.api.core.v1.PodSpec"}
+          }}
+        }}
+      }
+    }
+  }
+}

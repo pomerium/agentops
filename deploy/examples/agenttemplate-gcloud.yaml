@@ -1,44 +1,11 @@
-# Example AgentTemplate — "gcloud".
-#
-# Invoked by @mentioning the bot in a Slack channel bound to this template in
-# the singleton ChannelConfig (see channelconfig.yaml):
-#
-#     slackChannelTemplates:
-#       C0123ABCDEF: gcloud
-#
-# Gives the agent Google's official Agent Skills repo (github.com/google/skills)
-# as working context — Apache-2.0 skills authored by Google for Cloud Run,
-# BigQuery, Cloud SQL, AlloyDB, Firebase, GKE and the Gemini API, plus
-# Well-Architected Framework pillars (Security, Reliability, Cost Optimization)
-# and onboarding/auth/observability recipes — and pairs each baked product
-# skill with Google's matching first-party remote MCP server so the agent can
-# actually act against the live project, not just describe it. When a user
-# invokes it, agentops:
-#   1. resolves this template by its metadata.name ("gcloud");
-#   2. ensures the user has connected every server in .spec.requiredMCPServers,
-#      posting an OAuth link in-thread for any missing ones;
-#   3. once connected, launches a SandboxClaim against the
-#      google-skills-claude-code SandboxWarmPool (whose SandboxTemplate bakes the
-#      github.com/google/skills checkout) and injects the rendered systemPrompt
-#      plus one Authorization token per MCP server;
-#   4. opens a live ACP session bound to the Slack thread.
-#
-# AUTH NOTE: the Google Cloud MCP servers below authenticate with Google Cloud
-# IAM via Google OAuth (the token is scoped to the user's Google identity and
-# project IAM), which differs from the Dynamic-Client-Registration vendors in
-# the gstack example. The {name, url} contract is the same — each is a per-user,
-# OAuth-brokered connection surfaced in the Slack auth prompt — but the user
-# connects with their Google account and the granted access is bounded by their
-# project IAM roles.
 apiVersion: agents.pomerium.com/v1alpha1
 kind: AgentTemplate
 metadata:
   name: gcloud
-  namespace: agentops
+  namespace: agentops-system
   labels:
     app.kubernetes.io/name: agentops
 spec:
-  # System prompt rendered into the sandbox (injected as AGENT_SYSTEM_PROMPT).
   systemPrompt: |
     You are a Google Cloud engineering assistant invoked from Slack. Google's
     official Agent Skills repository (github.com/google/skills) is checked out
@@ -54,70 +21,17 @@ spec:
     MCP servers, cite what you looked at, and ask before taking any action that
     creates, modifies, or deletes a cloud resource.
 
-  # ACP session configuration applied after the session is created
-  # (session/set_config_option), keyed by the option ids the harness
-  # advertises (claude-code: model, effort, mode). Strict: an unknown option
-  # id or rejected value fails the launch rather than running with silently
-  # unapplied config.
   sessionConfig:
     model: sonnet
 
-  # MCP servers the invoking user must be connected to before the workflow
-  # runs. Each {name, url} is an OAuth-brokered, per-user connection; the name
-  # is the credential key and is surfaced in the Slack auth prompt. These are
-  # Google's first-party remote MCP servers (see
-  # https://docs.cloud.google.com/mcp/supported-products) and each one matches a
-  # product skill baked into the workspace. They authenticate with Google Cloud
-  # IAM — see the AUTH NOTE above.
-  #
-  # The required set is kept minimal (every server here gates the workflow on a
-  # per-user OAuth connection); the remaining product/recipe servers are
-  # commented below — uncomment the ones your team uses.
   requiredMCPServers:
-    - name: cloud-run        # skill: Cloud Run — deploy/manage services & jobs
+    - name: cloud-run
       url: https://cloudrun-mcp.example.com
-      # dialAddress overrides the host[:port] the sidecar connects to while SNI
-      # and the Host header stay the public URL above. Use it when the public
-      # hostname resolves to an in-cluster LoadBalancer VIP that would hairpin —
-      # point envoy at the gateway's in-cluster Service instead.
-      dialAddress: mcp-gateway.gateway.svc.cluster.local:443
-    - name: cloudlogging     # recipe: observability — Cloud Logging queries
+      dialAddress: pomerium-proxy.pomerium.svc.cluster.local:443
+    - name: cloudlogging
       url: https://logging-mcp.example.com
-    - name: gke              # skill: GKE (Kubernetes Engine) — clusters/workloads
+    - name: gke
       url: https://k8s-mcp.example.com
-    # - name: cloud-run        # skill: Cloud Run — deploy/manage services & jobs
-    #   url: https://run.googleapis.com/mcp
-    # - name: bigquery         # skill: BigQuery — datasets, tables, queries
-    #   url: https://bigquery.googleapis.com/mcp
-    # - name: gke              # skill: GKE (Kubernetes Engine) — clusters/workloads
-    #   url: https://container.googleapis.com/mcp
-    # Other google/skills product skills with a matching first-party MCP server:
-    # - name: cloud-sql      # skill: Cloud SQL (MySQL/PostgreSQL/SQL Server)
-    #   url: https://sqladmin.googleapis.com/mcp
-    # - name: alloydb        # skill: AlloyDB for PostgreSQL
-    #   url: https://alloydb.googleapis.com/mcp
-    # - name: compute        # Compute Engine (VMs)
-    #   url: https://compute.googleapis.com/mcp
-    #
-    # For the observability recipe skills (network observability, ops):
-    # - name: logging        # Cloud Logging
-    #   url: https://logging.googleapis.com/mcp
-    # - name: monitoring     # Cloud Monitoring
-    #   url: https://monitoring.googleapis.com/mcp
-    # - name: trace          # Cloud Trace
-    #   url: https://cloudtrace.googleapis.com/mcp
-    #
-    # NOTE: the Firebase and Gemini-API skills have no single first-party GCP
-    # MCP endpoint here — Firebase ships its own MCP server, and the Gemini /
-    # Vertex AI platform exposes regional aiplatform endpoints
-    # (e.g. https://us-central1-aiplatform.googleapis.com/mcp). Add them
-    # explicitly if your workflow needs them.
 
-  # Selects the agent-sandbox SandboxWarmPool (replicas: 0) whose SandboxTemplate
-  # defines how the sandbox is baked: the harness + base image, the sidecar, AND
-  # the git working context (public repo, no credentials Secret) — see
-  # sandboxwarmpool-google-skills-claude-code.yaml and
-  # sandboxtemplate-google-skills-claude-code.yaml. The template is
-  # workflow-specific because the repo is part of the bake.
   warmPoolRef:
     name: google-skills-claude-code
