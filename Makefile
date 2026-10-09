@@ -46,7 +46,7 @@ vet:
 
 ## fmt-check: fail if a Go file in any module is not gofmt-clean.
 fmt-check:
-	@bad=$$(gofmt -l $(MODULES)); \
+	@bad=$$(gofmt -l $(MODULES)) || exit 1; \
 	if [ -n "$$bad" ]; then echo "not gofmt-clean:"; echo "$$bad"; exit 1; fi; \
 	echo "every Go file is gofmt-clean"
 
