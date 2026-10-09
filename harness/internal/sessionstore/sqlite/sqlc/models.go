@@ -36,6 +36,7 @@ type Session struct {
 	Executor         string `json:"executor"`
 	StreamID         string `json:"stream_id"`
 	PodSeq           int64  `json:"pod_seq"`
+	LaunchedAt       int64  `json:"launched_at"`
 }
 
 type SessionEvent struct {

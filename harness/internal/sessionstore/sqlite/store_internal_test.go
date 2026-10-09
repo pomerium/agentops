@@ -111,3 +111,39 @@ func TestADatabaseFromBeforeTheMigrationSquashGetsThePodLink(t *testing.T) {
 		t.Fatalf("GetSession = %+v, %v; want pod seq 4", got, err)
 	}
 }
+
+func TestTheLaunchClockOfAnOlderSessionStartsAtItsCreation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, s.db, migrations.FS)
+	if err != nil {
+		t.Fatalf("goose provider: %v", err)
+	}
+	if _, err := provider.DownTo(ctx, 11); err != nil {
+		t.Fatalf("migrate down to 11: %v", err)
+	}
+	created := time.Unix(1700000000, 0).UTC()
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO sessions (id, client_id, conversation_ref, status, created_at, updated_at) VALUES ('a', 'c', 'one', 'suspended', ?, ?)",
+		created.Unix(), created.Unix()+60); err != nil {
+		t.Fatalf("insert a session from before the launch clock: %v", err)
+	}
+	_ = s.Close()
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got, err := s.GetSession(ctx, "a")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !got.LaunchedAt.Equal(created) {
+		t.Errorf("LaunchedAt = %v, want its creation %v", got.LaunchedAt, created)
+	}
+}

@@ -151,15 +151,8 @@ func (s *Service) superviseLaunch(ctx context.Context, sessionID string, o *owne
 	ctx = context.WithoutCancel(ctx)
 	return func(cause string) {
 		s.log.WarnContext(ctx, "session closed by supervision", "session", sessionID, "cause", cause)
-		s.stopOwned(ctx, sessionID, o, stopSpec{end: supervisionReason(cause), detail: cause})
+		s.stopOwned(ctx, sessionID, o, stopSpec{end: api.EndTunnelLost, detail: cause})
 	}
-}
-
-func supervisionReason(cause string) api.EndReason {
-	if cause == "agent_exited" {
-		return api.EndAgentExit
-	}
-	return api.EndTunnelLost
 }
 
 func (s *Service) ReconcileOnStartup(ctx context.Context) <-chan struct{} {
@@ -413,11 +406,11 @@ func (s *Service) sweepAbsolute(ctx context.Context, sessions []sessionstore.Ses
 		if sess.Status == api.StateSuspended {
 			continue
 		}
-		if time.Since(sess.CreatedAt) < s.cfg.sessionTTL {
+		if time.Since(sess.LaunchedAt) < s.cfg.sessionTTL {
 			continue
 		}
 		s.log.InfoContext(ctx, "ending a session past its absolute lifetime",
-			"session", sess.ID, "session_ttl", s.cfg.sessionTTL.String())
+			"session", sess.ID, "launched_at", sess.LaunchedAt, "session_ttl", s.cfg.sessionTTL.String())
 		s.stopSession(ctx, sess.ID, stopSpec{end: api.EndExpired, detail: "the session reached its maximum lifetime"})
 	}
 }

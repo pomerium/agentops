@@ -34,6 +34,7 @@ type Session struct {
 	EventSeq         int64
 	TurnSeq          int64
 	SuspendedAt      time.Time
+	LaunchedAt       time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 
@@ -80,6 +81,7 @@ type Sessions interface {
 	UpdateSessionRunExpiry(ctx context.Context, id string, runExpiresAt time.Time) error
 	UpdateSessionApprover(ctx context.Context, id, approverSubject string) error
 	UpdateSessionSuspended(ctx context.Context, id string, status api.SessionState, suspendedAt time.Time) error
+	UpdateSessionLaunched(ctx context.Context, id string, status api.SessionState, launchedAt time.Time) error
 	UpdateSessionLink(ctx context.Context, id, executor, streamID string, podSeq int64) error
 	AdvancePodSeq(ctx context.Context, id string, podSeq int64) error
 	NextTurnSeq(ctx context.Context, sessionID string) (int64, error)

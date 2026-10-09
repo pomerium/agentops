@@ -113,3 +113,34 @@ func TestSuspendedSweepReleasesTheWorkspace(t *testing.T) {
 		t.Errorf("teardowns = %v, want the released claim", teardowns)
 	}
 }
+
+func TestAbsoluteLifetimeRestartsWithEachLaunch(t *testing.T) {
+	ctx := as(stubClient)
+	const ttl = 1500 * time.Millisecond
+	h := newHarness(t, harnessapi.WithSessionTTL(ttl))
+	view := launchRunning(t, h, "stub:conv-1")
+	ref := byID(view.GetId())
+	h.svc.SuspendForTest(ctx, ref.GetSessionId())
+	waitForStoredState(t, h, ref, api.StateSuspended)
+
+	time.Sleep(ttl + 100*time.Millisecond)
+	if _, err := h.svc.Prompt(ctx, &pb.PromptRequest{Ref: ref, Content: "carry on"}); err != nil {
+		t.Fatalf("Prompt (revive): %v", err)
+	}
+	waitForStoredState(t, h, ref, api.StateRunning)
+
+	h.svc.SweepExpired(ctx)
+	if got, _ := h.svc.GetSession(ctx, &pb.GetSessionRequest{Ref: ref}); got.GetSession().GetState() != api.StateRunning {
+		t.Fatalf("a continuation was swept by the first launch's lifetime: %q", got.GetSession().GetState())
+	}
+	if _, _, teardowns, _, _ := h.launcher.snapshot(); len(teardowns) != 0 {
+		t.Fatalf("the sweep tore down a continued workspace: %v", teardowns)
+	}
+
+	time.Sleep(ttl + 100*time.Millisecond)
+	h.svc.SweepExpired(ctx)
+	waitForStoredState(t, h, ref, api.StateEnded)
+	if _, _, teardowns, _, _ := h.launcher.snapshot(); len(teardowns) != 1 {
+		t.Errorf("teardowns = %v, want the expired continuation's claim", teardowns)
+	}
+}

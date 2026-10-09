@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"strings"
-	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -23,7 +22,6 @@ type LaunchSpec struct {
 	Template           *v1alpha1.AgentTemplate
 	SystemPrompt       string
 	Endpoints          []ProxiedEndpoint
-	Deadline           time.Time
 	ResumeACPSessionID string
 }
 
@@ -44,14 +42,6 @@ func BuildSandboxClaim(namespace string, spec LaunchSpec) *sbxv1.SandboxClaim {
 		Spec: sbxv1.SandboxClaimSpec{
 			WarmPoolRef: sbxv1.SandboxWarmPoolRef{Name: spec.Template.Spec.WarmPoolRef.Name},
 		},
-	}
-
-	if !spec.Deadline.IsZero() {
-		shutdown := metav1.NewTime(spec.Deadline)
-		claim.Spec.Lifecycle = &sbxv1.Lifecycle{
-			ShutdownTime:   &shutdown,
-			ShutdownPolicy: sbxv1.ShutdownPolicyDelete,
-		}
 	}
 	return claim
 }

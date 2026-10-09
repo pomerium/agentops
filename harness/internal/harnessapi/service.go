@@ -62,8 +62,6 @@ type Templates interface {
 	ClientBinding(ctx context.Context, subject string) (*v1alpha1.ClientBinding, error)
 }
 
-const runPollInterval = 5 * time.Second
-
 type Option func(*options)
 
 type options struct {
@@ -73,6 +71,7 @@ type options struct {
 	suspendedTTL      time.Duration
 	permissionTimeout time.Duration
 	runTTL            time.Duration
+	runPollInterval   time.Duration
 	runWatchInterval  time.Duration
 	logger            *slog.Logger
 }
@@ -112,6 +111,9 @@ func (c *options) applyDefaults() {
 	}
 	if c.runTTL == 0 {
 		c.runTTL = 15 * time.Minute
+	}
+	if c.runPollInterval == 0 {
+		c.runPollInterval = 5 * time.Second
 	}
 	if c.runWatchInterval == 0 {
 		c.runWatchInterval = time.Minute
@@ -651,13 +653,13 @@ func (s *Service) write(ctx context.Context, sessionID string, update func(conte
 	return true
 }
 
-func (s *Service) setState(ctx context.Context, sessionID string, from, to api.SessionState, reason api.Reason) bool {
+func (s *Service) beginLaunch(ctx context.Context, sessionID string, from api.SessionState, reason api.Reason) bool {
 	if !s.write(ctx, sessionID, func(ctx context.Context) error {
-		return s.store.UpdateSessionStatus(ctx, sessionID, to)
+		return s.store.UpdateSessionLaunched(ctx, sessionID, api.StateLaunching, time.Now())
 	}) {
 		return false
 	}
-	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: from, New: to, Reason: reason}}})
+	s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{Old: from, New: api.StateLaunching, Reason: reason}}})
 	return true
 }
 
