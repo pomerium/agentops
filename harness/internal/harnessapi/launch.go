@@ -118,13 +118,6 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndRunCreateFailed, "a run could not be created for this session")
 		return
 	}
-	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
-		return s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
-	}) {
-		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, unrecorded)
-		return
-	}
-
 	att, err := s.launcher.Expect(res.RunID, prepared,
 		sandbox.WithOnDown(s.superviseLaunch(ctx, sess.ID, o)),
 		sandbox.WithOnDelayed(func(waited time.Duration) {
@@ -143,6 +136,13 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 			att.Forget()
 		}
 	}()
+
+	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
+		return s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
+	}) {
+		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, unrecorded)
+		return
+	}
 
 	s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
 		Old: api.StateLaunching, New: api.StateAwaitingApproval, Reason: launchReason(opts.revive),

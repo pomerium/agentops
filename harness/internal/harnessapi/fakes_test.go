@@ -437,6 +437,7 @@ type fakeLauncher struct {
 
 	resumeErr   error
 	activateErr error
+	expectErr   error
 
 	adopted  []sandbox.AdoptSpec
 	adoptErr error
@@ -473,6 +474,9 @@ func (l *fakeLauncher) Expect(runID string, _ *sandbox.Prepared, opts ...sandbox
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.expectErr != nil {
+		return nil, l.expectErr
+	}
 	l.expectedRuns = append(l.expectedRuns, runID)
 	l.sup = sup
 	return &sandbox.Attachment{}, nil

@@ -638,6 +638,13 @@ func TestAFailedLaunchRecordsTheStateItLeft(t *testing.T) {
 		{"the workspace does not activate", func(h *harness) {
 			h.launcher.activateErr = errors.New("the pod did not start")
 		}},
+		{"the agent link refuses the run", func(h *harness) {
+			h.launcher.expectErr = errors.New("expectation registration failed")
+		}},
+		{"the run is not recorded", func(h *harness) {
+			h.svc = harnessapi.New(unrecordedRun{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+				harnessapi.WithLogger(testLogger(h.t)))
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := as(stubClient)
@@ -656,6 +663,12 @@ func TestAFailedLaunchRecordsTheStateItLeft(t *testing.T) {
 			checkStateChain(t, h, ref)
 		})
 	}
+}
+
+type unrecordedRun struct{ harnessapi.Store }
+
+func (unrecordedRun) UpdateSessionRun(context.Context, string, string, string, time.Time, api.SessionState) error {
+	return errors.New("the database is unavailable")
 }
 
 func checkStateChain(t *testing.T, h *harness, ref *pb.SessionRef) {
