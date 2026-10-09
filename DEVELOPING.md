@@ -14,6 +14,7 @@ install it, see [README.md](./README.md).
 | `config/crd/bases` | The generated `AgentTemplate` and `ClientBinding` CRDs. |
 | `deploy/` | The three Helm charts (the platform, the Slack bot, and the quickstart, which installs Pomerium, the platform and a demo agent), the quickstart scripts, the sandbox kustomize Component, example manifests, and the agent harness images. |
 | `docs/` | Design notes: [run identity and the Agent Link](./docs/run-identity.md), [Slack threads](./docs/threads.md), [SDK conformance](./docs/sdk-conformance.md). |
+| `examples/` | [`pomerium-egress-gateway`](./examples/pomerium-egress-gateway/README.md): the sidecar in workload mode on an agent-sandbox SandboxTemplate, Pomerium routes on both sides, and tests for five Python agent frameworks. Written in agent-sandbox's example style, to be offered upstream. |
 
 The binaries:
 

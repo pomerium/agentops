@@ -1,0 +1,33 @@
+# The egress route. It accepts the sandbox pod's projected ServiceAccount token
+# as a plain JWT (no agentic Pomerium needed) and lets only the sandbox's
+# ServiceAccount through.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: verify
+  annotations:
+    ingress.pomerium.io/bearer_token_format: jwt
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    ingress.pomerium.io/pass_identity_headers: "true"
+    # Pomerium forwards a verified Bearer unless the route removes it. The
+    # upstream has no use for the pod's token, so strip it.
+    ingress.pomerium.io/remove_request_headers: '["Authorization"]'
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/aud: pomerium-egress
+          - claim/kubernetes.io.namespace: sandbox-egress
+          - claim/kubernetes.io.serviceaccount.name: sandbox-egress
+spec:
+  ingressClassName: pomerium
+  rules:
+    - host: verify.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: verify
+                port:
+                  number: 80

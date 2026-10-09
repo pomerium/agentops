@@ -1,0 +1,40 @@
+# The example's tests, run from inside the cluster. The pod holds no long-lived
+# credential: a projected ServiceAccount token with the egress audience, which
+# kubelet rotates, is the Bearer the SDK sends to the sandbox route.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-tests
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      serviceAccountName: agent
+      restartPolicy: Never
+      containers:
+        - name: tests
+          image: pomerium-egress-agent:dev
+          imagePullPolicy: IfNotPresent
+          args: [pytest, -q, -rs, tests/test_sdk.py]
+          env:
+            - name: SANDBOX_API_URL
+              value: https://sandbox.example.com
+            - name: POMERIUM_TOKEN_FILE
+              value: /var/run/secrets/pomerium/token
+            - name: SANDBOX_NAMESPACE
+              value: sandbox-egress
+            - name: SANDBOX_WARMPOOL
+              value: python-egress
+          volumeMounts:
+            - name: pomerium-token
+              mountPath: /var/run/secrets/pomerium
+              readOnly: true
+      volumes:
+        - name: pomerium-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: pomerium-egress
+                  expirationSeconds: 3600

@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The agent side: the ServiceAccount the agent runs as, the RBAC the Python
+# SDK needs to create claims, and a Job that runs the example's tests from
+# inside the cluster with the pod's projected token (the production shape).
+namespace: sandbox-egress
+
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml
+  - job.yaml

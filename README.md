@@ -32,6 +32,10 @@ More documentation:
 - [docs/threads.md](./docs/threads.md): how the Slack bot maps threads to
   sessions: ownership, joining a colleague's thread, continuing a paused
   conversation.
+- [examples/pomerium-egress-gateway](./examples/pomerium-egress-gateway/README.md):
+  the sidecar without the platform. An agent-sandbox Sandbox whose only way
+  out is Pomerium, driven by five Python agent frameworks through the
+  agent-sandbox SDK.
 
 ## What people build with it
 

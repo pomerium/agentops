@@ -1,0 +1,86 @@
+# The quickstart's ingress controller watches only its own namespace
+# (`--namespaces=agentops-pomerium`), so the two routes live there and reach
+# their upstreams through ExternalName Services, as the quickstart's own
+# routes do. Same annotations and policies as the base routes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-router
+  namespace: agentops-pomerium
+spec:
+  type: ExternalName
+  externalName: sandbox-router-svc.agent-sandbox-system.svc.cluster.local
+  ports:
+    - name: proxy
+      port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: verify
+  namespace: agentops-pomerium
+spec:
+  type: ExternalName
+  externalName: verify.sandbox-egress.svc.cluster.local
+  ports:
+    - name: http
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandbox
+  namespace: agentops-pomerium
+  annotations:
+    ingress.pomerium.io/bearer_token_format: jwt
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    ingress.pomerium.io/timeout: 180s
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/aud: pomerium-egress
+          - claim/kubernetes.io.namespace: sandbox-egress
+          - claim/kubernetes.io.serviceaccount.name: agent
+spec:
+  ingressClassName: pomerium-agentops
+  rules:
+    - host: sandbox.localhost.pomerium.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sandbox-router
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: verify
+  namespace: agentops-pomerium
+  annotations:
+    ingress.pomerium.io/bearer_token_format: jwt
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    ingress.pomerium.io/pass_identity_headers: "true"
+    ingress.pomerium.io/remove_request_headers: '["Authorization"]'
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/aud: pomerium-egress
+          - claim/kubernetes.io.namespace: sandbox-egress
+          - claim/kubernetes.io.serviceaccount.name: sandbox-egress
+spec:
+  ingressClassName: pomerium-agentops
+  rules:
+    - host: verify.localhost.pomerium.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: verify
+                port:
+                  number: 80

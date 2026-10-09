@@ -1,0 +1,18 @@
+# One loopback listener per upstream the sandboxed code may reach. Code in the
+# sandbox calls http://127.0.0.1:9000/...; the sidecar adds the pod's projected
+# token as a Bearer and forwards to the Pomerium route. DIAL_ADDRESS keeps the
+# traffic in the cluster: TLS SNI and Host still come from UPSTREAM_URL.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: python-egress
+spec:
+  podTemplate:
+    spec:
+      initContainers:
+        - name: sidecar
+          env:
+            - {name: SIDECAR_HTTP_VERIFY_PORT, value: "9000"}
+            - {name: SIDECAR_HTTP_VERIFY_UPSTREAM_URL, value: https://verify.example.com}
+            - {name: SIDECAR_HTTP_VERIFY_INJECT_RUN_TOKEN, value: "true"}
+            - {name: SIDECAR_HTTP_VERIFY_DIAL_ADDRESS, value: pomerium-proxy.pomerium.svc.cluster.local:443}

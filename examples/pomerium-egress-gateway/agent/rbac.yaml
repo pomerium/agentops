@@ -1,0 +1,26 @@
+# What the Python SDK does with the Kubernetes API: it creates and deletes
+# SandboxClaims, watches them become ready, and reads the Sandbox for its pod
+# IP. Everything else goes through the sandbox-router.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent
+rules:
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxclaims]
+    verbs: [create, get, list, watch, delete, patch]
+  - apiGroups: [agents.x-k8s.io]
+    resources: [sandboxes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent
+subjects:
+  - kind: ServiceAccount
+    name: agent
