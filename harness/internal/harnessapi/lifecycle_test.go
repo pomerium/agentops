@@ -526,10 +526,12 @@ func TestALaunchThatCannotRecordRunningStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	waitForStoredState(t, h, byID(created.GetSession().GetId()), api.StateEnded)
+	ref := byID(created.GetSession().GetId())
+	waitForStoredState(t, h, ref, api.StateEnded)
 	if _, _, teardowns, _, _ := h.launcher.snapshot(); !slices.Contains(teardowns, "claim-1") {
 		t.Errorf("the failed launch kept its workspace: teardowns %v", teardowns)
 	}
+	checkStateChain(t, h, ref)
 }
 
 type heldRunningWrite struct {

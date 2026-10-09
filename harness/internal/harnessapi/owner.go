@@ -135,9 +135,10 @@ func (s *Service) finish(sessionID string, o *owner) (stopSpec, bool) {
 	}
 	if s.owners[sessionID] == o {
 		delete(s.owners, sessionID)
-		if o.settled != nil {
-			close(o.settled)
-		}
+	}
+	if o.settled != nil {
+		close(o.settled)
+		o.settled = nil
 	}
 	return stopSpec{}, false
 }

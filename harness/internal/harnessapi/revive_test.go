@@ -335,6 +335,7 @@ func TestAnUnrecordedReviveFailsItsAcceptedTurn(t *testing.T) {
 	if got := suspendReason(rec); got != api.ReasonReviveFailed {
 		t.Fatalf("an unrecorded revive suspended with %v, want %v", got, api.ReasonReviveFailed)
 	}
+	checkStateChain(t, h, ref)
 	page, err := h.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref, AfterSeq: before.EventSeq})
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)

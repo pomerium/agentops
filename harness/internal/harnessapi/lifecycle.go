@@ -83,6 +83,7 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 		}
 	}
 
+	from := s.storedState(ctx, sessionID, api.StateRunning)
 	if suspended {
 		now := time.Now()
 		if !s.write(ctx, sessionID, func(ctx context.Context) error {
@@ -91,14 +92,14 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 			return false
 		}
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
-			Old: api.StateRunning, New: api.StateSuspended, Reason: spec.suspend,
+			Old: from, New: api.StateSuspended, Reason: spec.suspend,
 		}}})
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_Suspended{Suspended: &pb.Suspended{
 			Reason: spec.suspend, RetainedFor: durationpb.New(s.cfg.suspendedTTL),
 		}}})
 		return true
 	}
-	return s.endSession(ctx, sessionID, api.StateRunning, spec.end, spec.detail)
+	return s.endSession(ctx, sessionID, from, spec.end, spec.detail)
 }
 
 func (s *Service) stopDetached(ctx context.Context, sessionID string, spec stopSpec) bool {

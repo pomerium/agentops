@@ -239,7 +239,7 @@ func (s *Service) activateAndRun(
 	}
 	ctx = context.WithoutCancel(ctx)
 	linked := s.write(ctx, sess.ID, func(ctx context.Context) error {
-		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching); err != nil {
+		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateAwaitingApproval); err != nil {
 			return err
 		}
 		if err := s.store.UpdateSessionLink(ctx, sess.ID, encodeExecutor(prepared.Executor), string(liveSess.StreamID()), int64(liveSess.ReadySeq())); err != nil {
@@ -303,7 +303,7 @@ func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opt
 				"session", sess.ID, "claim", claimName, "err", err)
 		}
 	}
-	s.endSession(ctx, sess.ID, s.storedState(ctx, sess.ID), reason, detail)
+	s.endSession(ctx, sess.ID, s.storedState(ctx, sess.ID, api.StateLaunching), reason, detail)
 }
 
 func (s *Service) recordsClaim(ctx context.Context, sessionID, claimName string) bool {
@@ -311,10 +311,10 @@ func (s *Service) recordsClaim(ctx context.Context, sessionID, claimName string)
 	return err == nil && current.SandboxClaimName == claimName
 }
 
-func (s *Service) storedState(ctx context.Context, sessionID string) api.SessionState {
+func (s *Service) storedState(ctx context.Context, sessionID string, fallback api.SessionState) api.SessionState {
 	current, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
-		return api.StateLaunching
+		return fallback
 	}
 	return current.Status
 }
@@ -330,7 +330,7 @@ func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opt
 	if opts.turnID != "" {
 		s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: detail}}})
 	}
-	from := s.storedState(ctx, sess.ID)
+	from := s.storedState(ctx, sess.ID, api.StateLaunching)
 	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		return s.store.UpdateSessionSuspended(ctx, sess.ID, api.StateSuspended, suspendedAtOf(sess))
 	}) {
