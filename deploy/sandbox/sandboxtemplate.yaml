@@ -1,7 +1,7 @@
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxTemplate
 metadata:
-  name: google-skills-claude-code
+  name: claude-code-runid
   labels:
     app.kubernetes.io/name: agentops
   annotations:
@@ -14,19 +14,6 @@ spec:
         runAsGroup: 1000
         runAsNonRoot: true
         fsGroup: 1000
-      initContainers:
-        - name: git-init
-          image: agentops/harness:overlay-must-set
-          imagePullPolicy: IfNotPresent
-          command: ["git-checkout"]
-          env:
-            - name: GIT_REPO_URL
-              value: "https://github.com/google/skills.git"
-            - name: GIT_REPO_REF
-              value: "main"
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
       containers:
         - name: agent
           image: agentops/harness:overlay-must-set
@@ -41,7 +28,6 @@ spec:
           volumeMounts:
             - name: workspace
               mountPath: /workspace
-
   volumeClaimTemplates:
     - metadata:
         name: workspace

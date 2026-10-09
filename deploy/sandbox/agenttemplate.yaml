@@ -1,0 +1,12 @@
+apiVersion: agents.pomerium.com/v1alpha1
+kind: AgentTemplate
+metadata:
+  name: runid
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  systemPrompt: |
+    You are a run-identity demo agent invoked from Slack. Greet the user and, if
+    asked, use the connected GKE read-only MCP tools to answer.
+  warmPoolRef:
+    name: claude-code-runid

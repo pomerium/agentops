@@ -1,0 +1,66 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: agentops-inject
+spec:
+  podTemplate:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: agent
+    spec:
+      serviceAccountName: sandbox-agent
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      initContainers:
+        - name: agentops-init
+          image: agentops/sidecar:overlay-must-set
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/agent-runner", "install", "/opt/agentops/agent-runner"]
+          volumeMounts:
+            - name: agentops-bin
+              mountPath: /opt/agentops
+      containers:
+        - name: agent
+          command: ["/opt/agentops/agent-runner"]
+          env:
+            - name: ANTHROPIC_BASE_URL
+              value: "http://127.0.0.1:9999"
+            - name: ANTHROPIC_API_KEY
+              value: "placeholder-overwritten-by-pomerium"
+          volumeMounts:
+            - name: agentops-bin
+              mountPath: /opt/agentops
+              readOnly: true
+            - name: agentops-run
+              mountPath: /var/run/agentops
+        - name: sidecar
+          image: agentops/sidecar:overlay-must-set
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/sidecar", "serve", "user-identity"]
+          env:
+            - name: SIDECAR_HTTP_ANTHROPIC_PORT
+              value: "9999"
+            - name: SIDECAR_HTTP_ANTHROPIC_INJECT_RUN_TOKEN
+              value: "true"
+            - name: SIDECAR_AGENTIC_TOKEN_FILE
+              value: "/var/run/agentic/token"
+            - name: SIDECAR_RUNNER_SOCKET
+              value: "/var/run/agentops/runner.sock"
+          volumeMounts:
+            - name: agentic-token
+              mountPath: /var/run/agentic
+              readOnly: true
+            - name: agentops-run
+              mountPath: /var/run/agentops
+      volumes:
+        - name: agentic-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: pomerium-agentic-as
+                  expirationSeconds: 600
+        - name: agentops-bin
+          emptyDir: {}
+        - name: agentops-run
+          emptyDir: {}

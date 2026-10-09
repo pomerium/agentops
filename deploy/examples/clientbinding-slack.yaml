@@ -1,0 +1,16 @@
+apiVersion: agents.pomerium.com/v1alpha1
+kind: ClientBinding
+metadata:
+  name: agentops-slackbot
+  namespace: agentops-system
+  labels:
+    app.kubernetes.io/name: agentops
+spec:
+  subject: cluster/system:serviceaccount:agentops-slackbot:agentops-slackbot
+  templates:
+    - runid
+    - deploy-service
+  quotas:
+    maxLiveSessions: 50
+    maxPendingApprovals: 10
+    createRatePerMinute: 30

@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agentops-system
+
+resources:
+  - sandboxtemplate-claude-code.yaml
+  - sandboxwarmpool-claude-code.yaml
+  - sandboxtemplate-pomerium-zero-claude-code.yaml
+  - sandboxwarmpool-pomerium-zero-claude-code.yaml
+  - sandboxtemplate-gstack-claude-code.yaml
+  - sandboxwarmpool-gstack-claude-code.yaml
+  - sandboxtemplate-google-skills-claude-code.yaml
+  - sandboxwarmpool-google-skills-claude-code.yaml
+
+components:
+  - ../components/agentops
+
+images:
+  - name: agentops/harness
+    newName: claude-code
+    newTag: dev
+  - name: agentops/sidecar
+    newName: agentops-sidecar
+    newTag: dev
+
+patches:
+  - path: endpoints.yaml
+    target:
+      kind: SandboxTemplate
+      annotationSelector: agents.pomerium.com/inject=true
+  - path: git-egress.yaml
+    target:
+      kind: SandboxTemplate
+      name: (pomerium-zero|gstack|google-skills)-claude-code

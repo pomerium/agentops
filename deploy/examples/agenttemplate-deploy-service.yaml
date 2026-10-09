@@ -1,62 +1,22 @@
-# Example AgentTemplate.
-#
-# A AgentTemplate declaratively defines one agentic workflow. Users run it by
-# @mentioning the bot in a Slack channel bound to this template — bind a
-# channel by adding it to the singleton ChannelConfig (see channelconfig.yaml):
-#
-#     slackChannelTemplates:
-#       C0123ABCDEF: deploy-service
-#
-# then, in that channel:
-#
-#     @bot <prompt>
-#
-# When a user invokes it, agentops:
-#   1. resolves the channel's binding to this template;
-#   2. ensures the invoking user has connected every server in
-#      .spec.requiredMCPServers (prompting an OAuth link in-thread for any
-#      that are missing);
-#   3. once all servers are connected, launches an agent-sandbox SandboxClaim
-#      against .spec.warmPoolRef (a SandboxWarmPool that selects the
-#      SandboxTemplate), injecting the rendered systemPrompt; MCP tokens go to
-#      the sandbox sidecar;
-#   4. opens a live ACP session bound to the Slack thread.
-#
-# Mirrors SPEC.md section 5.
 apiVersion: agents.pomerium.com/v1alpha1
 kind: AgentTemplate
 metadata:
   name: deploy-service
-  namespace: agentops
+  namespace: agentops-system
   labels:
     app.kubernetes.io/name: agentops
 spec:
-  # ChannelConfig bindings reference this workflow by metadata.name above
-  # ("deploy-service").
 
-  # System prompt rendered into the sandbox (injected as AGENT_SYSTEM_PROMPT).
   systemPrompt: |
     You are a deployment assistant. Use the connected tools to inspect and
     roll out services. Always summarize the planned change and ask for
     confirmation before applying it.
 
-  # MCP servers the invoking user must be connected to before the workflow
-  # runs. Each {name, url} is an OAuth-brokered, per-user connection; the
-  # name is the credential key and is surfaced in the Slack auth prompt.
   requiredMCPServers:
     - name: github
       url: https://github-mcp.example.com/mcp
     - name: k8s
       url: https://k8s-mcp.example.com/mcp
 
-  # Selects the agent-sandbox SandboxWarmPool (run with replicas: 0) whose
-  # SandboxTemplate defines how the sandbox is baked: the harness + base image,
-  # the sidecar, and — when the workflow needs a repo — the git working context
-  # (repo URL/ref + credentials secretKeyRef on the template's git-init
-  # container). A workflow with a repo gets its own template + pool; copy
-  # sandboxtemplate-pomerium-zero-claude-code.yaml and
-  # sandboxwarmpool-pomerium-zero-claude-code.yaml as the starting point (here:
-  # a hypothetical deploy-runbooks-claude-code baking
-  # https://github.com/acme/deploy-runbooks.git).
   warmPoolRef:
-    name: deploy-runbooks-claude-code
+    name: claude-code

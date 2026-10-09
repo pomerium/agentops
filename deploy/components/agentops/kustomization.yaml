@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+openapi:
+  path: schema.json
+
+configurations:
+  - images.yaml
+
+resources:
+  - sa.yaml
+  - egress-networkpolicy.yaml
+
+patches:
+  - path: inject.yaml
+    target:
+      kind: SandboxTemplate
+      annotationSelector: agents.pomerium.com/inject=true
+  - path: sandbox-networkpolicy.yaml
+    target:
+      kind: SandboxTemplate
+      annotationSelector: agents.pomerium.com/inject in (true,workload)
+  - path: egress-sandboxtemplate.yaml
+    target:
+      kind: SandboxTemplate
+      annotationSelector: agents.pomerium.com/inject=workload
+  - path: egress-workload.yaml
+    target:
+      kind: Deployment|StatefulSet|DaemonSet|Job
+      annotationSelector: agents.pomerium.com/inject=workload

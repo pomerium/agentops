@@ -1,0 +1,32 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: agentops-egress
+spec:
+  podTemplate:
+    spec:
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      initContainers:
+        - name: sidecar
+          image: agentops/sidecar:overlay-must-set
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          command: ["/usr/local/bin/sidecar", "serve", "workload-identity"]
+          env:
+            - name: SIDECAR_WORKLOAD_TOKEN_FILE
+              value: /var/run/egress/token
+            - name: SIDECAR_WORKLOAD_AUDIENCE
+              value: pomerium-egress
+          volumeMounts:
+            - name: egress-token
+              mountPath: /var/run/egress
+              readOnly: true
+      volumes:
+        - name: egress-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: pomerium-egress
+                  expirationSeconds: 600
