@@ -80,12 +80,12 @@ func TestWorkloadIdentityK3s(t *testing.T) {
 		pulls = append(pulls, pomeriumImage)
 	}
 	for _, img := range pulls {
-		dockerPull(t, img)
+		dockerPull(ctx, t, img)
 	}
 
 	if pomeriumImage == defaultPomeriumImage {
 		const local = "agentops-e2e/pomerium:pinned"
-		if out, err := exec.Command("docker", "tag", pomeriumImage, local).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "docker", "tag", pomeriumImage, local).CombinedOutput(); err != nil {
 			t.Fatalf("docker tag %s %s: %v\n%s", pomeriumImage, local, err, out)
 		}
 		pomeriumImage = local
@@ -205,9 +205,9 @@ func parseStatus(t *testing.T, out string) string {
 	return m[1]
 }
 
-func dockerPull(t *testing.T, image string) {
+func dockerPull(ctx context.Context, t *testing.T, image string) {
 	t.Helper()
-	cmd := exec.Command("docker", "pull", image)
+	cmd := exec.CommandContext(ctx, "docker", "pull", image)
 	cmd.Stdout = newLineLogger(t, "[pull]")
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Run(); err != nil {

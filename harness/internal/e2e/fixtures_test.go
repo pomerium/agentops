@@ -179,7 +179,9 @@ func dumpPodDiagnostics(t *testing.T, cs *kubernetes.Clientset, ns, pod string) 
 }
 
 func dumpK3sLogs(t *testing.T, ctr *k3s.K3sContainer) {
-	out, err := exec.Command("docker", "logs", "--tail", "2000", ctr.GetContainerID()).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "logs", "--tail", "2000", ctr.GetContainerID()).CombinedOutput()
 	if err != nil {
 		t.Logf("[diag] docker logs: %v", err)
 		return
