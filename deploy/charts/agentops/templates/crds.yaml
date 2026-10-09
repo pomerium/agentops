@@ -87,7 +87,9 @@ spec:
                     url:
                       description: |-
                         URL is the streamable-HTTP endpoint of the MCP server: a Pomerium route
-                        that accepts the run token.
+                        that accepts the run token. It must be https, because the sandbox sidecar
+                        sends the run token only over TLS.
+                      pattern: ^https://
                       type: string
                   required:
                   - name

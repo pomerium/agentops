@@ -14,8 +14,10 @@ type MCPServerRef struct {
 	Name string `json:"name"`
 
 	// URL is the streamable-HTTP endpoint of the MCP server: a Pomerium route
-	// that accepts the run token.
+	// that accepts the run token. It must be https, because the sandbox sidecar
+	// sends the run token only over TLS.
 	// +required
+	// +kubebuilder:validation:Pattern=`^https://`
 	URL string `json:"url"`
 
 	// DialAddress optionally overrides the host[:port] the sandbox sidecar
