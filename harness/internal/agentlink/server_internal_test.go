@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -122,6 +123,74 @@ func TestBlockedHelloAckDoesNotHoldAForgottenRun(t *testing.T) {
 		t.Fatal("the run was marked attached although its HelloAck was never sent")
 	default:
 	}
+}
+
+type scriptedAttach struct {
+	agentlinkpb.AgentLinkService_AttachServer
+	ctx    context.Context
+	frames chan *agentlinkpb.SidecarFrame
+}
+
+func (s *scriptedAttach) Context() context.Context { return s.ctx }
+
+func (s *scriptedAttach) Send(*agentlinkpb.ManagerFrame) error { return nil }
+
+func (s *scriptedAttach) Recv() (*agentlinkpb.SidecarFrame, error) {
+	select {
+	case f, ok := <-s.frames:
+		if !ok {
+			return nil, io.EOF
+		}
+		return f, nil
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
+	}
+}
+
+func TestAnErrorHeldDuringTheAttachCallbackSurvivesTheStreamEnd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		entered, release := make(chan struct{}), make(chan struct{})
+		reported := make(chan string, 1)
+		run := &attachedRun{
+			runID: "held-error", hbInterval: time.Hour, hbMissLimit: 3,
+			attached: make(chan struct{}), done: make(chan struct{}),
+			opts: ExpectCallbacks{
+				OnAttached: func(uint32, bool) {
+					close(entered)
+					<-release
+				},
+				OnError: func(reason string, _ error) { reported <- reason },
+			},
+		}
+		live := newAttachStream(time.Now())
+		run.live = live
+		s := &Server{now: time.Now, log: slog.Default()}
+		stream := &scriptedAttach{ctx: ctx, frames: make(chan *agentlinkpb.SidecarFrame)}
+
+		returned := make(chan error, 1)
+		go func() {
+			returned <- s.serveAttach(ctx, stream, run, live, &agentlinkpb.SidecarHello{ProtocolVersion: ProtocolVersion, Attempt: 1})
+		}()
+		<-entered
+		stream.frames <- &agentlinkpb.SidecarFrame{Msg: &agentlinkpb.SidecarFrame_Status{Status: &agentlinkpb.Status{
+			State: agentlinkpb.Status_STATE_ERROR, Reason: "config_failed",
+		}}}
+		close(stream.frames)
+		synctest.Wait()
+		close(release)
+		err := <-returned
+
+		select {
+		case reason := <-reported:
+			if reason != "config_failed" {
+				t.Fatalf("OnError reason = %q, want config_failed", reason)
+			}
+		default:
+			t.Fatalf("the error the sidecar sent before its stream ended never reached OnError; serveAttach returned %v", err)
+		}
+	})
 }
 
 func TestClaimRejectsAnUnsupportedProtocolVersion(t *testing.T) {
