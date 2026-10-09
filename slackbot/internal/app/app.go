@@ -220,7 +220,7 @@ func (a *App) handleThreadedMention(ctx context.Context, in gateway.MentionInvoc
 	if t := a.lookup(in.ChannelID, in.OriginThreadTS, in.TeamID, in.UserID); t != nil {
 		switch t.currentState() {
 		case api.StateRunning:
-			a.promptThread(ctx, t, in.Text, in.MessageTS, in.MessageTS)
+			a.promptThread(ctx, t, in.Prompt, in.MessageTS, in.MessageTS)
 		case api.StateSuspended:
 			a.reviveThread(ctx, t, in, in.MessageTS)
 		default:
@@ -233,7 +233,8 @@ func (a *App) handleThreadedMention(ctx context.Context, in gateway.MentionInvoc
 	sess, ok, err := a.sessionForParticipant(ctx, in.ChannelID, in.OriginThreadTS, in.TeamID, in.UserID)
 	switch {
 	case err != nil:
-		a.postLookupFailure(ctx, in.ChannelID, in.OriginThreadTS, err)
+		a.log.ErrorContext(ctx, "look up thread session failed", "channel", in.ChannelID, "err", err)
+		a.post(ctx, in.ChannelID, in.OriginThreadTS, slack.MsgOptionText(msgSessionLookupFailed, false))
 	case ok && sess.GetState() == api.StateSuspended:
 		a.reviveDetached(ctx, sess, in, in.MessageTS, false)
 	case ok && api.Live(sess.GetState()):
@@ -594,15 +595,11 @@ func (a *App) templateForChannel(ctx context.Context, channelID, replyThreadTS s
 		a.post(ctx, channelID, replyThreadTS, slack.MsgOptionText(msgNoAgentForChannel, false))
 		return "", false
 	case err != nil:
-		a.postLookupFailure(ctx, channelID, replyThreadTS, err)
+		a.log.ErrorContext(ctx, "resolve channel agent template failed", "channel", channelID, "err", err)
+		a.post(ctx, channelID, replyThreadTS, slack.MsgOptionText(msgLookupFailed, false))
 		return "", false
 	}
 	return name, true
-}
-
-func (a *App) postLookupFailure(ctx context.Context, channelID, replyThreadTS string, err error) {
-	a.log.ErrorContext(ctx, "resolve channel agent template failed", "channel", channelID, "err", err)
-	a.post(ctx, channelID, replyThreadTS, slack.MsgOptionText(msgLookupFailed, false))
 }
 
 func (a *App) hintInThread(ctx context.Context, channel, threadTS, userID string, opts ...slack.MsgOption) {
@@ -649,11 +646,20 @@ func (a *App) addReaction(ctx context.Context, channel, ts, emoji string) {
 		return
 	}
 	err := a.poster.AddReaction(ctx, channel, ts, emoji)
-	if err == nil || err.Error() == "already_reacted" {
+	if err == nil {
 		return
 	}
-	a.tel.Warn(ctx, "add reaction failed; grant the bot the reactions:write scope to show launch progress",
-		"emoji", emoji, "err", err)
+	switch err.Error() {
+	case "already_reacted":
+	case "invalid_name":
+		a.tel.Warn(ctx, "add reaction failed; the workspace has no emoji with this name, so add it as a custom emoji",
+			"emoji", emoji, "err", err)
+	case "missing_scope":
+		a.tel.Warn(ctx, "add reaction failed; grant the bot the reactions:write scope to show launch progress",
+			"emoji", emoji, "err", err)
+	default:
+		a.tel.Warn(ctx, "add reaction failed", "emoji", emoji, "err", err)
+	}
 }
 
 func (a *App) removeReaction(ctx context.Context, channel, ts, emoji string) {

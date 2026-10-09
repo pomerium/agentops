@@ -97,8 +97,9 @@ const (
 )
 
 const (
-	msgNoAgentForChannel = ":wave: No agent is configured for this channel yet. Ask an admin to set one up for this channel."
-	msgLookupFailed      = ":warning: I couldn't look up the agent for this channel — something is broken on my side. Ask an admin to check the app logs."
+	msgNoAgentForChannel   = ":wave: No agent is configured for this channel yet. Ask an admin to set one up for this channel."
+	msgLookupFailed        = ":warning: I couldn't look up the agent for this channel — something is broken on my side. Ask an admin to check the app logs."
+	msgSessionLookupFailed = ":warning: I couldn't check this thread's session — something is broken on my side. @mention me again in a moment, or ask an admin to check the app logs."
 )
 
 func missingAgent(name string) string {

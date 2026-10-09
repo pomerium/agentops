@@ -878,11 +878,11 @@ subscription and ignores `app_mention` events.
   turn:
 
   ```
-  add reaction failed; grant the bot the reactions:write scope to show launch progress
+  add reaction failed; the workspace has no emoji with this name, so add it as a custom emoji
   ```
 
-  The warning names the scope, but when only the `waiting` reaction fails, the
-  cause is the missing emoji, not a missing scope.
+  A bot token without `reactions:write` logs a different warning that names
+  the scope.
 
 ### Manifest
 

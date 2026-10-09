@@ -2,10 +2,12 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/slack-go/slack"
 
 	"github.com/pomerium/agentops/harness/api"
@@ -555,5 +557,34 @@ func assertEphemeral(t *testing.T, f *fixture, user, want string) {
 			t.Fatalf("no ephemeral to %s containing %q; saw %v", user, want, seen)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAMentionInARunningThreadSendsThePromptWithoutTheMention(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+
+	in := mentionIn(f, "U1", "<@UBOT> and deploy it")
+	in.Prompt = "and deploy it"
+	f.app.HandleMention(context.Background(), in)
+
+	prompts := f.api.promptRequests()
+	if len(prompts) != 1 || prompts[0].Content != "and deploy it" {
+		t.Errorf("the owner's mention became %+v, want one turn with the prompt and no mention", prompts)
+	}
+}
+
+func TestAFailedSessionLookupIsNotReportedAsAMissingAgent(t *testing.T) {
+	f := newFixture(t)
+	f.api.failGets(connect.NewError(connect.CodeUnavailable, errors.New("harness down")))
+
+	f.app.HandleMention(context.Background(), mentionIn(f, "U1", "status?"))
+
+	post := f.poster.waitForPost(t, "something is broken on my side")
+	if strings.Contains(post.text, "agent for this channel") {
+		t.Errorf("a failed session lookup was reported as a channel binding problem: %q", post.text)
+	}
+	if n := len(f.api.createRequests()); n != 0 {
+		t.Errorf("a failed session lookup started %d sessions", n)
 	}
 }
