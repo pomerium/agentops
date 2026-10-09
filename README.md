@@ -222,7 +222,7 @@ covers changing the version.
 ### Install the chart
 
 [INSTALL.md](./INSTALL.md) has every step, with the checks after each one. In
-short, write a values file with your hosts, certificate and approvers (the
+short, write a values file outside the checkout, `~/agentops-values.yaml`, with your hosts, certificate and approvers (the
 [chart's README](./deploy/charts/agentops-quickstart/README.md) has the
 smallest one and every value), then:
 
@@ -230,7 +230,7 @@ smallest one and every value), then:
 kubectl apply --server-side --force-conflicts -f deploy/charts/agentops-quickstart/crds/
 helm dependency build --skip-refresh deploy/charts/agentops-quickstart
 helm upgrade --install agentops deploy/charts/agentops-quickstart \
-  --namespace agentops-system --create-namespace -f agentops-values.yaml
+  --namespace agentops-system --create-namespace -f ~/agentops-values.yaml
 ```
 
 Helm installs the CRDs in a chart's `crds/` only once and never updates them,
@@ -418,7 +418,7 @@ upgrade the release with the commands in [Install the chart](#install-the-chart)
 
 ```sh
 kubectl apply -k my-agent/
-helm upgrade agentops deploy/charts/agentops-quickstart -n agentops-system -f agentops-values.yaml
+helm upgrade agentops deploy/charts/agentops-quickstart -n agentops-system -f ~/agentops-values.yaml
 ```
 
 For an agent that uses Claude, give the install an Anthropic API key, so the

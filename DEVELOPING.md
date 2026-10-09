@@ -323,7 +323,7 @@ installs the stack; a values file points it at the local images.
    ```
 
 4. Write a values file for the quickstart that points at the local tags and the
-   mkcert certificate. Keep it out of the repository (`dev-values.yaml`):
+   mkcert certificate. Keep it out of the repository (`~/dev-values.yaml`):
 
    ```yaml
    hosts:
@@ -371,10 +371,10 @@ installs the stack; a values file points it at the local images.
    kubectl apply --server-side --force-conflicts -f deploy/charts/agentops-quickstart/crds/
    helm dependency build --skip-refresh deploy/charts/agentops-quickstart
    helm upgrade --install agentops deploy/charts/agentops-quickstart \
-     -n agentops-system -f dev-values.yaml
+     -n agentops-system -f ~/dev-values.yaml
    ```
 
-   For the Slack bot, add it to `clients` in `dev-values.yaml` and install its
+   For the Slack bot, add it to `clients` in `~/dev-values.yaml` and install its
    chart as the README's [Add the Slack bot](./README.md#add-the-slack-bot)
    says, with `image.repository: agentops-slackbot` and `image.tag: dev`. For
    the claude-code agent, apply an overlay on [`deploy/sandbox`](./deploy/sandbox/README.md)

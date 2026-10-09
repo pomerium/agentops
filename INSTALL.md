@@ -140,8 +140,15 @@ them to confirm before Step 3.
 
 ## Step 3: Write the values file
 
-Write `agentops-values.yaml` outside any git repository, for example in the
-person's home directory. Replace each `<...>`:
+Write the values file outside any git repository, for example
+`~/agentops-values.yaml`. The install runs from the checkout, so keep the file's
+absolute path in a variable:
+
+```sh
+export VALUES="$HOME/agentops-values.yaml"
+```
+
+Write this to `$VALUES`, and replace each `<...>`:
 
 ```yaml
 hosts:
@@ -175,7 +182,9 @@ kubectl -n <platform namespace> create secret generic agentops-ca --from-file=ca
 ```
 
 Then add this to the values file. With a Secret that exists already, use its
-name and key:
+name in both `secretName` fields, and its key in `key` and as the file name at
+the end of `caFile`. The platform reads the CA at `caFile`, and the volume
+names each file after its key:
 
 ```yaml
 privateCA:
@@ -202,7 +211,7 @@ and put the key in a second file that only the person can read:
 
 ```sh
 umask 077
-printf 'anthropic:\n  apiKey: %s\n' "<key>" > agentops-anthropic.yaml
+printf 'anthropic:\n  apiKey: %s\n' "<key>" > "$HOME/agentops-anthropic.yaml"
 ```
 
 Pass that file to the first install only. The chart keeps the key in a Secret,
@@ -221,10 +230,11 @@ kubectl apply --server-side --force-conflicts -f deploy/charts/agentops-quicksta
 helm dependency build --skip-refresh deploy/charts/agentops-quickstart
 helm upgrade --install agentops deploy/charts/agentops-quickstart \
   --namespace <platform namespace> --create-namespace \
-  -f agentops-values.yaml
+  -f "$VALUES"
 ```
 
-For the Anthropic route, add `-f agentops-anthropic.yaml` to the last command.
+For the Anthropic route, add `-f "$HOME/agentops-anthropic.yaml"` to the last
+command.
 
 - The first command applies the CRDs of Pomerium and of AgentOps. Helm
   installs the CRDs in a chart's `crds/` only once and never updates them, so

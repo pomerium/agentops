@@ -13,13 +13,13 @@ The repository's [README](../../../README.md#install) describes the installation
 
 ## Install
 
-[INSTALL.md](../../../INSTALL.md) is the step-by-step install, written for a coding agent; a person can follow it too. In short, write the values (here `my-values.yaml`), then:
+[INSTALL.md](../../../INSTALL.md) is the step-by-step install, written for a coding agent; a person can follow it too. In short, write the values (here `~/my-values.yaml`, outside the checkout), then:
 
 ```sh
 kubectl apply --server-side --force-conflicts -f deploy/charts/agentops-quickstart/crds/
 helm dependency build deploy/charts/agentops-quickstart
 helm upgrade --install agentops deploy/charts/agentops-quickstart \
-  --namespace agentops-system --create-namespace -f my-values.yaml
+  --namespace agentops-system --create-namespace -f ~/my-values.yaml
 ```
 
 The first command applies the CRDs. Helm installs the CRDs in `crds/` on the first install only, and never updates them. `helm dependency build` packages the [`agentops`](../agentops) chart into `charts/`.
