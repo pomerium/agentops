@@ -355,6 +355,16 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 	var awaitNotified <-chan struct{}
 	settled := false
 	var held []*agentlinkpb.SidecarFrame
+	settle := func() error {
+		settled = true
+		for _, f := range held {
+			if err := s.handleSidecarFrame(ctx, run, f); err != nil {
+				return err
+			}
+		}
+		held = nil
+		return nil
+	}
 	defer func() {
 		if notified != nil {
 			<-notified
@@ -385,6 +395,12 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 		select {
 		case r := <-recvCh:
 			if r.err != nil {
+				if notified != nil && !settled {
+					<-notified
+					if err := settle(); err != nil {
+						return err
+					}
+				}
 				return fmt.Errorf("attach stream ended: %w", r.err)
 			}
 			live.touch(s.now())
@@ -396,13 +412,10 @@ func (s *Server) serveAttach(ctx context.Context, stream agentlinkpb.AgentLinkSe
 				return err
 			}
 		case <-awaitNotified:
-			awaitNotified, settled = nil, true
-			for _, f := range held {
-				if err := s.handleSidecarFrame(ctx, run, f); err != nil {
-					return err
-				}
+			awaitNotified = nil
+			if err := settle(); err != nil {
+				return err
 			}
-			held = nil
 		case err := <-sentCh:
 			f := pending
 			pending = nil
