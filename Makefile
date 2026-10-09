@@ -20,7 +20,7 @@ SLACKBOT_CHART ?= $(CHARTS_DIR)/agentops-slackbot
 APISTUB_BIN ?= $(CURDIR)/bin/apistub
 BUF_BIN     ?= $(CURDIR)/bin/buf
 
-.PHONY: build test test-e2e vet boundary telemetry-in-sync generate pb-generate proto-lint proto-check \
+.PHONY: build test test-e2e vet fmt-check boundary telemetry-in-sync generate pb-generate proto-lint proto-check \
         sdk-generate sdk-generate-ts sdk-generate-py sdk-generate-check sdk-test sdk-test-ts sdk-test-py \
         tidy docker-build harness-image slackbot-image harness-build sidecar-build run apistub \
         helm-sync-crds helm-lint helm-template helm-check-client-isolation helm-package
@@ -43,6 +43,12 @@ test-e2e:
 ## vet: run go vet over every module.
 vet:
 	@for m in $(MODULES); do echo "== $$m"; (cd $$m && GOWORK=off go vet ./...) || exit 1; done
+
+## fmt-check: fail if a Go file in any module is not gofmt-clean.
+fmt-check:
+	@bad=$$(gofmt -l $(MODULES)); \
+	if [ -n "$$bad" ]; then echo "not gofmt-clean:"; echo "$$bad"; exit 1; fi; \
+	echo "every Go file is gofmt-clean"
 
 ## boundary: fail if a client module imports anything in harness/ except harness/api.
 boundary:

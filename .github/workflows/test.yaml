@@ -31,6 +31,9 @@ jobs:
       - name: Stack gate tests
         run: .github/scripts/stack-top_test.sh
 
+      - name: Format
+        run: make fmt-check
+
       - name: Vet
         run: make vet
 
