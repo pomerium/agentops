@@ -71,7 +71,7 @@ func (r *UDSRunner) open(ctx context.Context, first *runnerpb.RunnerClientFrame)
 	if err != nil {
 		return fail(fmt.Errorf("open runner stream: %w", err))
 	}
-	if err := stream.Send(first); err != nil {
+	if err := sendFirst(stream, first); err != nil {
 		return fail(fmt.Errorf("send %T: %w", first.GetMsg(), err))
 	}
 	f, err := stream.Recv()

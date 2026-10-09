@@ -2,6 +2,8 @@ package agentlink_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -135,7 +137,7 @@ func (g *testLink) attach(ctx context.Context, attempt uint32, agentRunning bool
 		Msg: &agentlinkpb.SidecarFrame_Hello{Hello: &agentlinkpb.SidecarHello{
 			ProtocolVersion: agentlink.ProtocolVersion, Attempt: attempt, AgentRunning: agentRunning,
 		}},
-	}); err != nil {
+	}); err != nil && !errors.Is(err, io.EOF) {
 		return nil, nil, err
 	}
 	frame, err := stream.Recv()

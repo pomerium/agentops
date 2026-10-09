@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -192,6 +193,18 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
+func sendFirst[Req, Res any](stream grpc.BidiStreamingClient[Req, Res], m *Req) error {
+	err := stream.Send(m)
+	if !errors.Is(err, io.EOF) {
+		return err
+	}
+	for {
+		if _, err := stream.Recv(); err != nil {
+			return err
+		}
+	}
+}
+
 func (c *Client) Close() {
 	c.stopAgent()
 	_ = c.conn.Close()
@@ -317,7 +330,7 @@ func (c *Client) session(parent context.Context, attempt uint32, bearer string) 
 	if err != nil {
 		return err
 	}
-	if err := stream.Send(&agentlinkpb.SidecarFrame{
+	if err := sendFirst(stream, &agentlinkpb.SidecarFrame{
 		Msg: &agentlinkpb.SidecarFrame_Hello{Hello: &agentlinkpb.SidecarHello{
 			ProtocolVersion: ProtocolVersion,
 			Attempt:         attempt,
@@ -651,7 +664,7 @@ func (c *Client) agentIO(ctx context.Context, ag *AgentSession) error {
 	if err != nil {
 		return fmt.Errorf("open agent io: %w", err)
 	}
-	if err := stream.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{
+	if err := sendFirst(stream, &agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{
 		StreamId: ag.StreamID,
 	}}}); err != nil {
 		return fmt.Errorf("send agent io open: %w", err)
