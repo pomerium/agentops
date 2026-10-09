@@ -137,32 +137,75 @@ kind; the `gstack` example agent checks out the second one.
    latest continuation) runs out, or when its run is revoked or expires. The status message says
    that the session ended.
 
+## Quickstart
+
+Give this to your coding agent (Claude Code, Codex, Cursor or another one):
+
+```
+Install AgentOps on my Kubernetes cluster. Follow
+https://github.com/pomerium/agentops/blob/main/INSTALL.md
+and interview me for the settings it needs.
+```
+
+[INSTALL.md](./INSTALL.md) is a step-by-step guide written for coding agents,
+and you can follow it yourself too. The agent checks the cluster, asks you for a
+DNS domain, a TLS certificate and the people who may approve runs, writes a
+Helm values file, and installs one Helm release with plain `kubectl` and `helm`
+commands. Then it runs the `hello` demo agent through the Harness API. You
+approve that run in your browser, and the agent's answer shows that the install
+works from end to end.
+
+[Install](#install) explains what gets installed.
+
 ## Install
 
-The install has seven steps, in this order. The examples use these Pomerium
-hosts; replace them with your own:
+The quickstart is the Helm chart
+[`deploy/charts/agentops-quickstart`](./deploy/charts/agentops-quickstart), and
+[INSTALL.md](./INSTALL.md) is the guide that installs it. The release installs:
 
-| Host | Route to |
-|---|---|
-| `agentic.example.com` | the agentic authorization server (AS) |
-| `harness.example.com` | the Agent Link (port 8090 of the platform) |
-| `harness-api.example.com` | the Harness API (port 8081 of the platform) |
-| `slack.example.com` | the Slack bot's webhooks |
-| `anthropic.example.com` | the Anthropic API |
+- **Pomerium**: the
+  [Pomerium ingress controller](https://github.com/pomerium/ingress-controller)
+  in all-in-one mode, in a namespace of its own, from the image
+  `pomerium/ingress-controller:experimental-agentic`. That build contains the
+  agentic authorization server (AS). Each Pomerium route is an Ingress.
+- **The platform**: the [`agentops`](./deploy/charts/agentops) chart, as a
+  subchart.
+- **The sandbox side**: the `sandbox-agent` ServiceAccount and the `hello` demo
+  agent (an AgentTemplate, a SandboxTemplate and a SandboxWarmPool).
+- **A client**: the ServiceAccount `quickstart-client`, which the guide uses
+  to call the Harness API, and its ClientBinding.
 
-They also use these namespaces:
+The release does not install agent-sandbox, a real agent, the Slack bot or a
+certificate. [Add an agent](#add-an-agent) and
+[Add the Slack bot](#add-the-slack-bot) come after the quickstart.
 
-| Namespace | Contents |
-|---|---|
-| `agent-sandbox-system` | the agent-sandbox controller |
-| `pomerium` | Pomerium. The sandbox network policy expects it here; [step 4](#4-set-up-the-sandbox-side) shows how to change that. |
-| `agentops-system` | the platform release; the sandboxes (SandboxTemplates, SandboxWarmPools, Sandbox pods and the `sandbox-agent` ServiceAccount); AgentTemplates; ClientBindings |
-| `agentops-slackbot` | the Slack bot release, its Slack credentials Secret and its channel map |
+### What you need
 
-The platform reads and creates resources only in its own namespace. Put the
-sandboxes, AgentTemplates and ClientBindings where you install the platform.
+- **A Kubernetes cluster with agent-sandbox v1.0.3.** See
+  [Install agent-sandbox](#install-agent-sandbox).
+- **A DNS domain for the hosts**, for example `agentops.example.com`. The
+  quickstart puts five hosts under it. Each host needs a DNS record for the
+  external address of the Pomerium Service, which is a LoadBalancer. A wildcard
+  record, `*.agentops.example.com`, covers all five.
+- **A TLS certificate for the hosts**, in a Secret of type `kubernetes.io/tls`,
+  in any namespace. A wildcard certificate is the easiest; cert-manager can
+  issue one. If a private CA signed it, you also need the CA certificate.
+- **The email domains or addresses of the approvers**: the people who may
+  approve runs on Pomerium's consent page. A domain admits everyone with an
+  address there, so never give a public one such as `gmail.com`.
+- **`kubectl`, `helm` 3.8 or later, `curl` and `jq`.**
 
-### 1. Install agent-sandbox
+The hosts, with their default names:
+
+| Host | Route to | Who can use it |
+|---|---|---|
+| `authenticate.<domain>` | Pomerium's sign-in | everyone |
+| `agentic.<domain>` | the agentic AS: `/agentic/approve`, `/agentic/runs` and `/agentic/token` | the approvers; the platform; the sandboxes |
+| `harness.<domain>` | the Agent Link (port 8090 of the platform) | sandboxes with a run token |
+| `harness-api.<domain>` | the Harness API (port 8081 of the platform) | the clients in the chart value `clients`, and `quickstart-client` |
+| `anthropic.<domain>` | the Anthropic API. The route exists only if you give an API key. | approved runs of the approvers |
+
+### Install agent-sandbox
 
 ```sh
 kubectl apply -f deploy/agent-sandbox.yaml
@@ -176,224 +219,133 @@ built against v1.0.3 and its `v1beta1` API (groups `agents.x-k8s.io` and
 `extensions.agents.x-k8s.io`). [`deploy/agent-sandbox.md`](./deploy/agent-sandbox.md)
 covers changing the version.
 
-### 2. Configure Pomerium as the agentic authorization server
+### Install the chart
 
-Pomerium needs:
-
-- `runtime_flags: {agentic: true, mcp: true}`;
-- a persistent databroker. An in-memory databroker loses every run when
-  Pomerium restarts;
-- a human identity provider that issues refresh tokens. The approver needs one
-  for the consent page to succeed;
-- an identity provider for Kubernetes ServiceAccount tokens (`cluster` below).
-  Its audience must match the projected tokens of the platform, the sandbox
-  sidecar and the Slack bot, which is `pomerium-agentic-as` by default;
-- the global `jwt_claims_headers` below. Without it the Agent Link refuses every
-  sandbox with `assertion carries no run_id`;
-- the routes below.
-
-```yaml
-runtime_flags:
-  agentic: true
-  mcp: true
-
-jwt_claims_headers:
-  run_id: run_id
-  act.kubernetes.io.namespace: act.kubernetes.io.namespace
-  act.kubernetes.io.serviceaccount.name: act.kubernetes.io.serviceaccount.name
-  act.kubernetes.io.pod.name: act.kubernetes.io.pod.name
-  act.kubernetes.io.pod.uid: act.kubernetes.io.pod.uid
-
-identity_providers:
-  cluster:
-    issuer: "kubernetes:///"
-    audiences: ["pomerium-agentic-as"]
-    supported_algs: ["RS256"]
-
-routes:
-  # The agentic AS. The platform creates runs here.
-  - from: https://agentic.example.com
-    prefix: /agentic/runs
-    to: pomerium://agentic
-    bearer_token_format: jwt
-    identity_providers: [cluster]
-    preserve_host_header: true
-    policy:
-      allow:
-        and:
-          - claim/kubernetes.io.namespace: agentops-system
-          - claim/kubernetes.io.serviceaccount.name: agentops
-
-  # The agentic AS. Sandbox sidecars get their run token here.
-  - from: https://agentic.example.com
-    path: /agentic/token
-    to: pomerium://agentic
-    bearer_token_format: jwt
-    identity_providers: [cluster]
-    policy:
-      allow:
-        and:
-          - claim/kubernetes.io.namespace: agentops-system
-          - claim/kubernetes.io.serviceaccount.name: sandbox-agent
-
-  # The agentic AS. People approve runs here.
-  - from: https://agentic.example.com
-    path: /agentic/approve
-    to: pomerium://agentic
-    pass_identity_headers: true
-    preserve_host_header: true
-    mcp: { client: {} }
-    policy:
-      allow:
-        and:
-          - domain: example.com
-
-  # The Agent Link. Sandbox sidecars dial it with the run token.
-  - from: https://harness.example.com
-    to: h2c://agentops.agentops-system.svc.cluster.local:8090
-    bearer_token_format: agentic_run_token
-    timeout: 0s
-    idle_timeout: 0s
-    pass_identity_headers: true
-    policy:
-      allow:
-        and:
-          - claim/act.kubernetes.io.namespace: agentops-system
-          - claim/act.kubernetes.io.serviceaccount.name: sandbox-agent
-
-  # The Harness API. One entry per client ServiceAccount.
-  - from: https://harness-api.example.com
-    to: h2c://agentops.agentops-system.svc.cluster.local:8081
-    bearer_token_format: jwt
-    identity_providers: [cluster]
-    timeout: 0s
-    idle_timeout: 0s
-    pass_identity_headers: true
-    policy:
-      allow:
-        or:
-          - claim/sub: system:serviceaccount:agentops-slackbot:agentops-slackbot
-
-  # The Slack bot's webhooks. Slack signs each request and the bot checks it.
-  - from: https://slack.example.com
-    path: /slack/events
-    to: http://agentops-slackbot.agentops-slackbot.svc.cluster.local:80
-    allow_public_unauthenticated_access: true
-  - from: https://slack.example.com
-    path: /slack/interactivity
-    to: http://agentops-slackbot.agentops-slackbot.svc.cluster.local:80
-    allow_public_unauthenticated_access: true
-
-  # One route per upstream the agent reaches with the run token: the LLM API,
-  # each MCP server. Pomerium adds the real API key; the pod never has it.
-  - from: https://anthropic.example.com
-    to: https://api.anthropic.com
-    bearer_token_format: agentic_run_token
-    timeout: 0s
-    set_request_headers:
-      x-api-key: "<your Anthropic API key>"
-    remove_request_headers: [Authorization]
-    policy:
-      allow:
-        and:
-          - domain: example.com
-          - claim/act.kubernetes.io.serviceaccount.name: sandbox-agent
-```
-
-Notes on these routes:
-
-- The Agent Link and the Harness API are separate hosts. Pomerium sets the
-  assertion's `iss` and `aud` from the route host, so separate hosts keep a
-  sandbox's assertion from being valid on the Harness API. The platform refuses
-  to start if the two issuers are the same.
-- Long-lived gRPC and Connect streams need `timeout: 0s` and `idle_timeout: 0s`.
-  Do not use `allow_websockets` on these routes: it forces the upstream to
-  HTTP/1.1 and every stream fails.
-- The Harness API policy matches the raw `sub` of the client's token. The
-  ClientBinding in [step 5](#5-define-an-agent-and-register-the-bot) uses the
-  subject that Pomerium mints, which has the identity provider's name in front.
-- A route accepts a run token only if it declares
-  `bearer_token_format: agentic_run_token`. An MCP server route needs it too.
-- The Slack bot's token has the `cluster` provider's audience by default
-  (`harnessAPI.tokenAudience`, `pomerium-agentic-as`). The bot mounts no token
-  for the AS routes, and the two AS routes that take ServiceAccount tokens
-  (`/agentic/runs`, `/agentic/token`) pin the namespace and the ServiceAccount
-  in their policies, so they refuse the bot's token. To keep the audiences apart,
-  set `harnessAPI.tokenAudience` to a value of its own and give the Harness API
-  route an identity provider that accepts it.
-
-[docs/run-identity.md](./docs/run-identity.md) explains each AS route and the
-Agent Link route in detail.
-
-### 3. Install the platform
+[INSTALL.md](./INSTALL.md) has every step, with the checks after each one. In
+short, write a values file with your hosts, certificate and approvers (the
+[chart's README](./deploy/charts/agentops-quickstart/README.md) has the
+smallest one and every value), then:
 
 ```sh
-helm install agentops oci://registry-1.docker.io/pomerium/agentops \
-  --version X.Y.Z \
-  --namespace agentops-system --create-namespace \
-  --set config.agentic.asURL=https://agentic.example.com \
-  --set config.harness.externalURL=https://harness.example.com \
-  --set config.harness.assertionIssuer=harness.example.com \
-  --set config.harness.api.assertionIssuer=harness-api.example.com
+kubectl apply --server-side --force-conflicts -f deploy/charts/agentops-quickstart/crds/
+helm dependency build --skip-refresh deploy/charts/agentops-quickstart
+helm upgrade --install agentops deploy/charts/agentops-quickstart \
+  --namespace agentops-system --create-namespace -f agentops-values.yaml
 ```
 
-Always pass `--version`. CI publishes the chart for each GitHub release (version
-`X.Y.Z` for the tag `vX.Y.Z`) and a development chart, version
-`0.0.0-git-<sha7>`, for each push to `main` that changes `deploy/charts/**`
-(see [Continuous integration and releases](#continuous-integration-and-releases)).
+Helm installs the CRDs in a chart's `crds/` only once and never updates them,
+so the first command applies them before each install and upgrade. The same
+commands upgrade the install later, for example after `git pull`.
 
-To install from a checkout instead, give the chart's path. A chart from a
-checkout uses the `appVersion` in its `Chart.yaml` as the image tag, so set
-`image.tag` to an image that exists: `main`, the `git-<sha8>` tag of a commit on
-`main`, or your own build.
+The images are `pomerium/agentops:main` and `pomerium/agentops-sidecar:main`.
+Set `agentops.image.tag` to `git-<sha8>` for the images of one commit on
+`main`. The chart pins the Pomerium image by digest.
 
-```sh
-helm install agentops deploy/charts/agentops \
-  --namespace agentops-system --create-namespace \
-  --set image.tag=git-<sha8> \
-  --set config.agentic.asURL=https://agentic.example.com \
-  --set config.harness.externalURL=https://harness.example.com \
-  --set config.harness.assertionIssuer=harness.example.com \
-  --set config.harness.api.assertionIssuer=harness-api.example.com
+### Run the hello agent
+
+Point DNS for the hosts at the external address of the Pomerium Service
+(`kubectl -n agentops-pomerium get service pomerium-proxy`). Then run one
+session of the `hello` agent through the Harness API, as `quickstart-client`:
+[INSTALL.md, Step 6](./INSTALL.md#step-6-run-the-hello-agent) has the `curl`
+commands. The session prints an approval link. Open it, sign in as an approver
+and approve. The agent then answers:
+
+```
+Hello from AgentOps!
+
+I am the `hello` demo agent, in sandbox pod `hello-7xq2k`. I have no LLM: I
+give this answer to every prompt. ...
 ```
 
-The four `config.*` values are required. The two issuers are the hosts of the
-Agent Link and Harness API routes. If the platform cannot reach the public hosts
-from inside the cluster, set `config.agentic.dialAddress` to the in-cluster
-Pomerium Service. If Pomerium uses a private CA, mount it and set
-`config.agentic.caFile`. Every value is in
-[the chart's README](./deploy/charts/agentops/README.md).
+The `hello` agent is
+[a Python script](./deploy/charts/agentops-quickstart/files/hello-agent.py)
+that speaks ACP on stdio, in the stock `python:3.13-alpine` image. It needs no
+LLM, no API key and no image build, and it answers every prompt with the same
+text. Its answer shows that each part works: the Harness API route, the run at
+the AS, the approval, the token exchange in the sidecar, the Agent Link and the
+runner. [INSTALL.md](./INSTALL.md#when-a-check-fails) has a table for when it
+does not.
 
-The chart installs the AgentTemplate and ClientBinding CRDs with
-`helm.sh/resource-policy: keep`, so `helm uninstall` leaves the CRDs and every
-AgentTemplate and ClientBinding in place (see
-[the chart's README](./deploy/charts/agentops/README.md#crds)). It does not
-install agent-sandbox, Pomerium, the sandboxes or any client.
+### What the quickstart installs
 
-### 4. Set up the sandbox side
+**Pomerium**, in its own namespace (`agentops-pomerium`):
 
-You need three things:
+- the StatefulSet `pomerium`: the ingress controller in all-in-one mode. Its
+  databroker is a file on a PersistentVolumeClaim, so runs, sessions and MCP
+  tokens survive a restart;
+- the Service `pomerium-proxy`: a LoadBalancer on ports 443 and 80. In the
+  cluster, the platform and the sidecars dial
+  `pomerium-proxy.agentops-pomerium.svc.cluster.local:443`, with the public
+  host in Host and SNI;
+- the IngressClass `pomerium-agentops`, with the controller name
+  `pomerium.io/ingress-controller-agentops`. The names are not the default ones,
+  so the controller and another Pomerium ingress controller in the cluster
+  never take each other's Ingresses. The controller reads Ingresses only in
+  its own namespace, so only who can write to that namespace can add a route;
+- the cluster-scoped `Pomerium` object `agentops`, which holds the global
+  settings: the `agentic` and `mcp` runtime flags, the certificate, the
+  authenticate URL, Pomerium's hosted identity provider (the chart value
+  `pomerium.identityProvider` selects another one), the `jwt_claims_headers`
+  that the Agent Link needs, and the identity provider `cluster` for
+  ServiceAccount tokens (`issuer: kubernetes:///`, audience
+  `pomerium-agentic-as`);
+- the Secret `bootstrap` (Pomerium's shared secret, cookie secret and signing
+  key), made on the first install and kept on upgrades; RBAC for the controller;
+  and a binding to `system:service-account-issuer-discovery`, so Pomerium can
+  read the cluster's OIDC discovery document;
+- the `PomeriumService` `agentic`, which makes the AS an Ingress backend, and
+  the routes:
 
-- a harness image for the agent. Build one from
-  [`deploy/harness/`](./deploy/harness) with
-  `make harness-build HARNESS=claude-code` (tag `claude-code:dev`) and push it to
-  a registry your cluster can pull from. CI does not publish harness images;
-- the sidecar image `pomerium/agentops-sidecar`, which CI publishes;
-- a kustomize overlay with your SandboxTemplate, a SandboxWarmPool for it, the
-  agentops Component, and a patch with your Pomerium hosts.
+| Ingress | Host and path | Backend | Policy |
+|---|---|---|---|
+| `agentic-runs` | `agentic` `/agentic/runs` (prefix) | the AS | the platform's ServiceAccount token |
+| `agentic-token` | `agentic` `/agentic/token` (exact) | the AS | the `sandbox-agent` token of a pod in the platform's namespace |
+| `agentic-approve` | `agentic` `/agentic/approve` (exact) | the AS | the approvers |
+| `harness` | `harness` | the Agent Link | a run token sealed to a `sandbox-agent` pod in the platform's namespace |
+| `harness-api` | `harness-api` | the Harness API | the ServiceAccount token of a client in `clients`, or of `quickstart-client` |
+| `anthropic` | `anthropic` | `api.anthropic.com`, with the API key | a run token of an approver, sealed to a `sandbox-agent` pod |
+
+[`templates/routes.yaml`](./deploy/charts/agentops-quickstart/templates/routes.yaml)
+has the annotations of each route. [docs/run-identity.md](./docs/run-identity.md)
+explains them.
+
+**The platform**, in the platform's namespace: the `agentops` chart with
+`fullnameOverride: agentops`, so the StatefulSet, the Service and the
+ServiceAccount are all `agentops`. Its values are under `agentops.*`.
+
+**The sandbox side**: the ServiceAccount `sandbox-agent`, and the AgentTemplate,
+SandboxTemplate and SandboxWarmPool `hello`. The SandboxTemplate is the pod that
+the agentops Component builds (see
+[The sandbox pod contract](#the-sandbox-pod-contract)), with the sidecar pointed
+at the quickstart's hosts. `make helm-check-quickstart-sandbox` checks that the
+chart and the Component agree.
+
+**Clients**: the ServiceAccount `quickstart-client`, and a ClientBinding for each
+client: `quickstart-client`, and each entry of `clients`. A client's
+ServiceAccount subject is also in the Harness API route's policy.
+
+`helm uninstall agentops -n agentops-system` removes all of it, the Pomerium
+namespace too if the chart made it. It leaves the CRDs and the platform's
+PersistentVolumeClaim.
+
+### Add an agent
+
+An agent needs a harness image, a SandboxTemplate, a SandboxWarmPool and an
+AgentTemplate (see [Defining an agent](#defining-an-agent)), in the platform's
+namespace:
+
+- **A harness image.** Build one from [`deploy/harness/`](./deploy/harness)
+  with `make harness-build HARNESS=claude-code` (tag `claude-code:dev`) and push
+  it to a registry your cluster can pull from. CI does not publish harness
+  images.
+- **A kustomize overlay** with your SandboxTemplate, a SandboxWarmPool for it,
+  the agentops Component, and patches for the quickstart's hosts and namespace.
 
 [`deploy/examples`](./deploy/examples) is a complete overlay with four
 SandboxTemplates and their pools. Three of the templates have a `git-init`, so
 the overlay also applies [`git-egress.yaml`](./deploy/examples/git-egress.yaml)
-to them (see [Dev to prod is `git push`](#dev-to-prod-is-git-push)). Edit
-[`endpoints.yaml`](./deploy/examples/endpoints.yaml) and the `images:` in its
-`kustomization.yaml`, then:
-
-```sh
-kubectl apply -k deploy/examples
-```
-
-Your own overlay has the same shape:
+to them (see [Dev to prod is `git push`](#dev-to-prod-is-git-push)). Your own
+overlay has the same shape:
 
 ```yaml
 # kustomization.yaml
@@ -403,6 +355,7 @@ namespace: agentops-system
 resources:
   - sandboxtemplate.yaml
   - warmpool.yaml
+  - agenttemplate.yaml
 components:
   - github.com/pomerium/agentops//deploy/components/agentops?ref=vX.Y.Z
 images:
@@ -414,6 +367,19 @@ patches:
     target:
       kind: SandboxTemplate
       annotationSelector: agents.pomerium.com/inject=true
+  - target:
+      kind: SandboxTemplate
+      annotationSelector: agents.pomerium.com/inject in (true,workload)
+    patch: |-
+      - op: replace
+        path: /spec/networkPolicy/egress/1/to/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: agentops-pomerium
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: sandbox-agent
 ```
 
 - `vX.Y.Z` is a release tag. To build from a commit on `main` instead, use the
@@ -424,144 +390,196 @@ patches:
   [The sandbox pod contract](#the-sandbox-pod-contract)).
   [`deploy/sandbox`](./deploy/sandbox) has one such template, its warm pool and
   an AgentTemplate.
-- `warmpool.yaml` is a SandboxWarmPool that references the template.
-- `namespace: agentops-system` is necessary: the Component's `sandbox-agent`
-  ServiceAccount and `agentops-egress-only` NetworkPolicy have no namespace of
-  their own.
+- `namespace: agentops-system` is necessary: the Component's NetworkPolicy has
+  no namespace of its own.
+- The second patch admits egress to Pomerium in `agentops-pomerium`. The
+  Component's network policy admits only kube-dns and pods labeled
+  `app.kubernetes.io/name: pomerium` on port 8443 in the namespace `pomerium`.
+- The third patch drops the Component's `sandbox-agent` ServiceAccount. The
+  quickstart release owns it.
 - `endpoints.yaml` sets the hosts the sidecar dials, as in
   [`deploy/examples/endpoints.yaml`](./deploy/examples/endpoints.yaml):
 
 | Sidecar variable | Value |
 |---|---|
-| `SIDECAR_HTTP_ANTHROPIC_UPSTREAM_URL` | the LLM route, `https://anthropic.example.com` |
-| `SIDECAR_AGENTIC_AS_URL` | the AS host, the same as `config.agentic.asURL` |
-| `SIDECAR_HARNESS_URL` | the Agent Link route, the same as `config.harness.externalURL`. The platform cannot see the pod's environment and cannot check this. |
-| `SIDECAR_HTTP_ANTHROPIC_DIAL_ADDRESS`, `SIDECAR_AGENTIC_AS_DIAL_ADDRESS`, `SIDECAR_HARNESS_DIAL_ADDRESS` | the `host:port` to dial instead of the URL's host, usually the in-cluster Pomerium Service, while Host and SNI stay public. Optional only if the public hosts, resolved inside the pod, reach a Pomerium pod that the network policy admits. |
-| `SIDECAR_AGENTIC_CA_FILE` | optional: a private CA for Pomerium. The Agent Link uses it too, unless `SIDECAR_HARNESS_CA_FILE` is set. |
+| `SIDECAR_HTTP_ANTHROPIC_UPSTREAM_URL` | the LLM route, `https://anthropic.<domain>` |
+| `SIDECAR_AGENTIC_AS_URL` | the AS, `https://agentic.<domain>` |
+| `SIDECAR_HARNESS_URL` | the Agent Link, `https://harness.<domain>`. It must equal the platform's `config.harness.externalURL`. The platform cannot see the pod's environment and cannot check this. |
+| `SIDECAR_HTTP_ANTHROPIC_DIAL_ADDRESS`, `SIDECAR_AGENTIC_AS_DIAL_ADDRESS`, `SIDECAR_HARNESS_DIAL_ADDRESS` | `pomerium-proxy.agentops-pomerium.svc.cluster.local:443`: the sidecar dials the in-cluster Pomerium Service, and Host and SNI stay public. |
+| `SIDECAR_AGENTIC_CA_FILE` | for a private CA only: the CA file, which you mount from a Secret. The Agent Link uses it too, unless `SIDECAR_HARNESS_CA_FILE` is set. |
 
-The network policy admits Pomerium pods in one namespace and nothing else (see
-below). Every address the sidecar dials, these and an AgentTemplate's MCP
+The network policy admits Pomerium pods in one namespace and nothing else.
+Every address the sidecar dials, these and an AgentTemplate's MCP
 `dialAddress`, must therefore end at a Pomerium pod in that namespace.
+
+Apply the overlay, then let a client run the agent: add the AgentTemplate's
+name to the `templates` of that client in your quickstart values file, and
+upgrade the release with the commands in [Install the chart](#install-the-chart):
+
+```sh
+kubectl apply -k my-agent/
+helm upgrade agentops deploy/charts/agentops-quickstart -n agentops-system -f agentops-values.yaml
+```
+
+For an agent that uses Claude, give the install an Anthropic API key, so the
+`anthropic` route exists. An MCP server that an AgentTemplate names in
+`requiredMCPServers` needs a route of its own: an Ingress of the class
+`pomerium-agentops` in the Pomerium namespace, with
+`ingress.pomerium.io/bearer_token_format: agentic_run_token` and
+`ingress.pomerium.io/mcp_server: "true"`. An Ingress backend must be a Service in
+the Ingress's namespace, so an upstream elsewhere needs an `ExternalName`
+Service there.
 
 The [Component's README](./deploy/components/agentops/README.md) explains the
 merge and the workload mode (`agents.pomerium.com/inject: "workload"`).
 
-**Pomerium in another namespace.** The Component's network policy lets the pod
-reach kube-dns in `kube-system` and pods labeled
-`app.kubernetes.io/name: pomerium` on port 8443 in the namespace `pomerium`, and
-nothing else. If your Pomerium runs elsewhere, add a JSON 6902 patch to the
-overlay:
-
-```yaml
-patches:
-  - target:
-      kind: SandboxTemplate
-      annotationSelector: agents.pomerium.com/inject in (true,workload)
-    patch: |-
-      - op: replace
-        path: /spec/networkPolicy/egress/1/to/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
-        value: my-pomerium-namespace
-  - target:
-      kind: NetworkPolicy
-      name: agentops-egress-only
-    patch: |-
-      - op: replace
-        path: /spec/egress/1/to/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
-        value: my-pomerium-namespace
-```
-
-The second patch applies to workload mode. Patch
-`/spec/networkPolicy/egress/1/to/0/podSelector` or
-`/spec/networkPolicy/egress/1/ports/0/port` the same way if your Pomerium pods
-have another label or port.
-
-### 5. Define an agent and register the bot
-
-The install runs the `deploy-service` agent
-([`agenttemplate-deploy-service.yaml`](./deploy/examples/agenttemplate-deploy-service.yaml),
-see [Defining an agent](#defining-an-agent)). It uses the `claude-code` pool
-from `deploy/examples`, which has no `git-init`.
-
-A ClientBinding registers one client of the Harness API. The platform refuses
-every call from a client that has no ClientBinding.
-
-| Field | Meaning |
-|---|---|
-| `subject` | The client's subject as Pomerium mints it: `<identity provider>/<sub>`, for example `cluster/system:serviceaccount:agentops-slackbot:agentops-slackbot`. |
-| `templates` | The AgentTemplates the client may run. An empty list allows none. |
-| `quotas.maxLiveSessions` | Maximum sessions that are not ended. |
-| `quotas.maxPendingApprovals` | Maximum sessions that are still launching or waiting for approval. |
-| `quotas.createRatePerMinute` | Maximum new sessions per minute. |
-
-Before you apply them, edit both files:
-
-- In `agenttemplate-deploy-service.yaml`, replace the example MCP URLs
-  (`https://github-mcp.example.com/mcp`, `https://k8s-mcp.example.com/mcp`) with
-  your own Pomerium routes. The sidecar sends the run token as the bearer to
-  every `requiredMCPServers` URL, so each URL must be a Pomerium route that you
-  control and that declares `bearer_token_format: agentic_run_token`. Never put
-  a third-party host there.
-- In [`clientbinding-slack.yaml`](./deploy/examples/clientbinding-slack.yaml),
-  `templates` lists `runid` (the agent in [`deploy/sandbox`](./deploy/sandbox))
-  and `deploy-service`. Add every other agent that your channels map to. Check
-  that `subject` matches your identity provider's name and the bot's release
-  and namespace.
-
-Then apply them in the platform's namespace:
-
-```sh
-kubectl apply -f deploy/examples/agenttemplate-deploy-service.yaml
-kubectl apply -f deploy/examples/clientbinding-slack.yaml
-```
-
-### 6. Install the Slack bot
+### Add the Slack bot
 
 First create the Slack app ([Slack app setup](#slack-app-setup)) and install it
 to your workspace. Copy [`deploy/secret.example.yaml`](./deploy/secret.example.yaml)
-to `slack-secret.yaml` and fill in the app's signing secret and bot token, then:
+to `slack-secret.yaml` and fill in the app's signing secret and bot token.
 
-```sh
-kubectl create namespace agentops-slackbot
-kubectl apply -f slack-secret.yaml
-helm install agentops-slackbot oci://registry-1.docker.io/pomerium/agentops-slackbot \
-  --version X.Y.Z \
-  --namespace agentops-slackbot \
-  --set harnessAPI.url=https://harness-api.example.com \
-  --set slack.existingSecret=agentops-slackbot-slack \
-  --set slack.channels.C0123ABCDEF=deploy-service
-```
+1. **Install the bot** in a namespace of its own:
 
-The chart versions are the same as in [step 3](#3-install-the-platform). From a
-checkout, use `helm install agentops-slackbot deploy/charts/agentops-slackbot`
-with the same flags, without `--version`, and set `image.tag` as in step 3.
+   ```sh
+   kubectl create namespace agentops-slackbot
+   kubectl apply -f slack-secret.yaml
+   helm install agentops-slackbot oci://registry-1.docker.io/pomerium/agentops-slackbot \
+     --version X.Y.Z \
+     --namespace agentops-slackbot \
+     --set harnessAPI.url=https://harness-api.agentops.example.com \
+     --set harnessAPI.dialAddress=pomerium-proxy.agentops-pomerium.svc.cluster.local:443 \
+     --set slack.existingSecret=agentops-slackbot-slack \
+     --set slack.channels.C0123ABCDEF=hello
+   ```
 
-Each `slack.channels` entry binds a channel ID to an AgentTemplate. The bot
-authenticates to the Harness API route with a projected ServiceAccount token.
-Its subject comes from the release: the release `agentops-slackbot` in the
-namespace `agentops-slackbot` is
-`system:serviceaccount:agentops-slackbot:agentops-slackbot`, the subject in the
-route policy (step 2) and the ClientBinding (step 5). Every value is in
-[the chart's README](./deploy/charts/agentops-slackbot/README.md).
+   Always pass `--version`. CI publishes the chart for each GitHub release
+   (version `X.Y.Z` for the tag `vX.Y.Z`) and a development chart, version
+   `0.0.0-git-<sha7>`, for each push to `main` that changes `deploy/charts/**`
+   (see [Continuous integration and releases](#continuous-integration-and-releases)).
+   From a checkout, use `helm install agentops-slackbot deploy/charts/agentops-slackbot`
+   with the same flags, without `--version`, and set `image.tag` to an image
+   that exists: `main`, the `git-<sha8>` tag of a commit on `main`, or your own
+   build. For a private CA, also mount the CA with `extraVolumes` and
+   `extraVolumeMounts` and set `harnessAPI.caFile`. Every value is in
+   [the chart's README](./deploy/charts/agentops-slackbot/README.md).
 
-When the bot starts, it calls the Harness API. The platform logs each client's
-subject once, the first time it admits the client:
+   Each `slack.channels` entry binds a channel ID to an AgentTemplate (see
+   [Binding a channel](#binding-a-channel)).
 
-```sh
-kubectl -n agentops-system logs sts/agentops | grep "admitted a client"
-```
+2. **Register the bot** with the platform. Add it to `clients` in your
+   quickstart values file, and upgrade the release
+   ([Install the chart](#install-the-chart)):
 
-The `client_id` in that line must equal `spec.subject` in the ClientBinding. If
-it does not, correct the binding and apply it again.
+   ```yaml
+   clients:
+     - serviceAccount:
+         namespace: agentops-slackbot
+         name: agentops-slackbot
+       templates: [hello]
+       quotas:
+         maxLiveSessions: 50
+         maxPendingApprovals: 10
+         createRatePerMinute: 30
+   ```
 
-### 7. Connect Slack
+   The entry adds the bot's subject to the Harness API route's policy, and a
+   ClientBinding with `templates` and `quotas`:
 
-When the bot runs and the Slack routes reach it:
+   | Field | Meaning |
+   |---|---|
+   | `templates` | The AgentTemplates the client may run. An empty list allows none. Without the field: `hello`. |
+   | `quotas.maxLiveSessions` | Maximum sessions that are not ended. |
+   | `quotas.maxPendingApprovals` | Maximum sessions that are still launching or waiting for approval. |
+   | `quotas.createRatePerMinute` | Maximum new sessions per minute. |
 
-1. In the Slack app's **Event Subscriptions**, verify the request URL
-   `https://slack.example.com/slack/events`. Slack sends a challenge, and the
-   bot answers it.
-2. Invite the bot to each bound channel.
-3. Mention the bot in one of them.
+   The bot authenticates with a projected ServiceAccount token. The release
+   `agentops-slackbot` in the namespace `agentops-slackbot` has the subject
+   `system:serviceaccount:agentops-slackbot:agentops-slackbot`. When the bot
+   starts, it calls the Harness API, and the platform logs each client's
+   subject once, the first time it admits the client:
+
+   ```sh
+   kubectl -n agentops-system logs sts/agentops | grep "admitted a client"
+   ```
+
+3. **Give Slack a way in.** Slack sends events to `/slack/events` and button
+   clicks to `/slack/interactivity`, and the bot checks Slack's signature on
+   each request. Route both paths to the bot with no Pomerium policy, for
+   example with this Ingress in the Pomerium namespace:
+
+   ```yaml
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: agentops-slackbot
+     namespace: agentops-pomerium
+   spec:
+     type: ExternalName
+     externalName: agentops-slackbot.agentops-slackbot.svc.cluster.local
+     ports:
+       - name: http
+         port: 80
+   ---
+   apiVersion: networking.k8s.io/v1
+   kind: Ingress
+   metadata:
+     name: slack
+     namespace: agentops-pomerium
+     annotations:
+       ingress.pomerium.io/allow_public_unauthenticated_access: "true"
+   spec:
+     ingressClassName: pomerium-agentops
+     rules:
+       - host: slack.agentops.example.com
+         http:
+           paths:
+             - path: /slack/events
+               pathType: Exact
+               backend:
+                 service:
+                   name: agentops-slackbot
+                   port:
+                     number: 80
+             - path: /slack/interactivity
+               pathType: Exact
+               backend:
+                 service:
+                   name: agentops-slackbot
+                   port:
+                     number: 80
+   ```
+
+   The host needs a DNS record and a name in the certificate, like the others.
+
+4. **Connect Slack.** In the Slack app's **Event Subscriptions**, verify the
+   request URL `https://slack.agentops.example.com/slack/events`. Slack sends a
+   challenge, and the bot answers it. Invite the bot to each bound channel,
+   and mention it in one of them.
+
+### Pomerium without the quickstart
+
+The platform needs a Pomerium with the agentic AS, from any build that has it,
+in any form: the ingress controller, or a Pomerium with a configuration file.
+It needs:
+
+- `runtime_flags: {agentic: true, mcp: true}`;
+- a persistent databroker. An in-memory databroker loses every run when
+  Pomerium restarts;
+- a human identity provider that issues refresh tokens. The approver needs one
+  for the consent page to succeed;
+- an identity provider for Kubernetes ServiceAccount tokens, with the audience
+  `pomerium-agentic-as` of the projected tokens of the platform, the sidecars
+  and the clients;
+- the global `jwt_claims_headers` for `run_id` and the `act.*` claims. Without
+  it the Agent Link refuses every sandbox with `assertion carries no run_id`;
+- the routes in the table in
+  [What the quickstart installs](#what-the-quickstart-installs).
+
+[docs/run-identity.md](./docs/run-identity.md) has each of them as Pomerium
+configuration. Then install the [`agentops`](./deploy/charts/agentops) chart on
+its own, and the sandbox side as in [Add an agent](#add-an-agent), with the
+`sandbox-agent` ServiceAccount from the Component.
 
 ## Configuration
 
@@ -578,6 +596,10 @@ it sets:
   which sets the variables that
   [`slackbot/internal/config/config.go`](./slackbot/internal/config/config.go)
   reads.
+
+The quickstart chart,
+[`deploy/charts/agentops-quickstart`](./deploy/charts/agentops-quickstart/README.md),
+passes its `agentops.*` values to the platform chart.
 
 Agents are configured with cluster resources: see
 [Defining an agent](#defining-an-agent).
@@ -596,7 +618,7 @@ Spec fields
 |---|---|---|
 | `warmPoolRef.name` | yes | The `SandboxWarmPool` that the session's `SandboxClaim` uses. |
 | `systemPrompt` | no | The system prompt. It goes to the agent in the ACP `session/new` request, not in the environment. |
-| `requiredMCPServers` | no | `{name, url}` and an optional `dialAddress` for each MCP server. The sidecar serves each one on a loopback port and adds the run token as the bearer, so `url` must be a Pomerium route that you control. `dialAddress` follows the rule for the sidecar's dial addresses ([step 4](#4-set-up-the-sandbox-side)). The consent page shows the list, with a Connect link for each upstream account that the approver has not authorized yet. |
+| `requiredMCPServers` | no | `{name, url}` and an optional `dialAddress` for each MCP server. The sidecar serves each one on a loopback port and adds the run token as the bearer, so `url` must be a Pomerium route that you control. `dialAddress` follows the rule for the sidecar's dial addresses (see [Add an agent](#add-an-agent)). The consent page shows the list, with a Connect link for each upstream account that the approver has not authorized yet. |
 | `sessionConfig` | no | ACP session options set after the session opens. See [below](#harness-session-configuration-sessionconfig). |
 
 A run carries no grant. `requiredMCPServers` is what the approver sees, not what
@@ -617,6 +639,7 @@ Examples in [`deploy/examples/`](./deploy/examples):
 | [`agenttemplate-deploy-service.yaml`](./deploy/examples/agenttemplate-deploy-service.yaml) | `deploy-service` | A system prompt and two MCP servers, on the generic `claude-code` pool. |
 | [`agenttemplate-gstack.yaml`](./deploy/examples/agenttemplate-gstack.yaml) | `gstack` | Checks out the `garrytan/gstack` skills repository, with Linear, Notion, GitHub and PostHog MCP servers. |
 | [`agenttemplate-gcloud.yaml`](./deploy/examples/agenttemplate-gcloud.yaml) | `gcloud` | Checks out Google's `google/skills` repository, with Google Cloud MCP servers, a `sessionConfig` that selects the model, and a `dialAddress`. |
+| [`agentops-quickstart/templates/sandbox.yaml`](./deploy/charts/agentops-quickstart/templates/sandbox.yaml) | `hello` | The quickstart's demo agent: no LLM, no MCP servers, a Python script in a ConfigMap. |
 
 A minimal one, using the template and pool in [`deploy/sandbox`](./deploy/sandbox):
 
@@ -749,6 +772,12 @@ publish harness images.
 `demo` is not a real harness. It is an Alpine image with no `bash`, no
 `git-checkout` and no `USER` (the pod's `securityContext` makes it non-root).
 Use it to test the launch path without an LLM key, not as a template.
+
+The quickstart's `hello` agent needs no harness image at all: it is
+[a Python script](./deploy/charts/agentops-quickstart/files/hello-agent.py),
+mounted from a ConfigMap into the stock `python:3.13-alpine` image, that
+answers every prompt with the same text. It shows the smallest ACP agent that
+the runner accepts.
 
 The agentops Component routes only the Anthropic API through Pomerium: it sets
 `ANTHROPIC_BASE_URL` to the sidecar's port 9999. A harness that uses another
@@ -943,12 +972,14 @@ GitHub Actions workflows in [`.github/workflows`](./.github/workflows):
   push nothing. Pushes to `main` publish `:main` and `:git-<sha8>` for
   `linux/amd64` and `linux/arm64`. Tags `vX.Y.Z` publish `:vX.Y.Z`, `:latest`
   and `:git-<sha8>`. Harness images are not built.
-- **`helm.yaml`** lints and renders both charts on pull requests, including
-  `make helm-check-client-isolation`. It publishes both charts to
-  `oci://registry-1.docker.io/pomerium` on each push to `main` that changes
+- **`helm.yaml`** lints and renders the three charts on pull requests,
+  including `make helm-check-client-isolation` and
+  `make helm-check-quickstart-sandbox`. It publishes the platform and bot charts
+  to `oci://registry-1.docker.io/pomerium` on each push to `main` that changes
   `deploy/charts/**` (version `0.0.0-git-<sha7>`, `appVersion` `git-<sha8>`,
   the image tag of the same commit), and on each published GitHub release
-  (version = the tag without `v`, `appVersion` = the tag).
+  (version = the tag without `v`, `appVersion` = the tag). The quickstart chart
+  is not published: install it from a checkout.
 
 On a pull request, the jobs run only if no other open pull request is stacked
 on it ([`stack-top.yaml`](./.github/workflows/stack-top.yaml)).

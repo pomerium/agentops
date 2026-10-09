@@ -17,7 +17,7 @@ The chart installs:
 
 The chart does not install agent-sandbox, Pomerium, the sandbox side (SandboxTemplates, SandboxWarmPools and the `sandbox-agent` ServiceAccount, which come from the kustomize Component in [`deploy/components/agentops`](../../components/agentops)), AgentTemplates, ClientBindings, or any client. The Slack bot has its own chart, [`agentops-slackbot`](../agentops-slackbot).
 
-The full installation, including the Pomerium routes, is in the repository's [README](../../../README.md#install).
+The [`agentops-quickstart`](../agentops-quickstart) chart installs this chart together with Pomerium, the routes and a demo agent. The repository's [README](../../../README.md#install) describes the installation.
 
 ## Install
 
@@ -194,7 +194,7 @@ The chart's notes list these steps. The route settings in step 2 are not in the 
    | Agent Link | `config.harness.externalURL` | `h2c://agentops.agentops-system.svc.cluster.local:8090` |
    | Harness API | `https://<config.harness.api.assertionIssuer>` | `h2c://agentops.agentops-system.svc.cluster.local:8081` |
 
-   Both routes need `pass_identity_headers: true`, `timeout: 0s` and `idle_timeout: 0s`. The Agent Link route uses `bearer_token_format: agentic_run_token`. The Harness API route uses `bearer_token_format: jwt` and the identity provider that verifies your clients' tokens. The AS route where the platform creates runs (`/agentic/runs`) must admit the ServiceAccount `system:serviceaccount:agentops-system:agentops`. The repository's [README](../../../README.md#2-configure-pomerium-as-the-agentic-authorization-server) has the complete Pomerium configuration.
+   Both routes need `pass_identity_headers: true`, `timeout: 0s` and `idle_timeout: 0s`. The Agent Link route uses `bearer_token_format: agentic_run_token`. The Harness API route uses `bearer_token_format: jwt` and the identity provider that verifies your clients' tokens. The AS route where the platform creates runs (`/agentic/runs`) must admit the ServiceAccount `system:serviceaccount:agentops-system:agentops`. The [quickstart chart](../agentops-quickstart) installs this chart with Pomerium and every route; [docs/run-identity.md](../../../docs/run-identity.md) has the routes as Pomerium configuration.
 
 3. Give each client a ClientBinding in `agentops-system`. The platform refuses every call from a client without one. The platform logs the subject of each client it admits:
 

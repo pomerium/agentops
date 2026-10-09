@@ -100,6 +100,32 @@ The agentic authorization server (AS) is Pomerium with `runtime_flags:
   refresh token for the approval page to succeed, and the AS keeps interactive
   runs alive against the approver's IdP session.
 
+### With the Pomerium ingress controller
+
+The examples here are Pomerium configuration. The quickstart chart,
+[`deploy/charts/agentops-quickstart`](../deploy/charts/agentops-quickstart),
+makes the same settings with the Pomerium ingress controller: the global ones in
+the cluster-scoped `Pomerium` object, and each route as an Ingress with
+`ingress.pomerium.io/*` annotations
+([`templates/routes.yaml`](../deploy/charts/agentops-quickstart/templates/routes.yaml)).
+The keys map one to one:
+
+| Configuration | Ingress controller |
+| --- | --- |
+| `runtime_flags`, `jwt_claims_headers`, `identity_providers` | `spec.runtimeFlags`, `spec.jwtClaimHeaders`, `spec.identityProviders` (with `issuer`, `audiences`, `supportedAlgs`) of the `Pomerium` object |
+| `from` with `prefix` or `path` | the Ingress rule's host, and a path of type `Prefix` or `Exact` |
+| `to: pomerium://agentic` | a backend `resource` of kind `PomeriumService`, named `agentic`, whose `spec.service` is `agentic` |
+| `to: h2c://<service>:<port>` | a backend Service, and `h2c_upstream: "true"` |
+| `to: https://<external host>` | a backend `ExternalName` Service, and `secure_upstream: "true"` |
+| `mcp: { client: {} }`, `mcp: { server: {} }` | `mcp_client: "true"`, `mcp_server: "true"` |
+| `set_request_headers` with a secret value | `set_request_headers_secret: <Secret>`, a Secret in the Ingress's namespace whose keys are the header names |
+| every other route key, such as `bearer_token_format`, `identity_providers`, `preserve_host_header`, `pass_identity_headers`, `timeout`, `idle_timeout`, `remove_request_headers`, `policy` | `ingress.pomerium.io/<key>`, with a list as a JSON string and the policy as a YAML string |
+
+An Ingress backend must be a Service in the Ingress's own namespace. The
+quickstart keeps every route in Pomerium's namespace and starts the controller
+with `--namespaces` for that namespace only, so the people who can write to that
+namespace are the people who can change a route.
+
 ## Route configuration
 
 **A run carries no grant.** What a run token may reach is decided per route and

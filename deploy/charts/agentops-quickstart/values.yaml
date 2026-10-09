@@ -1,0 +1,103 @@
+hosts:
+  authenticate: ""
+  anthropic: ""
+
+tls:
+  secret: ""
+
+privateCA:
+  secretName: ""
+  key: ca.crt
+
+access:
+  domains: []
+  emails: []
+
+pomerium:
+  namespace: agentops-pomerium
+  createNamespace: true
+  image:
+    repository: pomerium/ingress-controller
+    tag: experimental-agentic
+    digest: sha256:c22b3be0593428211c6914661a176813bb8ac52409d5f251f23afaa3ea2ef923
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  configName: agentops
+  ingressClass:
+    name: pomerium-agentops
+    controller: pomerium.io/ingress-controller-agentops
+  identityProvider:
+    provider: hosted
+    url: ""
+    secret: ""
+    scopes: []
+  runtimeFlags: {}
+  extraArgs: []
+  service:
+    type: LoadBalancer
+    annotations: {}
+    loadBalancerIP: ""
+  persistence:
+    size: 1Gi
+    storageClass: ""
+    initPermissions: false
+  issuerDiscoveryBinding: true
+  resources:
+    requests:
+      cpu: 300m
+      memory: 200Mi
+    limits:
+      memory: 1Gi
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations: []
+  affinity: {}
+
+anthropic:
+  enabled: false
+  apiKey: ""
+  existingSecret: ""
+
+sandbox:
+  sidecar:
+    image:
+      repository: pomerium/agentops-sidecar
+      tag: ""
+      digest: ""
+      pullPolicy: IfNotPresent
+
+hello:
+  enabled: true
+  name: hello
+  image:
+    repository: python
+    tag: 3.13-alpine
+    digest: ""
+    pullPolicy: IfNotPresent
+  warmPool: 1
+
+verifyClient:
+  enabled: true
+  name: quickstart-client
+  templates: []
+  quotas:
+    maxLiveSessions: 5
+    maxPendingApprovals: 2
+    createRatePerMinute: 10
+
+clients: []
+
+agentops:
+  fullnameOverride: agentops
+  installCRDs: false
+  image:
+    tag: main
+  config:
+    agentic:
+      asURL: ""
+      dialAddress: pomerium-proxy.agentops-pomerium.svc.cluster.local:443
+    harness:
+      externalURL: ""
+      assertionIssuer: ""
+      api:
+        assertionIssuer: ""

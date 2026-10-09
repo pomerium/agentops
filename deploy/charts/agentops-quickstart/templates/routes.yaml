@@ -1,0 +1,189 @@
+{{- $ns := .Values.pomerium.namespace -}}
+{{- $class := .Values.pomerium.ingressClass.name -}}
+{{- $agentic := include "quickstart.agenticHost" . -}}
+{{- $platformSA := include "quickstart.platformServiceAccount" . -}}
+{{- $clients := include "quickstart.clients" . | fromJsonArray -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentic-runs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    ingress.pomerium.io/bearer_token_format: "jwt"
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    ingress.pomerium.io/preserve_host_header: "true"
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/kubernetes.io.namespace: {{ .Release.Namespace }}
+          - claim/kubernetes.io.serviceaccount.name: {{ $platformSA }}
+spec:
+  ingressClassName: {{ $class }}
+  rules:
+    - host: {{ $agentic }}
+      http:
+        paths:
+          - path: /agentic/runs
+            pathType: Prefix
+            backend:
+              resource:
+                apiGroup: ingress.pomerium.io
+                kind: PomeriumService
+                name: agentic
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentic-token
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    ingress.pomerium.io/bearer_token_format: "jwt"
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/kubernetes.io.namespace: {{ .Release.Namespace }}
+          - claim/kubernetes.io.serviceaccount.name: sandbox-agent
+spec:
+  ingressClassName: {{ $class }}
+  rules:
+    - host: {{ $agentic }}
+      http:
+        paths:
+          - path: /agentic/token
+            pathType: Exact
+            backend:
+              resource:
+                apiGroup: ingress.pomerium.io
+                kind: PomeriumService
+                name: agentic
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentic-approve
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    ingress.pomerium.io/pass_identity_headers: "true"
+    ingress.pomerium.io/preserve_host_header: "true"
+    ingress.pomerium.io/mcp_client: "true"
+    ingress.pomerium.io/policy: |
+      {{- include "quickstart.approverPolicy" . | nindent 6 }}
+spec:
+  ingressClassName: {{ $class }}
+  rules:
+    - host: {{ $agentic }}
+      http:
+        paths:
+          - path: /agentic/approve
+            pathType: Exact
+            backend:
+              resource:
+                apiGroup: ingress.pomerium.io
+                kind: PomeriumService
+                name: agentic
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: harness
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    ingress.pomerium.io/h2c_upstream: "true"
+    ingress.pomerium.io/bearer_token_format: "agentic_run_token"
+    ingress.pomerium.io/timeout: "0s"
+    ingress.pomerium.io/idle_timeout: "0s"
+    ingress.pomerium.io/pass_identity_headers: "true"
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/act.kubernetes.io.namespace: {{ .Release.Namespace }}
+          - claim/act.kubernetes.io.serviceaccount.name: sandbox-agent
+spec:
+  ingressClassName: {{ $class }}
+  rules:
+    - host: {{ include "quickstart.harnessHost" . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agentops
+                port:
+                  number: {{ .Values.agentops.service.grpcPort }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: harness-api
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    ingress.pomerium.io/h2c_upstream: "true"
+    ingress.pomerium.io/bearer_token_format: "jwt"
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    ingress.pomerium.io/timeout: "0s"
+    ingress.pomerium.io/idle_timeout: "0s"
+    ingress.pomerium.io/pass_identity_headers: "true"
+    {{- if $clients }}
+    ingress.pomerium.io/policy: |
+      allow:
+        or:
+          {{- range $clients }}
+          - claim/sub: system:serviceaccount:{{ .namespace }}:{{ .account }}
+          {{- end }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $class }}
+  rules:
+    - host: {{ include "quickstart.harnessAPIHost" . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agentops
+                port:
+                  number: {{ .Values.agentops.service.apiPort }}
+{{- if .Values.anthropic.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: anthropic
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    ingress.pomerium.io/secure_upstream: "true"
+    ingress.pomerium.io/bearer_token_format: "agentic_run_token"
+    ingress.pomerium.io/timeout: "0s"
+    ingress.pomerium.io/set_request_headers_secret: {{ .Values.anthropic.existingSecret | default "anthropic-api-key" | quote }}
+    ingress.pomerium.io/remove_request_headers: '["Authorization"]'
+    ingress.pomerium.io/policy: |
+      {{- include "quickstart.runTokenPolicy" . | nindent 6 }}
+spec:
+  ingressClassName: {{ $class }}
+  rules:
+    - host: {{ .Values.hosts.anthropic }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: anthropic-api
+                port:
+                  number: 443
+{{- end }}

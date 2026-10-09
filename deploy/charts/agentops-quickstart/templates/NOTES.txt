@@ -1,0 +1,54 @@
+{{- $ns := .Values.pomerium.namespace -}}
+{{- $clients := include "quickstart.clients" . | fromJsonArray -}}
+AgentOps quickstart {{ .Release.Name }} is installed.
+
+Pomerium, the ingress controller in all-in-one mode, in namespace {{ $ns }}:
+  image          {{ include "quickstart.image" .Values.pomerium.image }}
+  IngressClass   {{ .Values.pomerium.ingressClass.name }}
+  settings       Pomerium/{{ .Values.pomerium.configName }}
+  certificate    {{ .Values.tls.secret }}
+  Service        pomerium-proxy ({{ .Values.pomerium.service.type }}, ports 443 and 80)
+
+In namespace {{ .Release.Namespace }}:
+  platform       StatefulSet {{ include "quickstart.platformName" . }}
+  sandboxes      ServiceAccount sandbox-agent
+{{- if .Values.hello.enabled }}
+  demo agent     AgentTemplate, SandboxTemplate and SandboxWarmPool {{ .Values.hello.name }}
+{{- end }}
+{{- range $clients }}
+  client         ClientBinding {{ .name }}, for system:serviceaccount:{{ .namespace }}:{{ .account }}, may run: {{ .templates | join ", " | default "nothing" }}
+{{- end }}
+
+Routes, as Ingresses in {{ $ns }}:
+  https://{{ .Values.hosts.authenticate }}    sign-in
+  https://{{ include "quickstart.agenticHost" . }}/agentic/approve    run approval, for {{ concat .Values.access.domains .Values.access.emails | join ", " }}
+  https://{{ include "quickstart.agenticHost" . }}/agentic/runs and /agentic/token    the platform and the sandboxes
+  https://{{ include "quickstart.harnessHost" . }}    the Agent Link, for sandboxes with a run token
+  https://{{ include "quickstart.harnessAPIHost" . }}    the Harness API, for {{ len $clients }} client(s)
+{{- if .Values.anthropic.enabled }}
+  https://{{ .Values.hosts.anthropic }}    the Anthropic API, for approved runs
+{{- end }}
+
+Next steps:
+
+1. Point DNS for every host above at the external address of the Service:
+
+   kubectl -n {{ $ns }} get service pomerium-proxy
+
+2. Check that Pomerium and the platform are ready:
+
+   kubectl -n {{ $ns }} rollout status statefulset/pomerium
+   kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "quickstart.platformName" . }}
+{{- if and .Values.hello.enabled .Values.verifyClient.enabled }}
+
+3. Run one session of the demo agent as {{ .Values.verifyClient.name }}, through
+   https://{{ include "quickstart.harnessAPIHost" . }}: INSTALL.md, "Step 6: Run the hello agent".
+   It gives you an approval link. Open it, sign in as an approver and approve.
+   Then the agent answers.
+{{- end }}
+
+Then add a real agent (a SandboxTemplate, a SandboxWarmPool and an AgentTemplate in
+{{ .Release.Namespace }}, whose sidecar dials the hosts above at {{ include "quickstart.proxyAddress" . }}),
+and the Slack bot (the agentops-slackbot chart, and its ServiceAccount in the value clients).
+
+Docs: https://github.com/pomerium/agentops/blob/main/INSTALL.md

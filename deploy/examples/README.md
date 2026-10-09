@@ -1,8 +1,10 @@
 # Example sandboxes, agent templates and client binding
 
 Example manifests for the namespace `agentops-system`, where the platform runs
-and creates its SandboxClaims. Copy them and change what is particular to your
-environment.
+and creates its SandboxClaims. They add agents to an install made with the
+quickstart ([README](../../README.md#install)), with its default namespaces and
+the hosts of the domain `agentops.example.com`. Copy them and change what is
+particular to your environment.
 
 | File | Kind | Applied with |
 |---|---|---|
@@ -17,14 +19,14 @@ environment.
 | [`agenttemplate-deploy-service.yaml`](agenttemplate-deploy-service.yaml) | AgentTemplate | `kubectl apply -f` |
 | [`agenttemplate-gcloud.yaml`](agenttemplate-gcloud.yaml) | AgentTemplate | `kubectl apply -f` |
 | [`agenttemplate-gstack.yaml`](agenttemplate-gstack.yaml) | AgentTemplate | `kubectl apply -f` |
-| [`clientbinding-slack.yaml`](clientbinding-slack.yaml) | ClientBinding | `kubectl apply -f` |
+| [`clientbinding-slack.yaml`](clientbinding-slack.yaml) | ClientBinding | `kubectl apply -f`, only without the quickstart |
 | [`secret.claude-code.example.yaml`](secret.claude-code.example.yaml) | Secret | `kubectl apply -f`, after you copy it and fill in the key |
 
 ## Order
 
 1. Install agent-sandbox ([`../agent-sandbox.yaml`](../agent-sandbox.yaml)) and
-   the platform chart in `agentops-system`. The chart installs the
-   `AgentTemplate` and `ClientBinding` CRDs.
+   the quickstart ([INSTALL.md](../../INSTALL.md)), with the platform in
+   `agentops-system` and Pomerium in `agentops-pomerium`.
 2. Create the Secrets that the templates reference. Only
    `sandboxtemplate-pomerium-zero-claude-code.yaml` needs one:
 
@@ -54,9 +56,13 @@ environment.
    way. Their pools check out a git repository, so their pods carry the
    `git-egress.yaml` rule.
 
-5. Edit the ClientBinding for the Slack bot. Its `templates` lists `runid` and
-   `deploy-service`; add every other agent that your channels map to. Then
-   apply it:
+5. Let a client run the agents: add them to the client's `templates` in the
+   quickstart values file (`clients`, or `verifyClient.templates` for
+   `quickstart-client`), and upgrade the release. The README's
+   [Add the Slack bot](../../README.md#add-the-slack-bot) has an example.
+   Without the quickstart, edit and apply the ClientBinding for the Slack bot
+   instead. Its `templates` lists `runid` and `deploy-service`; add every other
+   agent that your channels map to:
 
    ```sh
    kubectl apply -f deploy/examples/clientbinding-slack.yaml
@@ -71,10 +77,18 @@ environment.
 
 The kustomization that a user writes: four SandboxTemplates and their pools, the
 agentops Component ([`../components/agentops`](../components/agentops/README.md)),
-one patch for where the sidecars dial, one patch for git egress, and
-`namespace: agentops-system`. The component merges the sidecar, the runner, the
-projected token, the network policy and the `sandbox-agent` ServiceAccount into
-each template that carries `agents.pomerium.com/inject: "true"`.
+one patch for where the sidecars dial, one patch for git egress, two patches
+for Pomerium's namespace, one patch that drops the `sandbox-agent`
+ServiceAccount, and `namespace: agentops-system`. The component merges the
+sidecar, the runner, the projected token and the network policy into each
+template that carries `agents.pomerium.com/inject: "true"`.
+
+The component's network policy admits Pomerium in the namespace `pomerium`. The
+two namespace patches change that to `agentops-pomerium`, the quickstart's
+default: one on the templates, one on the NetworkPolicy of the workload mode.
+The component also brings the `sandbox-agent` ServiceAccount, which the
+quickstart release owns already, so the last patch drops it. Without the
+quickstart, remove that patch.
 
 `images:` maps the placeholders to the local tags that
 `make harness-build HARNESS=claude-code` (`claude-code:dev`) and
@@ -96,12 +110,13 @@ container. The kustomization applies it to every injected template, so its
 | `SIDECAR_HARNESS_URL` | The Agent Link route. It must name the same route as the platform's `HARNESS_EXTERNAL_URL` (chart value `config.harness.externalURL`), because that route's policy admits the sandbox's attach. |
 | `*_DIAL_ADDRESS` | The in-cluster Pomerium Service to connect to. TLS SNI and the `Host` header still come from the URL. Set your own Service. Remove the three lines only if the public hosts, resolved inside the pod, reach a Pomerium pod that the network policy admits. |
 
-Where Pomerium presents a private CA, also mount it into the sidecar and set
+The values are the quickstart's: the hosts of `agentops.example.com`, and its
+Pomerium Service `pomerium-proxy` in `agentops-pomerium`. Where Pomerium
+presents a private CA, also mount it into the sidecar and set
 `SIDECAR_AGENTIC_CA_FILE`. The component's README has
-[the patch](../components/agentops/README.md#what-you-write). If Pomerium does
-not run in the namespace `pomerium`, add
-[the network policy patch](../components/agentops/README.md#pomerium-in-another-namespace)
-to the kustomization.
+[the patch](../components/agentops/README.md#what-you-write). If Pomerium runs in
+another namespace, change the two namespace patches in the kustomization
+([how](../components/agentops/README.md#pomerium-in-another-namespace)).
 
 The network policy admits Pomerium pods in one namespace and nothing else in the
 cluster. Every address the sidecar dials, these three and an AgentTemplate's MCP

@@ -1,0 +1,6 @@
+dependencies:
+- name: agentops
+  repository: file://../agentops
+  version: 0.1.0
+digest: sha256:68e33f000d204c257772e5980528d79dfb24548b92a7cef2ff0f4ac4a17977a2
+generated: "2026-10-09T12:35:04.515676-04:00"

@@ -47,6 +47,9 @@ jobs:
       - name: Slack bot isolation
         run: make helm-check-client-isolation
 
+      - name: Quickstart sandbox contract
+        run: make helm-check-quickstart-sandbox
+
   publish:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
