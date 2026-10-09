@@ -19,6 +19,6 @@ set -a
 source .env
 set +a
 
-bin="$(mktemp -d)/$module"
+bin="$PWD/bin/$module"
 GOWORK=off go build -C "$module" -o "$bin" "$cmd"
 exec "$bin"
