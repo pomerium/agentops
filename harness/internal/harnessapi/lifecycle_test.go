@@ -623,3 +623,60 @@ func TestALaunchThatCannotAllocateItsOpeningTurnFails(t *testing.T) {
 		}
 	}
 }
+
+func TestAFailedLaunchRecordsTheStateItLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*harness)
+	}{
+		{"the opening turn is not allocated", func(h *harness) {
+			h.svc = harnessapi.New(refusedTurnSeq{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+				harnessapi.WithLogger(testLogger(h.t)))
+		}},
+		{"the workspace does not activate", func(h *harness) {
+			h.launcher.activateErr = errors.New("the pod did not start")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := as(stubClient)
+			h := newHarness(t)
+			tc.setup(h)
+
+			created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+				Template: "deploy", ConversationRef: "stub:conv-1",
+				ApprovalPrompt: "ship the thing", InitialPrompt: "first",
+			})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			ref := byID(created.GetSession().GetId())
+			waitForStoredState(t, h, ref, api.StateEnded)
+			checkStateChain(t, h, ref)
+		})
+	}
+}
+
+func checkStateChain(t *testing.T, h *harness, ref *pb.SessionRef) {
+	t.Helper()
+	page, err := h.svc.ListEvents(as(stubClient), &pb.ListEventsRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var (
+		from   api.SessionState
+		chain  []string
+		broken bool
+	)
+	for _, ev := range page.GetEvents() {
+		sc := ev.GetStateChanged()
+		if sc == nil {
+			continue
+		}
+		chain = append(chain, sc.GetOld().String()+" -> "+sc.GetNew().String())
+		broken = broken || sc.GetOld() != from
+		from = sc.GetNew()
+	}
+	if broken {
+		t.Errorf("a state change starts from a state the session was not in: %v", chain)
+	}
+}

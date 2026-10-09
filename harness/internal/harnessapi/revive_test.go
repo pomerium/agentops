@@ -187,6 +187,7 @@ func TestUnresumableReviveSaysSo(t *testing.T) {
 	if _, _, teardowns, _, _ := h.launcher.snapshot(); len(teardowns) != 0 {
 		t.Errorf("an unresumable revive tore the workspace down: %v", teardowns)
 	}
+	checkStateChain(t, h, ref)
 }
 
 func suspendReason(rec *recorder) api.Reason {
