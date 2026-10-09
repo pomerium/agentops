@@ -1,0 +1,197 @@
+{{- $sidecarTag := .Values.sandbox.sidecar.image.tag | default .Values.agentops.image.tag | default .Chart.AppVersion -}}
+{{- $sidecar := include "quickstart.image" (merge (dict "tag" $sidecarTag) .Values.sandbox.sidecar.image) -}}
+{{- $proxy := include "quickstart.proxyAddress" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+{{- if .Values.hello.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.hello.name }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+data:
+  agent.py: |
+    {{- .Files.Get "files/hello-agent.py" | nindent 4 }}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: {{ .Values.hello.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+  annotations:
+    agents.pomerium.com/inject: "true"
+spec:
+  networkPolicy:
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: agent-sandbox-system
+            podSelector:
+              matchLabels:
+                app: sandbox-router
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: {{ .Values.pomerium.namespace }}
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: pomerium
+        ports:
+          - protocol: TCP
+            port: 8443
+  podTemplate:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: agent
+    spec:
+      serviceAccountName: sandbox-agent
+      automountServiceAccountToken: false
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      initContainers:
+        - name: agentops-init
+          image: {{ $sidecar }}
+          imagePullPolicy: {{ .Values.sandbox.sidecar.image.pullPolicy }}
+          command: ["/usr/local/bin/agent-runner", "install", "/opt/agentops/agent-runner"]
+          volumeMounts:
+            - name: agentops-bin
+              mountPath: /opt/agentops
+      containers:
+        - name: agent
+          image: {{ include "quickstart.image" .Values.hello.image }}
+          imagePullPolicy: {{ .Values.hello.image.pullPolicy }}
+          command: ["/opt/agentops/agent-runner"]
+          env:
+            - name: ACP_AGENT_CMD
+              value: "python3 -u /opt/hello/agent.py"
+            - name: ANTHROPIC_BASE_URL
+              value: "http://127.0.0.1:9999"
+            - name: ANTHROPIC_API_KEY
+              value: "placeholder-overwritten-by-pomerium"
+          volumeMounts:
+            - name: hello
+              mountPath: /opt/hello
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: agentops-bin
+              mountPath: /opt/agentops
+              readOnly: true
+            - name: agentops-run
+              mountPath: /var/run/agentops
+        - name: sidecar
+          image: {{ $sidecar }}
+          imagePullPolicy: {{ .Values.sandbox.sidecar.image.pullPolicy }}
+          command: ["/usr/local/bin/sidecar", "serve", "user-identity"]
+          env:
+            - name: SIDECAR_HTTP_ANTHROPIC_PORT
+              value: "9999"
+            - name: SIDECAR_HTTP_ANTHROPIC_INJECT_RUN_TOKEN
+              value: "true"
+            - name: SIDECAR_AGENTIC_TOKEN_FILE
+              value: "/var/run/agentic/token"
+            - name: SIDECAR_RUNNER_SOCKET
+              value: "/var/run/agentops/runner.sock"
+            - name: SIDECAR_HTTP_ANTHROPIC_UPSTREAM_URL
+              value: https://{{ .Values.hosts.anthropic }}
+            - name: SIDECAR_AGENTIC_AS_URL
+              value: {{ .Values.agentops.config.agentic.asURL }}
+            - name: SIDECAR_HARNESS_URL
+              value: {{ .Values.agentops.config.harness.externalURL }}
+            - name: SIDECAR_HTTP_ANTHROPIC_DIAL_ADDRESS
+              value: {{ $proxy }}
+            - name: SIDECAR_AGENTIC_AS_DIAL_ADDRESS
+              value: {{ $proxy }}
+            - name: SIDECAR_HARNESS_DIAL_ADDRESS
+              value: {{ $proxy }}
+            {{- if .Values.privateCA.secretName }}
+            - name: SIDECAR_AGENTIC_CA_FILE
+              value: /etc/agentic-ca/{{ .Values.privateCA.key }}
+            {{- end }}
+          volumeMounts:
+            - name: agentic-token
+              mountPath: /var/run/agentic
+              readOnly: true
+            - name: agentops-run
+              mountPath: /var/run/agentops
+            {{- if .Values.privateCA.secretName }}
+            - name: agentic-ca
+              mountPath: /etc/agentic-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: hello
+          configMap:
+            name: {{ .Values.hello.name }}-agent
+        - name: workspace
+          emptyDir: {}
+        - name: agentic-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.agentops.config.agentic.audience }}
+                  expirationSeconds: 600
+        - name: agentops-bin
+          emptyDir: {}
+        - name: agentops-run
+          emptyDir: {}
+        {{- if .Values.privateCA.secretName }}
+        - name: agentic-ca
+          secret:
+            secretName: {{ .Values.privateCA.secretName }}
+        {{- end }}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: {{ .Values.hello.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.hello.warmPool }}
+  sandboxTemplateRef:
+    name: {{ .Values.hello.name }}
+---
+apiVersion: agents.pomerium.com/v1alpha1
+kind: AgentTemplate
+metadata:
+  name: {{ .Values.hello.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  systemPrompt: |
+    You are the AgentOps quickstart demo agent.
+  warmPoolRef:
+    name: {{ .Values.hello.name }}
+{{- end }}

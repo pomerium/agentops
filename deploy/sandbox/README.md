@@ -99,7 +99,11 @@ In the overlay, particular to the environment:
 - **a private CA**, where Pomerium presents one (`SIDECAR_AGENTIC_CA_FILE` and
   its mount);
 - **a network policy patch**, if Pomerium does not run in the namespace
-  `pomerium` ([how](../components/agentops/README.md#pomerium-in-another-namespace));
+  `pomerium` ([how](../components/agentops/README.md#pomerium-in-another-namespace)).
+  The quickstart's Pomerium runs in `agentops-pomerium`;
+- **a patch that drops the component's `sandbox-agent` ServiceAccount**, on an
+  install made with the quickstart, whose release owns it (see
+  [`../examples/kustomization.yaml`](../examples/kustomization.yaml));
 - **resource requests**, where something bills for them;
 - **the agent's MCP servers**, because they are per-environment hostnames.
 

@@ -16,6 +16,7 @@ HELM          ?= helm
 CHARTS_DIR    ?= deploy/charts
 PLATFORM_CHART ?= $(CHARTS_DIR)/agentops
 SLACKBOT_CHART ?= $(CHARTS_DIR)/agentops-slackbot
+QUICKSTART_CHART ?= $(CHARTS_DIR)/agentops-quickstart
 
 APISTUB_BIN ?= $(CURDIR)/bin/apistub
 BUF_BIN     ?= $(CURDIR)/bin/buf
@@ -23,7 +24,8 @@ BUF_BIN     ?= $(CURDIR)/bin/buf
 .PHONY: build test test-e2e vet fmt-check boundary telemetry-in-sync generate pb-generate proto-lint proto-check \
         sdk-generate sdk-generate-ts sdk-generate-py sdk-generate-check sdk-test sdk-test-ts sdk-test-py \
         tidy docker-build harness-image slackbot-image harness-build sidecar-build run apistub \
-        helm-sync-crds helm-lint helm-template helm-check-client-isolation helm-package
+        helm-sync-crds helm-deps helm-lint helm-template helm-check-client-isolation helm-check-quickstart-sandbox \
+        helm-package quickstart-sync-pomerium-crds
 
 ## build: compile every package in every module.
 build:
@@ -91,7 +93,7 @@ pb-generate:
 	$(BUF) generate $(if $(PB_OUT),-o $(PB_OUT)/go)
 	$(BUF) generate --template buf.gen.connect.yaml $(if $(PB_OUT),-o $(PB_OUT)/go)
 
-## helm-sync-crds: copy the generated CRDs into the platform chart.
+## helm-sync-crds: copy the generated CRDs into the platform chart and the quickstart chart.
 helm-sync-crds:
 	@{ \
 	  echo '{{- if .Values.installCRDs }}'; \
@@ -99,6 +101,19 @@ helm-sync-crds:
 	  echo '{{- end }}'; \
 	} > $(PLATFORM_CHART)/templates/crds.yaml
 	@echo "wrote $(PLATFORM_CHART)/templates/crds.yaml"
+	@cp config/crd/bases/*.yaml $(QUICKSTART_CHART)/crds/
+	@echo "wrote $(QUICKSTART_CHART)/crds"
+
+POMERIUM_IC_REF ?= experimental/agentic
+POMERIUM_IC_CRDS ?= ingress.pomerium.io_pomerium ingress.pomerium.io_pomeriumservices gateway.pomerium.io_policyfilters
+
+## quickstart-sync-pomerium-crds: copy the Pomerium ingress controller's CRDs at $(POMERIUM_IC_REF) into the quickstart chart.
+quickstart-sync-pomerium-crds:
+	@for crd in $(POMERIUM_IC_CRDS); do \
+	  curl -fsSL "https://raw.githubusercontent.com/pomerium/ingress-controller/$(POMERIUM_IC_REF)/config/crd/bases/$$crd.yaml" \
+	    -o $(QUICKSTART_CHART)/crds/$$crd.yaml || exit 1; \
+	done
+	@echo "wrote $(QUICKSTART_CHART)/crds from pomerium/ingress-controller@$(POMERIUM_IC_REF)"
 
 ## proto-lint: lint the protobuf sources.
 proto-lint:
@@ -193,17 +208,51 @@ HELM_SLACKBOT_VALUES ?= \
   --set slack.botToken=test \
   --set harnessAPI.url=https://harness-api.example.com
 
+HELM_QUICKSTART_VALUES ?= \
+  --set hosts.authenticate=authenticate.agentops.example.com \
+  --set hosts.anthropic=anthropic.agentops.example.com \
+  --set tls.secret=cert-manager/agentops-wildcard \
+  --set 'access.domains={example.com}' \
+  --set agentops.config.agentic.asURL=https://agentic.agentops.example.com \
+  --set agentops.config.agentic.dialAddress=pomerium-proxy.agentops-pomerium.svc.cluster.local:443 \
+  --set agentops.config.harness.externalURL=https://harness.agentops.example.com \
+  --set agentops.config.harness.assertionIssuer=harness.agentops.example.com \
+  --set agentops.config.harness.api.assertionIssuer=harness-api.agentops.example.com
+
 HELM_EXTRA_VALUES ?=
 
-## helm-lint: lint both charts.
-helm-lint:
+## helm-deps: package the platform chart into the quickstart chart's charts/.
+helm-deps:
+	$(HELM) dependency build --skip-refresh $(QUICKSTART_CHART) >/dev/null
+
+## helm-lint: lint the three charts.
+helm-lint: helm-deps
 	$(HELM) lint $(PLATFORM_CHART) $(HELM_PLATFORM_VALUES)
 	$(HELM) lint $(SLACKBOT_CHART) $(HELM_SLACKBOT_VALUES)
+	$(HELM) lint $(QUICKSTART_CHART) $(HELM_QUICKSTART_VALUES)
 
-## helm-template: render both charts with the minimum required values.
-helm-template:
+## helm-template: render the three charts with the minimum required values.
+helm-template: helm-deps
 	$(HELM) template agentops $(PLATFORM_CHART) --namespace agentops-system $(HELM_PLATFORM_VALUES) $(HELM_EXTRA_VALUES)
 	$(HELM) template agentops-slackbot $(SLACKBOT_CHART) --namespace agentops-slackbot $(HELM_SLACKBOT_VALUES)
+	$(HELM) template agentops $(QUICKSTART_CHART) --namespace agentops-system $(HELM_QUICKSTART_VALUES)
+
+QUICKSTART_SANDBOX_NORMALIZE = select(.kind == "SandboxTemplate") \
+  | {"metadata": {"name": .metadata.name, "annotations": .metadata.annotations}, "spec": .spec} \
+  | (.. | select(tag == "!!seq" and length > 0 and (.[0] | tag) == "!!map" and (.[0] | has("name")))) |= sort_by(.name) \
+  | sort_keys(..)
+
+## helm-check-quickstart-sandbox: fail if the quickstart chart's hello SandboxTemplate differs from deploy/quickstart/contract, which the agentops Component builds.
+helm-check-quickstart-sandbox: helm-deps
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	kubectl kustomize deploy/quickstart/contract > "$$tmp/component.yaml" || exit 1; \
+	$(HELM) template agentops $(QUICKSTART_CHART) --namespace agentops-system $(HELM_QUICKSTART_VALUES) > "$$tmp/chart.yaml" || exit 1; \
+	yq -o=json '$(QUICKSTART_SANDBOX_NORMALIZE)' "$$tmp/component.yaml" > "$$tmp/component.json" || exit 1; \
+	yq -o=json '$(QUICKSTART_SANDBOX_NORMALIZE)' "$$tmp/chart.yaml" > "$$tmp/chart.json" || exit 1; \
+	[ -s "$$tmp/component.json" ] && [ -s "$$tmp/chart.json" ] || { echo "no SandboxTemplate rendered"; exit 1; }; \
+	diff -u "$$tmp/component.json" "$$tmp/chart.json" \
+	  || { echo "the quickstart chart's SandboxTemplate differs from what the agentops Component builds; update deploy/charts/agentops-quickstart/templates/sandbox.yaml"; exit 1; }; \
+	echo "the quickstart chart's SandboxTemplate matches the agentops Component"
 
 ## helm-check-client-isolation: fail if the Slack bot chart grants RBAC, mounts an AS token or claims a volume.
 helm-check-client-isolation:
@@ -223,7 +272,8 @@ helm-check-client-isolation:
 	fi; \
 	echo "the Slack bot has no RBAC, no AS token volume and no volume claim"
 
-## helm-package: package both charts into .tgz files.
+## helm-package: package the three charts into .tgz files.
 helm-package: helm-lint
 	$(HELM) package $(PLATFORM_CHART)
 	$(HELM) package $(SLACKBOT_CHART)
+	$(HELM) package $(QUICKSTART_CHART)

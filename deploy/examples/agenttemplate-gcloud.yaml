@@ -27,7 +27,7 @@ spec:
   requiredMCPServers:
     - name: cloud-run
       url: https://cloudrun-mcp.example.com
-      dialAddress: pomerium-proxy.pomerium.svc.cluster.local:443
+      dialAddress: pomerium-proxy.agentops-pomerium.svc.cluster.local:443
     - name: cloudlogging
       url: https://logging-mcp.example.com
     - name: gke

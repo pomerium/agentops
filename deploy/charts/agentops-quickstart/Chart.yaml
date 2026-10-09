@@ -1,0 +1,25 @@
+apiVersion: v2
+name: agentops-quickstart
+description: >-
+  AgentOps in one release: the Pomerium ingress controller as the agentic
+  authorization server, the platform, the sandbox side and a demo agent.
+type: application
+version: 0.1.0
+appVersion: v0.1.0
+home: https://www.pomerium.com/
+icon: https://www.pomerium.com/static-img/favicon.svg
+sources:
+  - https://github.com/pomerium/agentops
+  - https://github.com/pomerium/ingress-controller
+maintainers:
+  - name: Pomerium Team
+    email: support@pomerium.com
+keywords:
+  - pomerium
+  - agents
+  - sandbox
+  - mcp
+dependencies:
+  - name: agentops
+    version: 0.1.0
+    repository: file://../agentops

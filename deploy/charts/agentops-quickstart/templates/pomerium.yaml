@@ -1,0 +1,309 @@
+{{- include "quickstart.validate" . -}}
+{{- $ns := .Values.pomerium.namespace -}}
+{{- $p := .Values.pomerium -}}
+{{- if $p.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+---
+{{- end }}
+{{- $existing := lookup "v1" "Secret" $ns "bootstrap" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bootstrap
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+type: Opaque
+data:
+  {{- if and $existing $existing.data }}
+  shared_secret: {{ index $existing.data "shared_secret" }}
+  cookie_secret: {{ index $existing.data "cookie_secret" }}
+  signing_key: {{ index $existing.data "signing_key" }}
+  {{- else }}
+  shared_secret: {{ randBytes 32 }}
+  cookie_secret: {{ randBytes 32 }}
+  signing_key: {{ genPrivateKey "ecdsa" | b64enc }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pomerium-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $ns }}-pomerium-controller
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["delete", "get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["services/status", "secrets/status", "endpoints/status"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["ingress.pomerium.io"]
+    resources: ["pomerium", "pomeriumservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ingress.pomerium.io"]
+    resources: ["pomerium/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["create", "delete", "get", "list", "patch", "watch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $ns }}-pomerium-controller
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $ns }}-pomerium-controller
+subjects:
+  - kind: ServiceAccount
+    name: pomerium-controller
+    namespace: {{ $ns }}
+{{- if $p.issuerDiscoveryBinding }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $ns }}-pomerium-issuer-discovery
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:service-account-issuer-discovery
+subjects:
+  - kind: ServiceAccount
+    name: pomerium-controller
+    namespace: {{ $ns }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pomerium-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pomerium-controller
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pomerium-controller
+subjects:
+  - kind: ServiceAccount
+    name: pomerium-controller
+    namespace: {{ $ns }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pomerium-proxy
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+    {{- include "quickstart.pomeriumSelector" . | nindent 4 }}
+  {{- with $p.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $p.service.type }}
+  {{- with $p.service.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  selector:
+    {{- include "quickstart.pomeriumSelector" . | nindent 4 }}
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pomerium
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+    {{- include "quickstart.pomeriumSelector" . | nindent 4 }}
+spec:
+  serviceName: pomerium-proxy
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "quickstart.pomeriumSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "quickstart.pomeriumSelector" . | nindent 8 }}
+    spec:
+      serviceAccountName: pomerium-controller
+      terminationGracePeriodSeconds: 10
+      {{- with $p.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $p.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $p.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $p.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      {{- if $p.persistence.initPermissions }}
+      initContainers:
+        - name: data-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "mkdir -p /data/databroker && chown -R 65532:65532 /data"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
+      containers:
+        - name: pomerium
+          image: {{ include "quickstart.image" $p.image | quote }}
+          imagePullPolicy: {{ $p.image.pullPolicy }}
+          args:
+            - all-in-one
+            - --pomerium-config={{ $p.configName }}
+            - --name={{ $p.ingressClass.controller }}
+            - --namespaces={{ $ns }}
+            - --update-status-from-service=$(POMERIUM_NAMESPACE)/pomerium-proxy
+            - --metrics-bind-address=$(POD_IP):9090
+            - --health-probe-bind-address=$(POD_IP):28080
+            {{- with $p.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: GOLANG_PROTOBUF_REGISTRATION_CONFLICT
+              value: warn
+            - name: POMERIUM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: TMPDIR
+              value: /tmp
+            - name: XDG_CACHE_HOME
+              value: /tmp
+          ports:
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+            - containerPort: 9090
+              name: metrics
+              protocol: TCP
+          resources:
+            {{- toYaml $p.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          startupProbe:
+            httpGet:
+              path: /startupz
+              port: 28080
+            failureThreshold: 40
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 28080
+            initialDelaySeconds: 15
+            periodSeconds: 60
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 28080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with $p.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $p.persistence.size }}

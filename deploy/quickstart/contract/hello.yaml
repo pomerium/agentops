@@ -1,0 +1,33 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: hello
+  annotations:
+    agents.pomerium.com/inject: "true"
+spec:
+  podTemplate:
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        - name: agent
+          image: agentops/hello
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ACP_AGENT_CMD
+              value: "python3 -u /opt/hello/agent.py"
+          volumeMounts:
+            - name: hello
+              mountPath: /opt/hello
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: hello
+          configMap:
+            name: hello-agent
+        - name: workspace
+          emptyDir: {}

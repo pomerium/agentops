@@ -1,0 +1,108 @@
+{{- $ns := .Values.pomerium.namespace -}}
+{{- $p := .Values.pomerium -}}
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ $p.ingressClass.name }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  controller: {{ $p.ingressClass.controller }}
+---
+apiVersion: ingress.pomerium.io/v1
+kind: Pomerium
+metadata:
+  name: {{ $p.configName }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  secrets: {{ $ns }}/bootstrap
+  authenticate:
+    url: https://{{ .Values.hosts.authenticate }}
+  identityProvider:
+    provider: {{ $p.identityProvider.provider }}
+    {{- with $p.identityProvider.url }}
+    url: {{ . }}
+    {{- end }}
+    {{- with $p.identityProvider.secret }}
+    secret: {{ . }}
+    {{- end }}
+    {{- with $p.identityProvider.scopes }}
+    scopes:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  certificates:
+    - {{ .Values.tls.secret }}
+  storage:
+    file:
+      path: /data/databroker
+  runtimeFlags:
+    {{- toYaml (merge (dict "agentic" true "mcp" true) $p.runtimeFlags) | nindent 4 }}
+  jwtClaimHeaders:
+    run_id: run_id
+    act.kubernetes.io.namespace: act.kubernetes.io.namespace
+    act.kubernetes.io.serviceaccount.name: act.kubernetes.io.serviceaccount.name
+    act.kubernetes.io.pod.name: act.kubernetes.io.pod.name
+    act.kubernetes.io.pod.uid: act.kubernetes.io.pod.uid
+  identityProviders:
+    cluster:
+      issuer: kubernetes:///
+      audiences:
+        - {{ .Values.agentops.config.agentic.audience }}
+      supportedAlgs:
+        - RS256
+---
+apiVersion: ingress.pomerium.io/v1
+kind: PomeriumService
+metadata:
+  name: agentic
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  service: agentic
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentops
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  type: ExternalName
+  externalName: {{ include "quickstart.platformName" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  ports:
+    - name: grpc
+      port: {{ .Values.agentops.service.grpcPort }}
+    - name: api
+      port: {{ .Values.agentops.service.apiPort }}
+{{- if .Values.anthropic.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anthropic-api
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+spec:
+  type: ExternalName
+  externalName: api.anthropic.com
+  ports:
+    - name: https
+      port: 443
+{{- if not .Values.anthropic.existingSecret }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: anthropic-api-key
+  namespace: {{ $ns }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+type: Opaque
+data:
+  x-api-key: {{ include "quickstart.anthropicKey" . }}
+{{- end }}
+{{- end }}

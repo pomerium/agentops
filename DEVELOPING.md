@@ -12,7 +12,7 @@ install it, see [README.md](./README.md).
 | `proto/` | The protobuf contracts. [`harnessapi/v1`](./proto/harnessapi/v1/harnessapi.proto) is the Harness API that clients call. [`agentlink/v1`](./proto/agentlink/v1/agentlink.proto) is the Agent Link between the platform and a sandbox sidecar. [`runner/v1`](./proto/runner/v1/runner.proto) is the pod-local API between the sidecar and the agent runner. |
 | `sdk/ts`, `sdk/python` | The [TypeScript](./sdk/ts/README.md) and [Python](./sdk/python/README.md) clients of the Harness API. |
 | `config/crd/bases` | The generated `AgentTemplate` and `ClientBinding` CRDs. |
-| `deploy/` | The two Helm charts, the sandbox kustomize Component, example manifests, and the agent harness images. |
+| `deploy/` | The three Helm charts (the platform, the Slack bot, and the quickstart, which installs Pomerium, the platform and a demo agent), the quickstart scripts, the sandbox kustomize Component, example manifests, and the agent harness images. |
 | `docs/` | Design notes: [run identity and the Agent Link](./docs/run-identity.md), [Slack threads](./docs/threads.md), [SDK conformance](./docs/sdk-conformance.md). |
 
 The binaries:
@@ -178,8 +178,8 @@ with `env -u GOROOT`, for example `env -u GOROOT make test`.
 Generated code is committed. Run `make generate` after you change:
 
 - `harness/apis/v1alpha1`: the deepcopy methods, the CRDs in `config/crd/bases`,
-  and their copy in `deploy/charts/agentops/templates/crds.yaml`. Do not edit
-  that file by hand.
+  and their copies in `deploy/charts/agentops/templates/crds.yaml` and
+  `deploy/charts/agentops-quickstart/crds/`. Do not edit those by hand.
 - `harness/internal/sessionstore/sqlite/query.sql` or `migrations/`: the sqlc
   bindings in `harness/internal/sessionstore/sqlite/sqlc`.
 - `proto/agentlink` or `proto/runner`: the gRPC stubs in
@@ -295,13 +295,10 @@ and [`docs/sdk-conformance.md`](./docs/sdk-conformance.md).
 ## In-cluster dev loop
 
 Use a local cluster that runs your local Docker images: OrbStack or Docker
-Desktop Kubernetes, or kind after `kind load docker-image`. The default layout
-puts the platform and the sandboxes in `agentops-system` and the bot in
-`agentops-slackbot`.
+Desktop Kubernetes, or kind after `kind load docker-image`. The quickstart
+installs the stack; a values file points it at the local images.
 
-1. Install agent-sandbox (`kubectl apply -f deploy/agent-sandbox.yaml`) and a
-   Pomerium with the routes from [README.md](./README.md) and
-   [`docs/run-identity.md`](./docs/run-identity.md).
+1. Install agent-sandbox (`kubectl apply -f deploy/agent-sandbox.yaml`).
 
 2. Build the images with local tags. Nothing is pushed:
 
@@ -311,62 +308,77 @@ puts the platform and the sandboxes in `agentops-system` and the bot in
    make harness-build  # claude-code:dev; HARNESS=<dir> for another deploy/harness/<dir>
    ```
 
-3. Write one values file per chart that points the image at the local tag. Keep
-   these files out of the repository. For the platform (`platform-dev.yaml`):
-
-   ```yaml
-   image:
-     repository: agentops
-     tag: dev
-     pullPolicy: IfNotPresent
-   config:
-     agentic:
-       asURL: https://agentic.example.test
-     harness:
-       externalURL: https://harness.example.test
-       assertionIssuer: harness.example.test
-       api:
-         assertionIssuer: harness-api.example.test
-   ```
-
-   For the bot (`slackbot-dev.yaml`):
-
-   ```yaml
-   image:
-     repository: agentops-slackbot
-     tag: dev
-     pullPolicy: IfNotPresent
-   harnessAPI:
-     url: https://harness-api.example.test
-   slack:
-     existingSecret: agentops-slackbot-slack
-     channels:
-       C0123ABCDEF: runid
-   ```
-
-   If a process must dial Pomerium by its in-cluster Service or trust a private
-   CA, also set `config.agentic.dialAddress` and `config.agentic.caFile` (the
-   platform) or `harnessAPI.dialAddress` and `harnessAPI.caFile` (the bot), and
-   mount the CA with `extraVolumes` and `extraVolumeMounts`.
-
-4. Install both charts, the Slack Secret (a copy of
-   [`deploy/secret.example.yaml`](./deploy/secret.example.yaml) with real
-   values), the sandbox side and the bot's ClientBinding:
+3. The domain `localhost.pomerium.io` and its subdomains resolve to `127.0.0.1`.
+   On a cluster that serves a LoadBalancer Service on the host's port 443, such
+   as OrbStack and Docker Desktop, that domain needs no DNS record. Make a
+   certificate for `*.localhost.pomerium.io` with
+   [mkcert](https://github.com/FiloSottile/mkcert) and put it in a TLS Secret:
 
    ```sh
-   helm upgrade --install agentops deploy/charts/agentops \
-     -n agentops-system --create-namespace -f platform-dev.yaml
-   kubectl create namespace agentops-slackbot
-   kubectl apply -f my-slack-secret.yaml
-   helm upgrade --install agentops-slackbot deploy/charts/agentops-slackbot \
-     -n agentops-slackbot -f slackbot-dev.yaml
-   kubectl apply -k deploy/examples   # after you edit deploy/examples/endpoints.yaml
-   kubectl apply -f deploy/examples/clientbinding-slack.yaml   # after you check its subject
+   mkcert -cert-file tls.crt -key-file tls.key '*.localhost.pomerium.io'
+   kubectl create namespace agentops-system
+   kubectl -n agentops-system create secret tls pomerium-tls --cert=tls.crt --key=tls.key
+   kubectl -n agentops-system create secret generic agentops-ca \
+     --from-file=ca.crt="$(mkcert -CAROOT)/rootCA.pem"
    ```
 
-   [`deploy/examples`](./deploy/examples/README.md) already maps its images to
-   `claude-code:dev` and `agentops-sidecar:dev`. For the `runid` template, write
-   an overlay on [`deploy/sandbox`](./deploy/sandbox/README.md).
+4. Write a values file for the quickstart that points at the local tags and the
+   mkcert certificate. Keep it out of the repository (`~/dev-values.yaml`):
+
+   ```yaml
+   hosts:
+     authenticate: authenticate.localhost.pomerium.io
+     anthropic: anthropic.localhost.pomerium.io
+   tls:
+     secret: agentops-system/pomerium-tls
+   access:
+     emails: [you@example.com]
+   privateCA:
+     secretName: agentops-ca
+   sandbox:
+     sidecar:
+       image:
+         repository: agentops-sidecar
+         tag: dev
+   agentops:
+     image:
+       repository: agentops
+       tag: dev
+     config:
+       logLevel: debug
+       agentic:
+         asURL: https://agentic.localhost.pomerium.io
+         caFile: /etc/agentops-ca/ca.crt
+       harness:
+         externalURL: https://harness.localhost.pomerium.io
+         assertionIssuer: harness.localhost.pomerium.io
+         api:
+           assertionIssuer: harness-api.localhost.pomerium.io
+     extraVolumes:
+       - name: agentops-ca
+         secret:
+           secretName: agentops-ca
+     extraVolumeMounts:
+       - name: agentops-ca
+         mountPath: /etc/agentops-ca
+         readOnly: true
+   ```
+
+   Then install it, and run the `hello` agent as
+   [INSTALL.md, Step 6](./INSTALL.md#step-6-run-the-hello-agent) says:
+
+   ```sh
+   kubectl apply --server-side --force-conflicts -f deploy/charts/agentops-quickstart/crds/
+   helm dependency build --skip-refresh deploy/charts/agentops-quickstart
+   helm upgrade --install agentops deploy/charts/agentops-quickstart \
+     -n agentops-system -f ~/dev-values.yaml
+   ```
+
+   For the Slack bot, add it to `clients` in `~/dev-values.yaml` and install its
+   chart as the README's [Add the Slack bot](./README.md#add-the-slack-bot)
+   says, with `image.repository: agentops-slackbot` and `image.tag: dev`. For
+   the claude-code agent, apply an overlay on [`deploy/sandbox`](./deploy/sandbox/README.md)
+   as the README's [Add an agent](./README.md#add-an-agent) says.
 
 5. After you rebuild a `:dev` image, restart what runs it. The tag does not
    change, so `helm upgrade` changes nothing:
@@ -414,18 +426,24 @@ other than `harness/api` and the packages under it, so an import of
 ## Helm charts
 
 The charts are [`deploy/charts/agentops`](./deploy/charts/agentops) (the
-platform) and [`deploy/charts/agentops-slackbot`](./deploy/charts/agentops-slackbot)
-(the bot). Their values files carry no comments; the chart READMEs
+platform), [`deploy/charts/agentops-slackbot`](./deploy/charts/agentops-slackbot)
+(the bot) and [`deploy/charts/agentops-quickstart`](./deploy/charts/agentops-quickstart)
+(Pomerium, the platform as a subchart, the sandbox side and the `hello` agent).
+Their values files carry no comments; the chart READMEs
 ([platform](./deploy/charts/agentops/README.md),
-[bot](./deploy/charts/agentops-slackbot/README.md)) document the values.
+[bot](./deploy/charts/agentops-slackbot/README.md),
+[quickstart](./deploy/charts/agentops-quickstart/README.md)) document the values.
 
 | Target | What it does |
 |---|---|
-| `make helm-lint` | Lints both charts with the minimum required values. |
-| `make helm-template` | Renders both charts. `HELM_EXTRA_VALUES` adds flags to the platform render, for example `HELM_EXTRA_VALUES="--set persistence.enabled=false"`. |
+| `make helm-deps` | Packages the platform chart into `deploy/charts/agentops-quickstart/charts/` (git-ignored). The lint and render targets run it. |
+| `make helm-lint` | Lints the three charts with the minimum required values. |
+| `make helm-template` | Renders the three charts. `HELM_EXTRA_VALUES` adds flags to the platform render, for example `HELM_EXTRA_VALUES="--set persistence.enabled=false"`. |
 | `make helm-check-client-isolation` | Fails if the platform's RBAC names the bot, or if the bot chart renders RBAC, mounts an authorization-server token or claims a volume. |
-| `make helm-sync-crds` | Copies `config/crd/bases` into `deploy/charts/agentops/templates/crds.yaml`, inside an `installCRDs` condition, and adds `helm.sh/resource-policy: keep` to each CRD so that `helm uninstall` leaves them. `make generate` runs it. |
-| `make helm-package` | Lints, then packages both charts. |
+| `make helm-check-quickstart-sandbox` | Fails if the quickstart chart's `hello` SandboxTemplate differs from [`deploy/quickstart/contract`](./deploy/quickstart/contract), which the agentops Component builds. Needs `kubectl` and `yq`. After a change to the Component, change `templates/sandbox.yaml` in the quickstart chart to match. |
+| `make helm-sync-crds` | Copies `config/crd/bases` into `deploy/charts/agentops/templates/crds.yaml`, inside an `installCRDs` condition, and adds `helm.sh/resource-policy: keep` to each CRD so that `helm uninstall` leaves them. It also copies them into the quickstart chart's `crds/`. `make generate` runs it. |
+| `make quickstart-sync-pomerium-crds` | Copies the Pomerium ingress controller's CRDs from its `experimental/agentic` branch (`POMERIUM_IC_REF`) into the quickstart chart's `crds/`. |
+| `make helm-package` | Lints, then packages the three charts. |
 
 ## End-to-end tests
 

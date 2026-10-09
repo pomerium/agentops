@@ -33,3 +33,23 @@ patches:
     target:
       kind: SandboxTemplate
       name: (pomerium-zero|gstack|google-skills)-claude-code
+  - target:
+      kind: SandboxTemplate
+      annotationSelector: agents.pomerium.com/inject in (true,workload)
+    patch: |-
+      - op: replace
+        path: /spec/networkPolicy/egress/1/to/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: agentops-pomerium
+  - target:
+      kind: NetworkPolicy
+      name: agentops-egress-only
+    patch: |-
+      - op: replace
+        path: /spec/egress/1/to/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+        value: agentops-pomerium
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: sandbox-agent

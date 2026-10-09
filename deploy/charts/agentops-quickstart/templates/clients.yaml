@@ -1,0 +1,28 @@
+{{- if .Values.verifyClient.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.verifyClient.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+{{- end }}
+{{- range include "quickstart.clients" . | fromJsonArray }}
+---
+apiVersion: agents.pomerium.com/v1alpha1
+kind: ClientBinding
+metadata:
+  name: {{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "quickstart.labels" $ | nindent 4 }}
+spec:
+  subject: cluster/system:serviceaccount:{{ .namespace }}:{{ .account }}
+  templates:
+    {{- toYaml .templates | nindent 4 }}
+  {{- with .quotas }}
+  quotas:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
