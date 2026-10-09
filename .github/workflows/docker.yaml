@@ -25,7 +25,9 @@ jobs:
       matrix:
         include:
           - image: pomerium/agentops
-            dockerfile: ./Dockerfile
+            dockerfile: ./Dockerfile.harness
+          - image: pomerium/agentops-slackbot
+            dockerfile: ./Dockerfile.slackbot
           - image: pomerium/agentops-sidecar
             dockerfile: ./Dockerfile.sidecar
     steps:
@@ -35,10 +37,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v3
 
-      # Compute the tags and whether to push, from the triggering ref:
-      #   pull_request      -> build only (no push, amd64 only for speed)
-      #   push to main      -> push :main and :git-<sha>
-      #   push tag vX.Y.Z   -> push :vX.Y.Z, :latest and :git-<sha>
       - name: Prepare metadata
         id: meta
         env:
@@ -56,7 +54,6 @@ jobs:
             PUSH=true
             PLATFORMS="linux/amd64,linux/arm64"
           else
-            # Pull request: validate the build only. Single-arch keeps it fast.
             TAGS="${IMAGE}:pr"
             PUSH=false
             PLATFORMS="linux/amd64"
@@ -83,8 +80,6 @@ jobs:
           push: ${{ steps.meta.outputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           provenance: false
-          # Scope the GitHub Actions cache per image so the two builds don't
-          # evict each other.
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           labels: |
