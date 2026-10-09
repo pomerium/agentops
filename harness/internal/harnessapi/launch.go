@@ -118,13 +118,6 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndRunCreateFailed, "a run could not be created for this session")
 		return
 	}
-	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
-		return s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
-	}) {
-		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, unrecorded)
-		return
-	}
-
 	att, err := s.launcher.Expect(res.RunID, prepared,
 		sandbox.WithOnDown(s.superviseLaunch(ctx, sess.ID, o)),
 		sandbox.WithOnDelayed(func(waited time.Duration) {
@@ -143,6 +136,13 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 			att.Forget()
 		}
 	}()
+
+	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
+		return s.store.UpdateSessionRun(ctx, sess.ID, res.RunID, res.ApprovalURL, res.ExpiresAt, api.StateAwaitingApproval)
+	}) {
+		s.failLaunch(ctx, sess, opts, o, prepared.ClaimName, api.EndLaunchFailed, unrecorded)
+		return
+	}
 
 	s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
 		Old: api.StateLaunching, New: api.StateAwaitingApproval, Reason: launchReason(opts.revive),
@@ -239,7 +239,7 @@ func (s *Service) activateAndRun(
 	}
 	ctx = context.WithoutCancel(ctx)
 	linked := s.write(ctx, sess.ID, func(ctx context.Context) error {
-		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateLaunching); err != nil {
+		if err := s.store.UpdateSessionSandbox(ctx, sess.ID, prepared.ClaimName, prepared.SandboxName, api.StateAwaitingApproval); err != nil {
 			return err
 		}
 		if err := s.store.UpdateSessionLink(ctx, sess.ID, encodeExecutor(prepared.Executor), string(liveSess.StreamID()), int64(liveSess.ReadySeq())); err != nil {
@@ -303,12 +303,20 @@ func (s *Service) failLaunch(ctx context.Context, sess sessionstore.Session, opt
 				"session", sess.ID, "claim", claimName, "err", err)
 		}
 	}
-	s.endSession(ctx, sess.ID, api.StateLaunching, reason, detail)
+	s.endSession(ctx, sess.ID, s.storedState(ctx, sess.ID, api.StateLaunching), reason, detail)
 }
 
 func (s *Service) recordsClaim(ctx context.Context, sessionID, claimName string) bool {
 	current, err := s.store.GetSession(ctx, sessionID)
 	return err == nil && current.SandboxClaimName == claimName
+}
+
+func (s *Service) storedState(ctx context.Context, sessionID string, fallback api.SessionState) api.SessionState {
+	current, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return fallback
+	}
+	return current.Status
 }
 
 func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opts launchOpts, reason api.Reason, detail string) {
@@ -322,13 +330,14 @@ func (s *Service) failRevive(ctx context.Context, sess sessionstore.Session, opt
 	if opts.turnID != "" {
 		s.emit(ctx, sess.ID, &pb.Event{TurnId: opts.turnID, Payload: &pb.Event_TurnFailed{TurnFailed: &pb.TurnFailed{Reason: detail}}})
 	}
+	from := s.storedState(ctx, sess.ID, api.StateLaunching)
 	if !s.write(ctx, sess.ID, func(ctx context.Context) error {
 		return s.store.UpdateSessionSuspended(ctx, sess.ID, api.StateSuspended, suspendedAtOf(sess))
 	}) {
 		return
 	}
 	s.emit(ctx, sess.ID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
-		Old: api.StateLaunching, New: api.StateSuspended, Reason: reason,
+		Old: from, New: api.StateSuspended, Reason: reason,
 	}}})
 	s.log.InfoContext(ctx, "continuation failed; the workspace is still held", "session", sess.ID, "why", detail)
 }

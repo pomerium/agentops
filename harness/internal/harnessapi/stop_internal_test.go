@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/pomerium/agentops/harness/api"
+	pb "github.com/pomerium/agentops/harness/api/pb"
+	"github.com/pomerium/agentops/harness/internal/apiserver"
 	"github.com/pomerium/agentops/harness/internal/sessionstore"
 )
 
@@ -325,6 +327,86 @@ func TestAnEndWhoseEventsWereNotSavedCanBeRetried(t *testing.T) {
 	}
 	if n := len(kinds); n < 2 || kinds[n-2] != "state_changed" || kinds[n-1] != "session_ended" {
 		t.Errorf("the retried end recorded %v, want it to close with state_changed and session_ended", kinds)
+	}
+}
+
+type gatedTeardown struct {
+	quietLauncher
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (l *gatedTeardown) Teardown(context.Context, string) error {
+	l.once.Do(func() { close(l.entered) })
+	<-l.release
+	return nil
+}
+
+func TestAnEndBehindAnotherStopReportsWhetherItWasSaved(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		saved bool
+	}{
+		{"the end is saved", true},
+		{"the end is not saved", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := apiserver.WithClientID(context.Background(), "client")
+			l := &gatedTeardown{entered: make(chan struct{}), release: make(chan struct{})}
+			svc, st := runningService(t, l)
+			svc.templates = anyClient{}
+			svc.events = NewEventLog(&flakyEndEvents{Events: st.(sessionstore.Events), refuse: !tc.saved})
+			req := &pb.EndSessionRequest{Ref: &pb.SessionRef{SessionId: "s1"}}
+
+			first := make(chan error, 1)
+			go func() {
+				_, err := svc.EndSession(ctx, req)
+				first <- err
+			}()
+			<-l.entered
+			second := make(chan error, 1)
+			go func() {
+				_, err := svc.EndSession(ctx, req)
+				second <- err
+			}()
+			waitForQueuedStop(t, svc, "s1")
+			close(l.release)
+
+			err := <-second
+			row, rerr := st.GetSession(context.Background(), "s1")
+			if rerr != nil {
+				t.Fatalf("GetSession: %v", rerr)
+			}
+			<-first
+			switch {
+			case tc.saved && err != nil:
+				t.Errorf("EndSession behind another stop: err = %v, want OK", err)
+			case tc.saved && row.Status != api.StateEnded:
+				t.Errorf("EndSession answered OK while the session was %v", row.Status)
+			case !tc.saved && !errors.Is(err, api.ErrUnavailable):
+				t.Errorf("EndSession behind another stop whose end was not saved: err = %v, want %v; the session is %v",
+					err, api.ErrUnavailable, row.Status)
+			}
+		})
+	}
+}
+
+func waitForQueuedStop(t *testing.T, svc *Service, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		svc.mu.Lock()
+		o := svc.owners[sessionID]
+		queued := o != nil && o.stop != nil
+		svc.mu.Unlock()
+		if queued {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second end never reached the stop that holds the session")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

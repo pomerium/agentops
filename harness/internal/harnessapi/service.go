@@ -424,7 +424,17 @@ func (s *Service) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*p
 		return &pb.EndSessionResponse{}, nil
 	}
 
-	if !s.stopSession(ctx, sess.ID, stopSpec{end: req.GetReason()}) {
+	stopped, settled := s.stopOwned(ctx, sess.ID, nil, stopSpec{end: req.GetReason()})
+	if settled != nil {
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		current, err := s.store.GetSession(ctx, sess.ID)
+		stopped = err == nil && api.Terminal(current.Status)
+	}
+	if !stopped {
 		return nil, api.Errorf(api.ErrUnavailable, "the end of session %s could not be recorded; send EndSession again", sess.ID)
 	}
 	return &pb.EndSessionResponse{}, nil

@@ -27,20 +27,21 @@ type stopSpec struct {
 }
 
 func (s *Service) stopSession(ctx context.Context, sessionID string, spec stopSpec) bool {
-	return s.stopOwned(ctx, sessionID, nil, spec)
+	stopped, _ := s.stopOwned(ctx, sessionID, nil, spec)
+	return stopped
 }
 
-func (s *Service) stopOwned(ctx context.Context, sessionID string, want *owner, spec stopSpec) bool {
+func (s *Service) stopOwned(ctx context.Context, sessionID string, want *owner, spec stopSpec) (bool, <-chan struct{}) {
 	ctx = context.WithoutCancel(ctx)
-	b, held := s.detach(sessionID, want, spec)
+	b, held, settled := s.detach(sessionID, want, spec)
 	if held == nil {
-		return true
+		return true, settled
 	}
 	defer s.settle(ctx, sessionID, held)
 	if b != nil {
-		return s.stopLive(ctx, b, spec)
+		return s.stopLive(ctx, b, spec), nil
 	}
-	return s.stopDetached(ctx, sessionID, spec)
+	return s.stopDetached(ctx, sessionID, spec), nil
 }
 
 func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool {
@@ -82,6 +83,7 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 		}
 	}
 
+	from := s.storedState(ctx, sessionID, api.StateRunning)
 	if suspended {
 		now := time.Now()
 		if !s.write(ctx, sessionID, func(ctx context.Context) error {
@@ -90,14 +92,14 @@ func (s *Service) stopLive(ctx context.Context, b *binding, spec stopSpec) bool 
 			return false
 		}
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_StateChanged{StateChanged: &pb.StateChanged{
-			Old: api.StateRunning, New: api.StateSuspended, Reason: spec.suspend,
+			Old: from, New: api.StateSuspended, Reason: spec.suspend,
 		}}})
 		s.emit(ctx, sessionID, &pb.Event{Payload: &pb.Event_Suspended{Suspended: &pb.Suspended{
 			Reason: spec.suspend, RetainedFor: durationpb.New(s.cfg.suspendedTTL),
 		}}})
 		return true
 	}
-	return s.endSession(ctx, sessionID, api.StateRunning, spec.end, spec.detail)
+	return s.endSession(ctx, sessionID, from, spec.end, spec.detail)
 }
 
 func (s *Service) stopDetached(ctx context.Context, sessionID string, spec stopSpec) bool {

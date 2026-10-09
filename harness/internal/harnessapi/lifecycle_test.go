@@ -526,10 +526,12 @@ func TestALaunchThatCannotRecordRunningStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	waitForStoredState(t, h, byID(created.GetSession().GetId()), api.StateEnded)
+	ref := byID(created.GetSession().GetId())
+	waitForStoredState(t, h, ref, api.StateEnded)
 	if _, _, teardowns, _, _ := h.launcher.snapshot(); !slices.Contains(teardowns, "claim-1") {
 		t.Errorf("the failed launch kept its workspace: teardowns %v", teardowns)
 	}
+	checkStateChain(t, h, ref)
 }
 
 type heldRunningWrite struct {
@@ -621,5 +623,75 @@ func TestALaunchThatCannotAllocateItsOpeningTurnFails(t *testing.T) {
 		if ended := ev.GetSessionEnded(); ended != nil && ended.GetReason() != api.EndLaunchFailed {
 			t.Errorf("the session ended with %v, want %v", ended.GetReason(), api.EndLaunchFailed)
 		}
+	}
+}
+
+func TestAFailedLaunchRecordsTheStateItLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*harness)
+	}{
+		{"the opening turn is not allocated", func(h *harness) {
+			h.svc = harnessapi.New(refusedTurnSeq{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+				harnessapi.WithLogger(testLogger(h.t)))
+		}},
+		{"the workspace does not activate", func(h *harness) {
+			h.launcher.activateErr = errors.New("the pod did not start")
+		}},
+		{"the agent link refuses the run", func(h *harness) {
+			h.launcher.expectErr = errors.New("expectation registration failed")
+		}},
+		{"the run is not recorded", func(h *harness) {
+			h.svc = harnessapi.New(unrecordedRun{Store: h.store}, harnessapi.NewEventLog(h.store), h.launcher, h.tmpl, h.runs,
+				harnessapi.WithLogger(testLogger(h.t)))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := as(stubClient)
+			h := newHarness(t)
+			tc.setup(h)
+
+			created, err := h.svc.CreateSession(ctx, &pb.CreateSessionRequest{
+				Template: "deploy", ConversationRef: "stub:conv-1",
+				ApprovalPrompt: "ship the thing", InitialPrompt: "first",
+			})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			ref := byID(created.GetSession().GetId())
+			waitForStoredState(t, h, ref, api.StateEnded)
+			checkStateChain(t, h, ref)
+		})
+	}
+}
+
+type unrecordedRun struct{ harnessapi.Store }
+
+func (unrecordedRun) UpdateSessionRun(context.Context, string, string, string, time.Time, api.SessionState) error {
+	return errors.New("the database is unavailable")
+}
+
+func checkStateChain(t *testing.T, h *harness, ref *pb.SessionRef) {
+	t.Helper()
+	page, err := h.svc.ListEvents(as(stubClient), &pb.ListEventsRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var (
+		from   api.SessionState
+		chain  []string
+		broken bool
+	)
+	for _, ev := range page.GetEvents() {
+		sc := ev.GetStateChanged()
+		if sc == nil {
+			continue
+		}
+		chain = append(chain, sc.GetOld().String()+" -> "+sc.GetNew().String())
+		broken = broken || sc.GetOld() != from
+		from = sc.GetNew()
+	}
+	if broken {
+		t.Errorf("a state change starts from a state the session was not in: %v", chain)
 	}
 }

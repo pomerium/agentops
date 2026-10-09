@@ -187,6 +187,7 @@ func TestUnresumableReviveSaysSo(t *testing.T) {
 	if _, _, teardowns, _, _ := h.launcher.snapshot(); len(teardowns) != 0 {
 		t.Errorf("an unresumable revive tore the workspace down: %v", teardowns)
 	}
+	checkStateChain(t, h, ref)
 }
 
 func suspendReason(rec *recorder) api.Reason {
@@ -334,6 +335,7 @@ func TestAnUnrecordedReviveFailsItsAcceptedTurn(t *testing.T) {
 	if got := suspendReason(rec); got != api.ReasonReviveFailed {
 		t.Fatalf("an unrecorded revive suspended with %v, want %v", got, api.ReasonReviveFailed)
 	}
+	checkStateChain(t, h, ref)
 	page, err := h.svc.ListEvents(ctx, &pb.ListEventsRequest{Ref: ref, AfterSeq: before.EventSeq})
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
