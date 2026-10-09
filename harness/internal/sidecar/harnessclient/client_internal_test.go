@@ -2,6 +2,7 @@ package harnessclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"runtime"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	agentlinkpb "github.com/pomerium/agentops/harness/internal/agentlink/pb"
 	runnerpb "github.com/pomerium/agentops/harness/internal/runner/pb"
@@ -222,5 +225,72 @@ func TestStopIsBoundedWhenTheRunnerStopsReading(t *testing.T) {
 	case <-closed:
 	default:
 		t.Fatal("stop did not close the session")
+	}
+}
+
+type rejectedStream[Req, Res any] struct {
+	grpc.ClientStream
+	err error
+}
+
+func (s *rejectedStream[Req, Res]) Send(*Req) error     { return io.EOF }
+func (s *rejectedStream[Req, Res]) Recv() (*Res, error) { return nil, s.err }
+
+type rejectingLink struct {
+	agentlinkpb.AgentLinkServiceClient
+	err error
+}
+
+func (l rejectingLink) Attach(context.Context, ...grpc.CallOption) (agentlinkpb.AgentLinkService_AttachClient, error) {
+	return &rejectedStream[agentlinkpb.SidecarFrame, agentlinkpb.ManagerFrame]{err: l.err}, nil
+}
+
+func (l rejectingLink) AgentIO(context.Context, ...grpc.CallOption) (agentlinkpb.AgentLinkService_AgentIOClient, error) {
+	return &rejectedStream[agentlinkpb.AgentIOFrame, agentlinkpb.AgentIOFrame]{err: l.err}, nil
+}
+
+type fixedToken string
+
+func (t fixedToken) Bearer() string { return string(t) }
+func (fixedToken) Refresh()         {}
+
+type noAgent struct{}
+
+func (noAgent) Spawn(context.Context, []byte, *agentlinkpb.SessionParams) (*AgentSession, error) {
+	return nil, ErrNoAgent
+}
+func (noAgent) Join(context.Context) (*AgentSession, error) { return nil, ErrNoAgent }
+
+func rejectedClient(err error) *Client {
+	return &Client{
+		cfg: Config{
+			Token: fixedToken("Bearer pom_art_test"), Runner: noAgent{},
+			BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+		},
+		log:      slog.New(slog.DiscardHandler),
+		client:   rejectingLink{err: err},
+		statusCh: make(chan *agentlinkpb.Status, 4),
+		ioSlot:   make(chan struct{}, 1),
+	}
+}
+
+func TestAnAttachRejectedBeforeTheHelloIsReadEndsWithThePlatformsReason(t *testing.T) {
+	c := rejectedClient(status.Error(codes.NotFound, "no such run"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := c.Run(ctx)
+	var terminal *TerminalError
+	if !errors.As(err, &terminal) || terminal.Reason != ReasonUnknownRun {
+		t.Fatalf("Run = %v, want a terminal %q", err, ReasonUnknownRun)
+	}
+}
+
+func TestAnAgentIORejectedBeforeTheOpenIsReadReportsThePlatformsStatus(t *testing.T) {
+	c := rejectedClient(status.Error(codes.FailedPrecondition, "the run is not attached"))
+
+	err := c.agentIO(context.Background(), &AgentSession{StreamID: []byte("stream-1")})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("agentIO = %v, want the platform's FailedPrecondition", err)
 	}
 }

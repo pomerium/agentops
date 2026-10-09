@@ -3,6 +3,8 @@ package agentlink_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -28,7 +30,7 @@ func (g *testLink) openIO(parent context.Context, runID string, streamID []byte)
 		cancel()
 		return nil, err
 	}
-	if err := stream.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{StreamId: streamID}}}); err != nil {
+	if err := stream.Send(&agentlinkpb.AgentIOFrame{Msg: &agentlinkpb.AgentIOFrame_Open{Open: &agentlinkpb.AgentIOOpen{StreamId: streamID}}}); err != nil && !errors.Is(err, io.EOF) {
 		cancel()
 		return nil, err
 	}
