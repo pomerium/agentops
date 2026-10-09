@@ -1,11 +1,10 @@
 {{- if .Values.installCRDs }}
-# AUTO-GENERATED — do not edit by hand.
-# Synced from config/crd/bases/ by `make helm-sync-crds` (run after `make generate`).
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
+    helm.sh/resource-policy: keep
     controller-gen.kubebuilder.io/version: v0.21.0
   name: agenttemplates.agents.pomerium.com
 spec:
@@ -27,8 +26,8 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          AgentTemplate is the declarative definition of an agentic workflow that
-          users can invoke from Slack.
+          AgentTemplate is the declarative definition of an agent that clients of the
+          Harness API can run.
         properties:
           apiVersion:
             description: |-
@@ -67,27 +66,28 @@ spec:
                   token and which runs its policy admits.
                 items:
                   description: |-
-                    MCPServerRef identifies an MCP server that a workflow requires the invoking
-                    user to be connected to before the workflow can run.
+                    MCPServerRef is an MCP server the agent uses. The platform lists its URL in
+                    the run that the person approves. The sandbox sidecar serves it to the agent
+                    on a loopback port and adds the run token to each request.
                   properties:
                     dialAddress:
                       description: |-
                         DialAddress optionally overrides the host[:port] the sandbox sidecar
                         connects to for this server, while TLS SNI and the Host header still come
                         from URL. Use it to reach an in-cluster Service
-                        (e.g. "mcp-gateway.gateway.svc.cluster.local:443") instead of
+                        (e.g. "pomerium-proxy.pomerium.svc.cluster.local:443") instead of
                         hairpinning through an external LoadBalancer VIP. Empty dials the
                         host:port parsed from URL.
                       type: string
                     name:
                       description: |-
-                        Name is a short, stable identifier for the server, unique within a
-                        AgentTemplate. It is used as the credential key and surfaced to the
-                        user in auth prompts.
+                        Name identifies the server and must be unique within the AgentTemplate.
+                        The agent sees the server under this name.
                       type: string
                     url:
-                      description: URL is the streamable-HTTP endpoint of the MCP
-                        server.
+                      description: |-
+                        URL is the streamable-HTTP endpoint of the MCP server: a Pomerium route
+                        that accepts the run token.
                       type: string
                   required:
                   - name
@@ -117,16 +117,13 @@ spec:
                 type: string
               warmPoolRef:
                 description: |-
-                  WarmPoolRef selects the agent-sandbox SandboxWarmPool that bakes the
-                  sandbox for this workflow. The pool (run with replicas: 0) references a
-                  SandboxTemplate, which defines the harness + base image, the
-                  secret-isolating sidecar, and — when the workflow needs a repository
-                  checked out — the git working context (repo URL/ref and credentials
-                  secretKeyRef on the template's git-init init container). Pools whose
-                  template bakes a repo are workflow-specific by design (e.g.
-                  "pomerium-zero-claude-code"). agentops creates a SandboxClaim against this
-                  pool per run; because the claim injects per-run env, the sandbox is always
-                  cold-started (a fresh pod per run).
+                  WarmPoolRef selects the agent-sandbox SandboxWarmPool that runs this
+                  agent. The pool references a SandboxTemplate, which defines the harness
+                  image, the sidecar, and, when the agent needs a repository checked out,
+                  the git working context on the template's git-init init container. A pool
+                  whose template checks out a repository belongs to one agent. The platform
+                  creates one SandboxClaim against this pool per session. The claim carries
+                  no session data, so it can adopt a pre-warmed pod from the pool.
                 properties:
                   name:
                     description: Name of the SandboxWarmPool (in the same namespace).
@@ -211,135 +208,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.21.0
-  name: channelconfigs.agents.pomerium.com
-spec:
-  group: agents.pomerium.com
-  names:
-    kind: ChannelConfig
-    listKind: ChannelConfigList
-    plural: channelconfigs
-    shortNames:
-    - chcfg
-    singular: channelconfig
-  scope: Namespaced
-  versions:
-  - name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        description: |-
-          ChannelConfig is the global (singleton, named "default") binding of chat
-          channels to the agent templates they run. Keeping all bindings in one map
-          guarantees each channel maps to exactly one template.
-        properties:
-          apiVersion:
-            description: |-
-              APIVersion defines the versioned schema of this representation of an object.
-              Servers should convert recognized schemas to the latest internal value, and
-              may reject unrecognized values.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
-            type: string
-          kind:
-            description: |-
-              Kind is a string value representing the REST resource this object represents.
-              Servers may infer this from the endpoint the client submits requests to.
-              Cannot be updated.
-              In CamelCase.
-              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
-            type: string
-          metadata:
-            type: object
-          spec:
-            description: ChannelConfigSpec binds chat channels to agent templates.
-            properties:
-              slackChannelTemplates:
-                additionalProperties:
-                  type: string
-                description: |-
-                  SlackChannelTemplates maps a Slack channel ID (e.g. "C0123ABC") to the
-                  AgentTemplate (its metadata.name, same namespace) that channel runs.
-                  Mentioning the bot in a mapped channel starts that agent with the whole
-                  post-mention text as the prompt; map keys make the channel:template
-                  binding 1:1 by construction.
-                type: object
-            type: object
-          status:
-            description: ChannelConfigStatus is the observed state of a ChannelConfig.
-            properties:
-              conditions:
-                description: Conditions represent the latest available observations.
-                items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
-                  properties:
-                    lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
-                      format: date-time
-                      type: string
-                    message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
-                      maxLength: 32768
-                      type: string
-                    observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
-                      format: int64
-                      minimum: 0
-                      type: integer
-                    reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
-                      maxLength: 1024
-                      minLength: 1
-                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
-                      type: string
-                    status:
-                      description: status of the condition, one of True, False, Unknown.
-                      enum:
-                      - "True"
-                      - "False"
-                      - Unknown
-                      type: string
-                    type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
-                      maxLength: 316
-                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
-                      type: string
-                  required:
-                  - lastTransitionTime
-                  - message
-                  - reason
-                  - status
-                  - type
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - type
-                x-kubernetes-list-type: map
-            type: object
-        type: object
-        x-kubernetes-validations:
-        - message: ChannelConfig is a singleton; it must be named 'default'
-          rule: self.metadata.name == 'default'
-    served: true
-    storage: true
-    subresources:
-      status: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
+    helm.sh/resource-policy: keep
     controller-gen.kubebuilder.io/version: v0.21.0
   name: clientbindings.agents.pomerium.com
 spec:
@@ -395,14 +264,16 @@ spec:
             properties:
               quotas:
                 description: |-
-                  Quotas bound what a client can spend. Declared here from the start so the
-                  artifact does not change shape when enforcement lands, but NOT enforced in
-                  P1 — the enforcement point is the client API route in P2.
+                  Quotas bound what a client can spend. The platform checks them each time
+                  the client creates or continues a session. Unset means no limit.
                 properties:
                   createRatePerMinute:
                     description: |-
-                      CreateRatePerMinute caps how fast sessions may be created. Approval requests
-                      reach a human, so an uncapped client is a spam primitive as much as a cost one.
+                      CreateRatePerMinute caps how many sessions a client may start per minute.
+                      A new session and the continuation of a suspended one both count, and a
+                      client may spend a whole minute's allowance at once. Each start asks a
+                      human for approval, so an uncapped client is a spam primitive as much as a
+                      cost one.
                     format: int32
                     minimum: 0
                     type: integer
@@ -430,7 +301,7 @@ spec:
 
                   Pomerium mints it as "<identity provider>/<sub>", so for a projected
                   ServiceAccount token verified by a provider named "cluster" it reads
-                  "cluster/system:serviceaccount:agentops:agentops-slackbot".
+                  "cluster/system:serviceaccount:agentops-slackbot:agentops-slackbot".
 
                   Note this is NOT the string the route's own PPL policy matches. That one
                   is evaluated against the raw sub of the presented token and carries no
@@ -447,12 +318,8 @@ spec:
               templates:
                 description: |-
                   Templates is the allow-list of AgentTemplate names this client may run.
-                  Empty means the binding grants no templates.
-
-                  A client with no ClientBinding at all is not the same as one with an empty
-                  list: with no binding the platform has been told nothing about the client,
-                  and P1 admits it (logging that it did) so that adding the API does not break
-                  a deployment on upgrade. P2 makes a binding mandatory.
+                  Empty means the binding grants no templates. A client with no
+                  ClientBinding is refused every call.
                 items:
                   type: string
                 type: array

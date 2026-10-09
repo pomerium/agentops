@@ -1,0 +1,33 @@
+{{ .Chart.Name }} ({{ include "agentops.fullname" . }}) is installed in namespace {{ .Release.Namespace }}.
+
+Image: {{ include "agentops.image" . }}
+
+1. Check that the pod is ready:
+
+   kubectl --namespace {{ .Release.Namespace }} get pods -l "app.kubernetes.io/instance={{ .Release.Name }}"
+
+2. Pomerium must route two separate hosts to this release:
+
+   - Agent Link:  {{ .Values.config.harness.externalURL }}
+                  to: h2c://{{ include "agentops.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.grpcPort }}
+   - Harness API: https://{{ .Values.config.harness.api.assertionIssuer }}
+                  to: h2c://{{ include "agentops.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.apiPort }}
+
+3. Each client needs a ClientBinding in namespace {{ .Release.Namespace }}. The
+   platform refuses every call from a client without one. The platform logs the
+   subject of each client it verifies:
+
+   kubectl --namespace {{ .Release.Namespace }} logs sts/{{ include "agentops.fullname" . }} | grep "admitted a client"
+
+4. Sandboxes run in namespace {{ .Release.Namespace }}. Apply a SandboxTemplate,
+   a SandboxWarmPool and an AgentTemplate there (see deploy/sandbox).
+
+The agent-sandbox controller and its CRDs (v1.0.3, agents.x-k8s.io/v1beta1)
+are a prerequisite. This chart does not install them.
+{{- if .Values.installCRDs }}
+This chart installs the AgentTemplate and ClientBinding CRDs.
+{{- else }}
+installCRDs is false: apply the AgentTemplate and ClientBinding CRDs yourself.
+{{- end }}
+
+Docs: https://github.com/pomerium/agentops

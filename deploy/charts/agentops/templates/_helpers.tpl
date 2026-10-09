@@ -1,14 +1,7 @@
-{{/*
-Expand the name of the chart.
-*/}}
 {{- define "agentops.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/*
-Create a default fully qualified app name. Truncated at 63 chars for the DNS
-naming spec. If the release name contains the chart name it is used as-is.
-*/}}
 {{- define "agentops.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
@@ -22,16 +15,10 @@ naming spec. If the release name contains the chart name it is used as-is.
 {{- end }}
 {{- end }}
 
-{{/*
-Chart name and version as used by the chart label.
-*/}}
 {{- define "agentops.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/*
-Common labels
-*/}}
 {{- define "agentops.labels" -}}
 helm.sh/chart: {{ include "agentops.chart" . }}
 {{ include "agentops.selectorLabels" . }}
@@ -41,41 +28,38 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
-{{/*
-Selector labels
-*/}}
 {{- define "agentops.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "agentops.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
-{{/*
-ServiceAccount name.
-*/}}
 {{- define "agentops.serviceAccountName" -}}
 {{- include "agentops.fullname" . }}
 {{- end }}
 
-{{/*
-Secret holding the Slack credentials: an existing one if provided, otherwise
-the chart-managed Secret named after the release.
-*/}}
-{{- define "agentops.secretName" -}}
-{{- with .Values.existingSecret.name -}}
-{{- . -}}
+{{- define "agentops.image" -}}
+{{- $i := .Values.image -}}
+{{- if $i.digest -}}
+{{- printf "%s@%s" $i.repository $i.digest -}}
 {{- else -}}
-{{- include "agentops.fullname" . -}}
+{{- printf "%s:%s" $i.repository ($i.tag | default .Chart.AppVersion) -}}
 {{- end -}}
-{{- end -}}
+{{- end }}
 
-{{/*
-Validate required values.
-*/}}
 {{- define "agentops.validateValues" -}}
-{{- if and (not .Values.existingSecret.name) (or (not .Values.slack.signingSecret) (not .Values.slack.botToken)) -}}
-{{- fail "Set slack.signingSecret and slack.botToken, or point existingSecret.name at a Secret with keys SLACK_SIGNING_SECRET and SLACK_BOT_TOKEN." -}}
+{{- if not .Values.config.agentic.asURL -}}
+{{- fail "config.agentic.asURL is required: the base URL of the Pomerium host that serves the agentic authorization server." -}}
 {{- end -}}
-{{- if not .Values.config.oauthRedirectBaseURL -}}
-{{- fail "config.oauthRedirectBaseURL is required (the externally reachable base URL for the Slack OAuth redirect)." -}}
+{{- if not .Values.config.harness.externalURL -}}
+{{- fail "config.harness.externalURL is required: the Pomerium route that sandboxes dial to reach the Agent Link." -}}
+{{- end -}}
+{{- if not .Values.config.harness.assertionIssuer -}}
+{{- fail "config.harness.assertionIssuer is required: the issuer of the assertions Pomerium stamps on the Agent Link route." -}}
+{{- end -}}
+{{- if not .Values.config.harness.api.assertionIssuer -}}
+{{- fail "config.harness.api.assertionIssuer is required: the issuer of the assertions Pomerium stamps on the Harness API route." -}}
+{{- end -}}
+{{- if eq .Values.config.harness.api.assertionIssuer .Values.config.harness.assertionIssuer -}}
+{{- fail "config.harness.api.assertionIssuer must differ from config.harness.assertionIssuer: Pomerium mints iss and aud from the route host, so with one issuer an Agent Link assertion is also a Harness API credential." -}}
 {{- end -}}
 {{- end -}}

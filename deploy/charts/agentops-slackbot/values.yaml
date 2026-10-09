@@ -1,0 +1,63 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: pomerium/agentops-slackbot
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+logLevel: info
+
+slack:
+  signingSecret: ""
+  botToken: ""
+  existingSecret: ""
+  channels: {}
+  defaultChannelTemplate: ""
+  streamInterval: ""
+
+harnessAPI:
+  url: ""
+  dialAddress: ""
+  caFile: ""
+  tokenAudience: pomerium-agentic-as
+  tokenExpirationSeconds: 600
+
+serviceAccount:
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources: {}
+
+podAnnotations: {}
+
+extraEnvVars: []
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

@@ -1,11 +1,9 @@
 apiVersion: v2
 name: agentops
 description: >-
-  Slack-native agentic ChatOps for Pomerium — runs AI agents in isolated
-  Kubernetes sandboxes.
+  The AgentOps platform: the Harness API, the Agent Link and the agent
+  sandboxes it launches behind Pomerium.
 type: application
-# version is the chart SemVer; appVersion tracks the application image tag.
-# CI rewrites both at publish time (dev: 0.0.0-git.<sha>; release: the tag).
 version: 0.1.0
 appVersion: v0.1.0
 home: https://www.pomerium.com/
@@ -17,7 +15,6 @@ maintainers:
     email: support@pomerium.com
 keywords:
   - pomerium
-  - slack
-  - chatops
   - agents
+  - sandbox
   - mcp

@@ -17,7 +17,7 @@ type ClientBindingSpec struct {
 	//
 	// Pomerium mints it as "<identity provider>/<sub>", so for a projected
 	// ServiceAccount token verified by a provider named "cluster" it reads
-	// "cluster/system:serviceaccount:agentops:agentops-slackbot".
+	// "cluster/system:serviceaccount:agentops-slackbot:agentops-slackbot".
 	//
 	// Note this is NOT the string the route's own PPL policy matches. That one
 	// is evaluated against the raw sub of the presented token and carries no
@@ -33,23 +33,19 @@ type ClientBindingSpec struct {
 	Subject string `json:"subject"`
 
 	// Templates is the allow-list of AgentTemplate names this client may run.
-	// Empty means the binding grants no templates.
-	//
-	// A client with no ClientBinding at all is not the same as one with an empty
-	// list: with no binding the platform has been told nothing about the client,
-	// and P1 admits it (logging that it did) so that adding the API does not break
-	// a deployment on upgrade. P2 makes a binding mandatory.
+	// Empty means the binding grants no templates. A client with no
+	// ClientBinding is refused every call.
 	// +optional
 	Templates []string `json:"templates,omitempty"`
 
-	// Quotas bound what a client can spend. Declared here from the start so the
-	// artifact does not change shape when enforcement lands, but NOT enforced in
-	// P1 — the enforcement point is the client API route in P2.
+	// Quotas bound what a client can spend. The platform checks them each time
+	// the client creates or continues a session. Unset means no limit.
 	// +optional
 	Quotas *ClientQuotas `json:"quotas,omitempty"`
 }
 
-// ClientQuotas caps a client's concurrent and cumulative use.
+// ClientQuotas caps how many sessions a client holds at once and how fast it
+// starts them. None of them caps a client's total use.
 type ClientQuotas struct {
 	// MaxLiveSessions caps sessions in any non-terminal state.
 	// +optional
@@ -64,8 +60,11 @@ type ClientQuotas struct {
 	// +kubebuilder:validation:Minimum=0
 	MaxPendingApprovals int32 `json:"maxPendingApprovals,omitempty"`
 
-	// CreateRatePerMinute caps how fast sessions may be created. Approval requests
-	// reach a human, so an uncapped client is a spam primitive as much as a cost one.
+	// CreateRatePerMinute caps how many sessions a client may start per minute.
+	// A new session and the continuation of a suspended one both count, and a
+	// client may spend a whole minute's allowance at once. Each start asks a
+	// human for approval, so an uncapped client is a spam primitive as much as a
+	// cost one.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	CreateRatePerMinute int32 `json:"createRatePerMinute,omitempty"`
