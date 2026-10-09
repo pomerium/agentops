@@ -12,6 +12,7 @@ type owner struct {
 	outcome  *runOutcome
 	live     *binding
 	stop     *stopSpec
+	settled  chan struct{}
 }
 
 func (s *Service) newLaunch(ctx context.Context, clientID string) (context.Context, *owner) {
@@ -91,12 +92,12 @@ func (s *Service) takeStop(o *owner) (stopSpec, bool) {
 	return spec, true
 }
 
-func (s *Service) detach(sessionID string, want *owner, spec stopSpec) (*binding, *owner) {
+func (s *Service) detach(sessionID string, want *owner, spec stopSpec) (*binding, *owner, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o := s.owners[sessionID]
 	if want != nil && o != want {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if o != nil && o.live == nil {
 		if spec.suspend == api.Reason(0) && o.stop == nil {
@@ -105,17 +106,23 @@ func (s *Service) detach(sessionID string, want *owner, spec stopSpec) (*binding
 				o.cancel()
 			}
 		}
-		return nil, nil
+		if spec.suspend != api.Reason(0) || o.cancel != nil {
+			return nil, nil, nil
+		}
+		if o.settled == nil {
+			o.settled = make(chan struct{})
+		}
+		return nil, nil, o.settled
 	}
 	if o != nil && !o.live.close(spec.ifIdleFor) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	held := &owner{}
 	s.owners[sessionID] = held
 	if o != nil {
-		return o.live, held
+		return o.live, held, nil
 	}
-	return nil, held
+	return nil, held, nil
 }
 
 func (s *Service) finish(sessionID string, o *owner) (stopSpec, bool) {
@@ -128,6 +135,9 @@ func (s *Service) finish(sessionID string, o *owner) (stopSpec, bool) {
 	}
 	if s.owners[sessionID] == o {
 		delete(s.owners, sessionID)
+		if o.settled != nil {
+			close(o.settled)
+		}
 	}
 	return stopSpec{}, false
 }
