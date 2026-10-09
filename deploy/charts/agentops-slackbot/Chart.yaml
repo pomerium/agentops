@@ -1,0 +1,20 @@
+apiVersion: v2
+name: agentops-slackbot
+description: >-
+  The AgentOps Slack bot: a reference client of the Harness API that runs
+  agents from Slack threads.
+type: application
+version: 0.1.0
+appVersion: v0.1.0
+home: https://www.pomerium.com/
+icon: https://www.pomerium.com/static-img/favicon.svg
+sources:
+  - https://github.com/pomerium/agentops
+maintainers:
+  - name: Pomerium Team
+    email: support@pomerium.com
+keywords:
+  - pomerium
+  - slack
+  - chatops
+  - agents

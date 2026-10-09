@@ -1,0 +1,30 @@
+{{ .Chart.Name }} ({{ include "slackbot.fullname" . }}) is installed in namespace {{ .Release.Namespace }}.
+
+Image: {{ include "slackbot.image" . }}
+
+1. Check that the pod is ready:
+
+   kubectl --namespace {{ .Release.Namespace }} get pods -l "app.kubernetes.io/instance={{ .Release.Name }}"
+
+2. Route Slack to the bot. A TLS-terminating Pomerium route sends /slack/events and
+   /slack/interactivity to:
+
+   http://{{ include "slackbot.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+3. Allow the bot on the Harness API ({{ .Values.harnessAPI.url }}):
+
+   - The Pomerium route admits the token of ServiceAccount
+     system:serviceaccount:{{ .Release.Namespace }}:{{ include "slackbot.fullname" . }}
+     with audience {{ .Values.harnessAPI.tokenAudience }}.
+   - A ClientBinding in the platform's namespace names that subject with the
+     identity-provider prefix, for example
+     cluster/system:serviceaccount:{{ .Release.Namespace }}:{{ include "slackbot.fullname" . }}.
+     See deploy/examples/clientbinding-slack.yaml.
+{{- if not .Values.slack.channels }}
+{{- if not .Values.slack.defaultChannelTemplate }}
+
+No channel is bound to an agent. Set slack.channels to start sessions from Slack.
+{{- end }}
+{{- end }}
+
+Docs: https://github.com/pomerium/agentops

@@ -1,0 +1,85 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: pomerium/agentops
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+config:
+  logLevel: info
+  sessionTTL: 1h
+  sessionIdleTTL: 15m
+  sessionIdleWarnLead: 2m
+  suspendedTTL: 24h
+  sandboxLease: 1h
+  agentic:
+    asURL: ""
+    dialAddress: ""
+    runTTL: 15m
+    caFile: ""
+    audience: pomerium-agentic-as
+    tokenExpirationSeconds: 600
+  harness:
+    externalURL: ""
+    assertionIssuer: ""
+    attachGrace: 2m
+    attachWarnAfter: 90s
+    heartbeatInterval: 20s
+    heartbeatMissLimit: 3
+    api:
+      assertionIssuer: ""
+      assertionAudience: ""
+
+serviceAccount:
+  annotations: {}
+
+rbac:
+  create: true
+
+installCRDs: true
+
+service:
+  type: ClusterIP
+  grpcPort: 8090
+  apiPort: 8081
+  adminPort: 9090
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 1Gi
+  accessModes:
+    - ReadWriteOnce
+
+resources: {}
+
+podAnnotations: {}
+
+extraEnvVars: []
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

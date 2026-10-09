@@ -20,12 +20,8 @@ metadata:
     {{- include "agentops.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["agents.pomerium.com"]
-    resources: ["agenttemplates", "channelconfigs"]
+    resources: ["agenttemplates", "clientbindings"]
     verbs: ["get", "list", "watch"]
-  # NOTE: no "secrets" access — by design. Git credentials reach the sandbox
-  # via secretKeyRef in the SandboxTemplate (resolved by the kubelet), and MCP
-  # tokens/LLM keys go through the sandbox sidecar; the app itself never reads
-  # Kubernetes Secrets.
   - apiGroups: ["extensions.agents.x-k8s.io"]
     resources: ["sandboxtemplates"]
     verbs: ["get", "list", "watch"]
@@ -34,13 +30,10 @@ rules:
     verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

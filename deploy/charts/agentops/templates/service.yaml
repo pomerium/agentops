@@ -10,7 +10,11 @@ spec:
   selector:
     {{- include "agentops.selectorLabels" . | nindent 4 }}
   ports:
-    - name: http
+    - name: grpc
       protocol: TCP
-      port: {{ .Values.service.port }}
-      targetPort: http
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+    - name: api
+      protocol: TCP
+      port: {{ .Values.service.apiPort }}
+      targetPort: api

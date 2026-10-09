@@ -4,33 +4,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// MCPServerRef identifies an MCP server that a workflow requires the invoking
-// user to be connected to before the workflow can run.
+// MCPServerRef is an MCP server the agent uses. The platform lists its URL in
+// the run that the person approves. The sandbox sidecar serves it to the agent
+// on a loopback port and adds the run token to each request.
 type MCPServerRef struct {
-	// Name is a short, stable identifier for the server, unique within a
-	// AgentTemplate. It is used as the credential key and surfaced to the
-	// user in auth prompts.
+	// Name identifies the server and must be unique within the AgentTemplate.
+	// The agent sees the server under this name.
 	// +required
 	Name string `json:"name"`
 
-	// URL is the streamable-HTTP endpoint of the MCP server.
+	// URL is the streamable-HTTP endpoint of the MCP server: a Pomerium route
+	// that accepts the run token.
 	// +required
 	URL string `json:"url"`
 
 	// DialAddress optionally overrides the host[:port] the sandbox sidecar
 	// connects to for this server, while TLS SNI and the Host header still come
 	// from URL. Use it to reach an in-cluster Service
-	// (e.g. "mcp-gateway.gateway.svc.cluster.local:443") instead of
+	// (e.g. "pomerium-proxy.pomerium.svc.cluster.local:443") instead of
 	// hairpinning through an external LoadBalancer VIP. Empty dials the
 	// host:port parsed from URL.
 	// +optional
 	DialAddress string `json:"dialAddress,omitempty"`
 }
 
-// SandboxWarmPoolReference selects the agent-sandbox SandboxWarmPool that
-// provides the agent harness and base image for a workflow. The warm pool (run
-// with replicas: 0) in turn references the SandboxTemplate; a SandboxClaim now
-// binds to the pool, not the template directly (agent-sandbox v1beta1).
+// SandboxWarmPoolReference selects the agent-sandbox SandboxWarmPool that runs
+// the agent. The pool references the SandboxTemplate.
 type SandboxWarmPoolReference struct {
 	// Name of the SandboxWarmPool (in the same namespace).
 	// +required
@@ -72,16 +71,13 @@ type AgentTemplateSpec struct {
 	// +listMapKey=name
 	RequiredMCPServers []MCPServerRef `json:"requiredMCPServers,omitempty"`
 
-	// WarmPoolRef selects the agent-sandbox SandboxWarmPool that bakes the
-	// sandbox for this workflow. The pool (run with replicas: 0) references a
-	// SandboxTemplate, which defines the harness + base image, the
-	// secret-isolating sidecar, and — when the workflow needs a repository
-	// checked out — the git working context (repo URL/ref and credentials
-	// secretKeyRef on the template's git-init init container). Pools whose
-	// template bakes a repo are workflow-specific by design (e.g.
-	// "pomerium-zero-claude-code"). agentops creates a SandboxClaim against this
-	// pool per run; because the claim injects per-run env, the sandbox is always
-	// cold-started (a fresh pod per run).
+	// WarmPoolRef selects the agent-sandbox SandboxWarmPool that runs this
+	// agent. The pool references a SandboxTemplate, which defines the harness
+	// image, the sidecar, and, when the agent needs a repository checked out,
+	// the git working context on the template's git-init init container. A pool
+	// whose template checks out a repository belongs to one agent. The platform
+	// creates one SandboxClaim against this pool per session. The claim carries
+	// no session data, so it can adopt a pre-warmed pod from the pool.
 	// +required
 	WarmPoolRef SandboxWarmPoolReference `json:"warmPoolRef"`
 }
@@ -100,8 +96,8 @@ type AgentTemplateStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=agt
 // +kubebuilder:printcolumn:name="WarmPool",type=string,JSONPath=`.spec.warmPoolRef.name`
 
-// AgentTemplate is the declarative definition of an agentic workflow that
-// users can invoke from Slack.
+// AgentTemplate is the declarative definition of an agent that clients of the
+// Harness API can run.
 type AgentTemplate struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
