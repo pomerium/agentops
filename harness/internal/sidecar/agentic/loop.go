@@ -176,7 +176,8 @@ func (l *Loop) Run(ctx context.Context) error {
 			heldAt = polledAt
 			l.readyOnce.Do(func() { close(l.ready) })
 			retry.Reset()
-			rotateIn := l.rotationInterval(res.Token)
+			remaining, _ := l.remaining(heldAt)
+			rotateIn := max(min(l.rotationInterval(res.Token), remaining), 0)
 			attrs := []any{"expires_in", res.Token.ExpiresIn, "rotate_in", rotateIn}
 			if res.Token.RunID != "" {
 				attrs = append(attrs, "run_id", res.Token.RunID)
