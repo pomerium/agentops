@@ -52,7 +52,7 @@ type HarnessConfig struct {
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		Harness: HarnessConfig{
-			Namespace:           cmp.Or(getenv("POD_NAMESPACE"), getenv("NAMESPACE")),
+			Namespace:           getenv("POD_NAMESPACE"),
 			DBPath:              getenv("DB_PATH"),
 			SessionTTL:          time.Hour,
 			SessionIdleTTL:      15 * time.Minute,
