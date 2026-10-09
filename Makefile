@@ -1,182 +1,223 @@
-# Makefile for agentops.
-#
-# Maintainer note: on some machines a stale GOROOT in the environment can
-# break the toolchain; if so, prefix invocations with `env -u GOROOT`
-# (e.g. `env -u GOROOT make build`). That workaround is intentionally NOT
-# baked into the recipes here.
-
-# Local image tags (no registry — built straight into the local Docker/OrbStack
-# image store and consumed via imagePullPolicy: IfNotPresent).
-IMAGE         ?= agentops:dev
-HARNESS_IMAGE ?= agentops-agent:dev
-SIDECAR_IMAGE ?= agentops-sidecar:dev
+HARNESS_IMAGE  ?= agentops:dev
 SLACKBOT_IMAGE ?= agentops-slackbot:dev
+SIDECAR_IMAGE  ?= agentops-sidecar:dev
+HARNESS        ?= claude-code
+AGENT_IMAGE    ?= $(HARNESS):dev
 
-# controller-gen, sqlc, and buf are declared as `tool` directives in go.mod,
-# so we run them via `go tool` to pin the exact versions the module depends on.
-CONTROLLER_GEN ?= go tool controller-gen
-SQLC           ?= go tool sqlc
-BUF            ?= go tool buf
+MODULES        ?= harness slackbot
+CLIENT_MODULES ?= $(filter-out harness,$(MODULES))
 
-HARNESS_DIR ?= harness
-HARNESS_GO  ?= cd $(HARNESS_DIR) && GOWORK=off go
+GOTOOL         ?= cd harness && GOWORK=off go tool
+CONTROLLER_GEN ?= $(GOTOOL) controller-gen
+SQLC           ?= GOWORK=off go tool sqlc
+BUF            ?= $(GOTOOL) buf
 
-SLACKBOT_DIR ?= slackbot
-SLACKBOT_GO  ?= cd $(SLACKBOT_DIR) && GOWORK=off go
+HELM          ?= helm
+CHARTS_DIR    ?= deploy/charts
+PLATFORM_CHART ?= $(CHARTS_DIR)/agentops
+SLACKBOT_CHART ?= $(CHARTS_DIR)/agentops-slackbot
 
-# Kustomize overlay to render/apply: dev or prod.
-OVERLAY ?= dev
+APISTUB_BIN ?= $(CURDIR)/bin/apistub
+BUF_BIN     ?= $(CURDIR)/bin/buf
 
-# Helm chart published as an OCI artifact by .github/workflows/helm.yaml.
-HELM      ?= helm
-CHART_DIR ?= deploy/helm
+.PHONY: build test test-e2e vet boundary telemetry-in-sync generate pb-generate proto-lint proto-check \
+        sdk-generate sdk-generate-ts sdk-generate-py sdk-generate-check sdk-test sdk-test-ts sdk-test-py \
+        tidy docker-build harness-image slackbot-image harness-build sidecar-build run apistub \
+        helm-sync-crds helm-lint helm-template helm-check-client-isolation helm-package
 
-.PHONY: build test test-e2e vet generate generate-harness-api apistub sdk-generate sdk-generate-check sdk-test proto-lint tidy docker-build harness-build sidecar-build slackbot-build run kustomize deploy \
-        helm-sync-crds helm-lint helm-template helm-package
-
-## build: compile all packages.
+## build: compile every package in every module.
 build:
-	go build ./...
-	$(HARNESS_GO) build ./...
-	$(SLACKBOT_GO) build ./...
+	@out=$$(mktemp -d); trap 'rm -rf "$$out"' EXIT; \
+	for m in $(MODULES); do echo "== $$m"; \
+	  (cd $$m && GOWORK=off go build -o "$$out/" ./...) || exit 1; \
+	done
 
-## test: run the test suite.
+## test: run every module's tests.
 test:
-	go test ./...
-	$(HARNESS_GO) test ./...
-	$(SLACKBOT_GO) test ./...
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && GOWORK=off go test ./...) || exit 1; done
 
-## test-e2e: run the opt-in end-to-end harness tests (needs Docker + an
-## Anthropic key in ANTHROPIC_API_KEY or ~/tmp/keys/claude_api_key.txt). These
-## build the harness image and talk to the real Anthropic API and a public MCP
-## server, so they're excluded from the default `test` target.
+## test-e2e: run the opt-in end-to-end tests (Docker; ARGS="-run ..." selects a suite).
 test-e2e:
-	AGENTOPS_E2E=1 go test -tags e2e -timeout 15m ./internal/e2e/... $(ARGS)
+	cd harness && AGENTOPS_E2E=1 GOWORK=off go test -tags e2e -timeout 40m ./internal/e2e/... $(ARGS)
 
-## vet: run go vet over all packages.
+## vet: run go vet over every module.
 vet:
-	go vet ./...
-	$(HARNESS_GO) vet ./...
-	$(SLACKBOT_GO) vet ./...
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && GOWORK=off go vet ./...) || exit 1; done
 
-## generate: regenerate deepcopy methods + CRD manifests (controller-gen),
-## the sqlc query bindings (run from internal/chatops/db/, per its sqlc.yaml),
-generate: generate-harness-api
-	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./api/...
-	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
-	$(HARNESS_GO) tool controller-gen object:headerFile=/dev/null paths=./apis/...
-	$(HARNESS_GO) tool controller-gen crd paths=./apis/... output:crd:artifacts:config=../config/crd/bases
-	cd internal/chatops/db && $(SQLC) generate
-	$(BUF) generate
+## boundary: fail if a client module imports anything in harness/ except harness/api.
+boundary:
+	@for m in $(CLIENT_MODULES); do \
+	  deps=$$(cd $$m && GOWORK=off go list -deps -test ./...) || exit 1; \
+	  bad=$$(echo "$$deps" | grep '^github.com/pomerium/agentops/harness/' \
+	    | grep -vE '^github.com/pomerium/agentops/harness/api(/|$$)' || true); \
+	  if [ -n "$$bad" ]; then \
+	    echo "$$m reaches past harness/api:"; echo "$$bad"; exit 1; \
+	  fi; \
+	  echo "$$m depends only on harness/api"; \
+	done
+
+## telemetry-in-sync: fail if the two copies of the telemetry package differ.
+telemetry-in-sync:
+	@a=harness/internal/telemetry; b=slackbot/internal/telemetry; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	norm() { sed -e 's#slackbot/internal/telemetry#TELEMETRY#' -e 's#harness/internal/telemetry#TELEMETRY#' "$$1"; }; \
+	for f in component.go component_test.go; do \
+	  norm $$a/$$f > $$tmp/a; norm $$b/$$f > $$tmp/b; \
+	  if ! diff -q $$tmp/a $$tmp/b >/dev/null; then \
+	    echo "$$a/$$f and $$b/$$f have drifted"; exit 1; \
+	  fi; \
+	done; \
+	echo "the two telemetry copies are identical"
+
+## generate: regenerate the CRDs, the sqlc bindings, the protobuf code and both SDKs.
+generate:
+	$(CONTROLLER_GEN) object:headerFile=/dev/null paths=./apis/...
+	$(CONTROLLER_GEN) crd paths=./apis/... output:crd:artifacts:config=../config/crd/bases
+	cd harness/internal/sessionstore/sqlite && $(SQLC) generate
+	$(MAKE) pb-generate
 	$(MAKE) sdk-generate
 	$(MAKE) helm-sync-crds
 
-generate-harness-api:
-	$(HARNESS_GO) tool buf generate --template buf.gen.connect.yaml
-	$(HARNESS_GO) tool buf generate
-	cd $(HARNESS_DIR)/internal/sessionstore/sqlite && GOWORK=off go tool sqlc generate
+PB_OUT ?=
 
-APISTUB_BIN ?= $(CURDIR)/bin/apistub
-apistub:
-	$(HARNESS_GO) build -o $(APISTUB_BIN) ./cmd/apistub
+## pb-generate: regenerate the Go protobuf code from proto/.
+pb-generate:
+	$(BUF) generate $(if $(PB_OUT),-o $(PB_OUT)/go)
+	$(BUF) generate --template buf.gen.connect.yaml $(if $(PB_OUT),-o $(PB_OUT)/go)
 
-sdk-generate: sdk-generate-ts sdk-generate-py
+## helm-sync-crds: copy the generated CRDs into the platform chart.
+helm-sync-crds:
+	@{ \
+	  echo '{{- if .Values.installCRDs }}'; \
+	  awk '{ print } /^  annotations:$$/ { print "    helm.sh/resource-policy: keep" }' config/crd/bases/*.yaml; \
+	  echo '{{- end }}'; \
+	} > $(PLATFORM_CHART)/templates/crds.yaml
+	@echo "wrote $(PLATFORM_CHART)/templates/crds.yaml"
 
-sdk-generate-ts:
-	npm --prefix sdk/ts install --no-audit --no-fund
-	npm --prefix sdk/ts run generate $(if $(PB_OUT),-- -o $(PB_OUT)/ts)
+## proto-lint: lint the protobuf sources.
+proto-lint:
+	$(BUF) lint ../proto
 
-BUF_BIN ?= $(CURDIR)/bin/buf
-$(BUF_BIN):
-	$(HARNESS_GO) build -o $(BUF_BIN) github.com/bufbuild/buf/cmd/buf
+## proto-check: fail if the committed Go protobuf code or sqlc bindings are stale.
+proto-check: proto-lint
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; set -e; \
+	  $(MAKE) --no-print-directory pb-generate PB_OUT="$$tmp" >/dev/null; \
+	  for d in $$(cd "$$tmp/go" && find . -type f -exec dirname {} \; | sort -u); do \
+	    diff -r "$$tmp/go/$$d" "harness/$$d" || { echo "harness/$$d is stale; run make generate"; exit 1; }; \
+	  done; \
+	  (cd harness/internal/sessionstore/sqlite && $(SQLC) diff) || { echo "the sqlc bindings are stale; run make generate"; exit 1; }; \
+	  echo "the Go protobuf code and the sqlc bindings match their sources"
 
-sdk-generate-py: $(BUF_BIN)
-	cd sdk/python && uv sync --quiet --frozen
-	cd sdk/python && PATH="$(CURDIR)/sdk/python/.venv/bin:$$PATH" $(BUF_BIN) generate $(if $(PB_OUT),-o $(PB_OUT)/py)
-
+## sdk-generate-check: fail if either SDK's generated code is stale.
 sdk-generate-check:
 	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; set -e; \
 	  $(MAKE) --no-print-directory sdk-generate PB_OUT="$$tmp" >/dev/null; \
 	  diff -r "$$tmp/ts/src/gen" sdk/ts/src/gen || { echo "sdk/ts/src/gen is stale; run make sdk-generate"; exit 1; }; \
 	  diff -r -x __pycache__ -x __init__.py "$$tmp/py/src/agentops_harness/gen" sdk/python/src/agentops_harness/gen \
 	    || { echo "sdk/python/src/agentops_harness/gen is stale; run make sdk-generate"; exit 1; }; \
-	  echo "the SDK protobuf code matches the protos"
+	  echo "both SDKs' protobuf code matches the protos"
 
+## tidy: run go mod tidy in every module.
+tidy:
+	@for m in $(MODULES); do echo "== $$m"; (cd $$m && GOWORK=off go mod tidy) || exit 1; done
+
+## docker-build: build the platform and Slack bot images.
+docker-build: harness-image slackbot-image
+
+## harness-image: build the platform image.
+harness-image:
+	docker build -f Dockerfile.harness -t $(HARNESS_IMAGE) .
+
+## slackbot-image: build the Slack bot image.
+slackbot-image:
+	docker build -f Dockerfile.slackbot -t $(SLACKBOT_IMAGE) .
+
+## harness-build: build an agent harness image from deploy/harness/$(HARNESS).
+harness-build:
+	docker build -t $(AGENT_IMAGE) -f deploy/harness/$(HARNESS)/Dockerfile deploy/harness
+
+## sidecar-build: build the sandbox sidecar image.
+sidecar-build:
+	docker build -f Dockerfile.sidecar -t $(SIDECAR_IMAGE) .
+
+## run: run the harness from source.
+run:
+	cd harness && GOWORK=off go run ./cmd/harness
+
+## apistub: build the Harness API conformance server.
+apistub:
+	cd harness && GOWORK=off go build -o $(APISTUB_BIN) ./cmd/apistub
+
+## sdk-generate: regenerate both SDKs' protobuf code.
+sdk-generate: sdk-generate-ts sdk-generate-py
+
+## sdk-generate-ts: regenerate the TypeScript SDK's protobuf code.
+sdk-generate-ts:
+	npm --prefix sdk/ts install --no-audit --no-fund
+	npm --prefix sdk/ts run generate $(if $(PB_OUT),-- -o $(PB_OUT)/ts)
+
+## sdk-generate-py: regenerate the Python SDK's protobuf code.
+sdk-generate-py: $(BUF_BIN)
+	cd sdk/python && uv sync --quiet --frozen
+	cd sdk/python && PATH="$(CURDIR)/sdk/python/.venv/bin:$$PATH" $(BUF_BIN) generate $(if $(PB_OUT),-o $(PB_OUT)/py)
+
+$(BUF_BIN):
+	cd harness && GOWORK=off go build -o $(BUF_BIN) github.com/bufbuild/buf/cmd/buf
+
+## sdk-test: run both SDK conformance suites against the stub.
 sdk-test: sdk-test-ts sdk-test-py
 
+## sdk-test-ts: run the TypeScript conformance suite.
 sdk-test-ts: apistub
 	npm --prefix sdk/ts install --no-audit --no-fund
 	APISTUB_BIN=$(APISTUB_BIN) npm --prefix sdk/ts test
 
+## sdk-test-py: run the Python conformance suite.
 sdk-test-py: apistub
 	cd sdk/python && APISTUB_BIN=$(APISTUB_BIN) uv run --frozen pytest -q
 
-## helm-sync-crds: copy the generated CRDs into the Helm chart, wrapped in an
-## `installCRDs` toggle. Kept in sync via `generate`; the kustomize base reads
-## config/crd directly, while Helm needs its own templated copy.
-helm-sync-crds:
-	@{ \
-	  echo '{{- if .Values.installCRDs }}'; \
-	  echo '# AUTO-GENERATED — do not edit by hand.'; \
-	  echo '# Synced from config/crd/bases/ by `make helm-sync-crds` (run after `make generate`).'; \
-	  cat config/crd/bases/*.yaml; \
-	  echo '{{- end }}'; \
-	} > $(CHART_DIR)/templates/crds.yaml
-	@echo "wrote $(CHART_DIR)/templates/crds.yaml"
+HELM_PLATFORM_VALUES ?= \
+  --set config.agentic.asURL=https://agentic.example.com \
+  --set config.harness.externalURL=https://harness.example.com \
+  --set config.harness.assertionIssuer=harness.example.com \
+  --set config.harness.api.assertionIssuer=harness-api.example.com
 
-## proto-lint: lint the protobuf sources.
-proto-lint:
-	cd proto && $(BUF) lint
+HELM_SLACKBOT_VALUES ?= \
+  --set slack.signingSecret=test \
+  --set slack.botToken=test \
+  --set harnessAPI.url=https://harness-api.example.com
 
-## tidy: prune and verify go.mod / go.sum.
-tidy:
-	go mod tidy
-	$(HARNESS_GO) mod tidy
-	$(SLACKBOT_GO) mod tidy
+HELM_EXTRA_VALUES ?=
 
-## docker-build: build the app container image (local tag).
-docker-build:
-	docker build -t $(IMAGE) .
-
-## harness-build: build a local agent harness image (HARNESS=claude-code|demo|...,
-## one per deploy/harness/<agent> folder; context stays at deploy/harness so the
-## shared git-checkout.sh is reachable).
-HARNESS ?= claude-code
-harness-build:
-	docker build -t $(HARNESS_IMAGE) -f deploy/harness/$(HARNESS)/Dockerfile deploy/harness
-
-## sidecar-build: build the sandbox sidecar proxy image (sidecar binary + envoy).
-sidecar-build:
-	docker build -f Dockerfile.sidecar -t $(SIDECAR_IMAGE) .
-
-## slackbot-build: build the reference Slack bot image (Dockerfile.slackbot).
-slackbot-build:
-	docker build -f Dockerfile.slackbot -t $(SLACKBOT_IMAGE) .
-
-## run: build and run the binary locally.
-run:
-	go run ./cmd/agentops
-
-## kustomize: render the Kustomize overlay to stdout (OVERLAY=dev|prod).
-kustomize:
-	kubectl kustomize deploy/overlays/$(OVERLAY)
-
-## deploy: apply the Kustomize overlay to the current cluster (OVERLAY=dev|prod).
-## Note: create the agentops-secrets Secret out-of-band first.
-deploy:
-	kubectl apply -k deploy/overlays/$(OVERLAY)
-
-## helm-lint: lint the Helm chart.
+## helm-lint: lint both charts.
 helm-lint:
-	$(HELM) lint $(CHART_DIR)
+	$(HELM) lint $(PLATFORM_CHART) $(HELM_PLATFORM_VALUES)
+	$(HELM) lint $(SLACKBOT_CHART) $(HELM_SLACKBOT_VALUES)
 
-## helm-template: render the Helm chart to stdout with the minimum required values.
+## helm-template: render both charts with the minimum required values.
 helm-template:
-	$(HELM) template agentops $(CHART_DIR) \
-	  --set slack.signingSecret=test \
-	  --set slack.botToken=test \
-	  --set config.oauthRedirectBaseURL=https://agentops.example.com
+	$(HELM) template agentops $(PLATFORM_CHART) --namespace agentops-system $(HELM_PLATFORM_VALUES) $(HELM_EXTRA_VALUES)
+	$(HELM) template agentops-slackbot $(SLACKBOT_CHART) --namespace agentops-slackbot $(HELM_SLACKBOT_VALUES)
 
-## helm-package: package the chart into a .tgz (CI pushes it to the OCI registry).
+## helm-check-client-isolation: fail if the Slack bot chart grants RBAC, mounts an AS token or claims a volume.
+helm-check-client-isolation:
+	@bot=$$($(HELM) template agentops-slackbot $(SLACKBOT_CHART) $(HELM_SLACKBOT_VALUES)) || exit 1; \
+	rbac=$$($(HELM) template agentops $(PLATFORM_CHART) $(HELM_PLATFORM_VALUES) -s templates/rbac.yaml) || exit 1; \
+	if echo "$$rbac" | grep -q 'slackbot'; then \
+	  echo "the platform's RBAC names the Slack bot"; exit 1; \
+	fi; \
+	if echo "$$bot" | grep -qE 'kind: (Role|RoleBinding|ClusterRole|ClusterRoleBinding)'; then \
+	  echo "the Slack bot chart renders RBAC"; exit 1; \
+	fi; \
+	if echo "$$bot" | grep -qE 'name: agentic-token|/var/run/agentic'; then \
+	  echo "the Slack bot mounts an authorization-server token"; exit 1; \
+	fi; \
+	if echo "$$bot" | grep -qE 'persistentVolumeClaim|volumeClaimTemplates'; then \
+	  echo "the Slack bot claims a volume"; exit 1; \
+	fi; \
+	echo "the Slack bot has no RBAC, no AS token volume and no volume claim"
+
+## helm-package: package both charts into .tgz files.
 helm-package: helm-lint
-	$(HELM) package $(CHART_DIR)
+	$(HELM) package $(PLATFORM_CHART)
+	$(HELM) package $(SLACKBOT_CHART)
