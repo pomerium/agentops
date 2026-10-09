@@ -198,7 +198,8 @@ and `uv`.
 
 [`scripts/run-local.sh`](./scripts/run-local.sh) runs either process from
 source. It loads `.env` from the repository root (plain `KEY=value` lines; the
-file is gitignored) and runs `go run` with `GOWORK=off`:
+file is gitignored), builds the process into `bin/` with `GOWORK=off`, and runs
+it from the repository root, so relative paths in `.env` resolve there:
 
 ```sh
 ./scripts/run-local.sh            # the platform
