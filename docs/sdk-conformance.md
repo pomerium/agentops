@@ -23,10 +23,9 @@ substitution is identity: it comes from a header instead of a verified
 assertion, so no Pomerium and no cluster are needed. It binds loopback only and
 refuses to start otherwise, because it authenticates nobody.
 
-The reference suites arrive with the TypeScript SDK (run over **both** codecs)
-and the Python SDK, in a follow-up change. Until then, the stub's own tests
-(`harness/internal/apistub`) drive it through the Go client, covering every
-scenario below except `no-frames`.
+The reference suites are [`sdk/ts/test/conformance.test.ts`](../sdk/ts/test/conformance.test.ts)
+(run over **both** codecs) and [`sdk/python/tests/test_conformance.py`](../sdk/python/tests/test_conformance.py).
+`make sdk-test` runs both.
 
 ## Steering it
 
@@ -46,7 +45,8 @@ client would reconnect forever — the test would hang rather than pass. Scoping
 to the first request is what lets you assert that the *recovery* worked.
 
 A bearer token is also accepted as an identity, so a client that can only set
-`Authorization` (the Go client, and therefore the companion) can still pick one.
+`Authorization` (the Go client in `harness/api/client`, for one) can still pick
+one.
 
 Two more levers ride on ordinary request fields:
 
@@ -107,8 +107,7 @@ connection open.
 This is the one condition a client cannot ride out by waiting, because opening a
 subscription is synchronous. A client without a deadline on the opening frame
 waits forever, with no error and no stream — and the process it happens to goes on
-looking perfectly healthy. (The Go client acquired this deadline because this
-scenario found it missing.)
+looking perfectly healthy.
 
 ### `drop-after=N`
 

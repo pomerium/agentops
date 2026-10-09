@@ -12,7 +12,7 @@
 
 <!-- How was this verified? Unit tests, manual run against a workspace/cluster, etc. -->
 
-- [ ] `go test ./...` passes
+- [ ] `make test` passes
 - [ ] Added/updated tests covering the change
 
 ## Checklist
