@@ -77,7 +77,7 @@ func TestClaudeHarnessConnectsAgnoMCP(t *testing.T) {
 	}
 
 	if !run.sawAgnoToolCall() {
-		t.Fatalf("harness did not call the Agno MCP tool — it likely sees ZERO connected MCP servers.\n"+
+		t.Fatalf("no Agno MCP tool call completed — the agent likely sees ZERO connected MCP servers, or the call failed.\n"+
 			"  tool calls observed: %d\n  agent text: %q",
 			len(run.toolCalls), strings.Join(run.messages, ""))
 	}
@@ -281,8 +281,18 @@ func (r *agentRun) record(ev *agentlinkpb.AgentEvent) {
 }
 
 func (r *agentRun) sawAgnoToolCall() bool {
+	titles := map[string]string{}
+	statuses := map[string]string{}
 	for _, c := range r.toolCalls {
-		if strings.HasPrefix(c.GetTitle(), "mcp__"+agnoMCPName+"__") {
+		if c.GetTitle() != "" {
+			titles[c.GetId()] = c.GetTitle()
+		}
+		if c.GetStatus() != "" {
+			statuses[c.GetId()] = c.GetStatus()
+		}
+	}
+	for id, title := range titles {
+		if strings.HasPrefix(title, "mcp__"+agnoMCPName+"__") && statuses[id] == "completed" {
 			return true
 		}
 	}
@@ -297,5 +307,36 @@ func (r *agentRun) dump() {
 	r.t.Logf("tool calls: %d", len(r.toolCalls))
 	for i, c := range r.toolCalls {
 		r.t.Logf("  [%d] id=%q title=%q kind=%q status=%q", i, c.GetId(), c.GetTitle(), c.GetKind(), c.GetStatus())
+	}
+}
+
+func TestAgnoToolCallCountsOnlyWhenItCompletes(t *testing.T) {
+	agno := "mcp__" + agnoMCPName + "__search_docs"
+	cases := []struct {
+		name  string
+		calls []*agentlinkpb.ToolCall
+		want  bool
+	}{
+		{"completed", []*agentlinkpb.ToolCall{
+			{Id: "1", Title: agno, Status: "pending"},
+			{Id: "1", Status: "completed", Update: true},
+		}, true},
+		{"failed", []*agentlinkpb.ToolCall{
+			{Id: "1", Title: agno, Status: "pending"},
+			{Id: "1", Status: "failed", Update: true},
+		}, false},
+		{"never finished", []*agentlinkpb.ToolCall{
+			{Id: "1", Title: agno, Status: "pending"},
+		}, false},
+		{"another server completed", []*agentlinkpb.ToolCall{
+			{Id: "1", Title: agno, Status: "failed"},
+			{Id: "2", Title: "WebFetch", Status: "completed"},
+		}, false},
+	}
+	for _, tc := range cases {
+		r := &agentRun{t: t, toolCalls: tc.calls}
+		if got := r.sawAgnoToolCall(); got != tc.want {
+			t.Errorf("%s: sawAgnoToolCall() = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

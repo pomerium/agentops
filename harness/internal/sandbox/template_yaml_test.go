@@ -1,6 +1,7 @@
 package sandbox_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,14 +162,8 @@ func TestAgentTemplateGitInit(t *testing.T) {
 	}
 	gitInit := &spec.InitContainers[0]
 
-	var mountsWorkspace bool
-	for _, m := range gitInit.VolumeMounts {
-		if m.MountPath == "/workspace" {
-			mountsWorkspace = true
-		}
-	}
-	if !mountsWorkspace {
-		t.Error("git-init must mount the workspace volume at /workspace to share the checkout with the agent")
+	if err := sharedWorkspaceError(spec, gitInit); err != nil {
+		t.Error(err)
 	}
 
 	env := envByName(gitInit)
@@ -212,14 +207,8 @@ func TestPublicRepoTemplateGitInit(t *testing.T) {
 	}
 	gitInit := &spec.InitContainers[0]
 
-	var mountsWorkspace bool
-	for _, m := range gitInit.VolumeMounts {
-		if m.MountPath == "/workspace" {
-			mountsWorkspace = true
-		}
-	}
-	if !mountsWorkspace {
-		t.Error("git-init must mount the workspace volume at /workspace to share the checkout with the agent")
+	if err := sharedWorkspaceError(spec, gitInit); err != nil {
+		t.Error(err)
 	}
 
 	env := envByName(gitInit)
@@ -234,4 +223,62 @@ func TestPublicRepoTemplateGitInit(t *testing.T) {
 	if _, ok := env["GIT_TOKEN"]; ok {
 		t.Error("git-init must not define GIT_TOKEN: this template checks out a public repo unauthenticated")
 	}
+}
+
+func TestSharedWorkspaceRejectsACheckoutTheAgentCannotSee(t *testing.T) {
+	spec := func(gitVolume string, readOnly bool) (*corev1.PodSpec, *corev1.Container) {
+		s := &corev1.PodSpec{
+			InitContainers: []corev1.Container{{
+				Name:         sandbox.GitInitContainerName,
+				VolumeMounts: []corev1.VolumeMount{{Name: gitVolume, MountPath: "/workspace", ReadOnly: readOnly}},
+			}},
+			Containers: []corev1.Container{{
+				Name:         sandbox.AgentContainerName,
+				VolumeMounts: []corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace"}},
+			}},
+		}
+		return s, &s.InitContainers[0]
+	}
+	if s, g := spec("workspace", false); sharedWorkspaceError(s, g) != nil {
+		t.Errorf("shared writable workspace rejected: %v", sharedWorkspaceError(s, g))
+	}
+	if s, g := spec("separate", false); sharedWorkspaceError(s, g) == nil {
+		t.Error("a git-init workspace on another volume was accepted")
+	}
+	if s, g := spec("workspace", true); sharedWorkspaceError(s, g) == nil {
+		t.Error("a read-only git-init workspace was accepted")
+	}
+}
+
+func sharedWorkspaceError(spec *corev1.PodSpec, gitInit *corev1.Container) error {
+	mountAt := func(c *corev1.Container) *corev1.VolumeMount {
+		for i := range c.VolumeMounts {
+			if c.VolumeMounts[i].MountPath == "/workspace" {
+				return &c.VolumeMounts[i]
+			}
+		}
+		return nil
+	}
+	var agent *corev1.Container
+	for i := range spec.Containers {
+		if spec.Containers[i].Name == sandbox.AgentContainerName {
+			agent = &spec.Containers[i]
+		}
+	}
+	if agent == nil {
+		return fmt.Errorf("template has no %q container", sandbox.AgentContainerName)
+	}
+	want := mountAt(agent)
+	got := mountAt(gitInit)
+	switch {
+	case want == nil:
+		return fmt.Errorf("the %q container must mount the workspace at /workspace", sandbox.AgentContainerName)
+	case got == nil:
+		return fmt.Errorf("git-init must mount the workspace at /workspace")
+	case got.Name != want.Name:
+		return fmt.Errorf("git-init mounts volume %q at /workspace but the agent mounts %q: the agent would not see the checkout", got.Name, want.Name)
+	case got.ReadOnly:
+		return fmt.Errorf("git-init mounts the workspace read-only and cannot check out into it")
+	}
+	return nil
 }
