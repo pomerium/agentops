@@ -12,18 +12,13 @@ import (
 var leadingMentionRE = regexp.MustCompile(`^\s*<@[^>]+>`)
 
 func ParseMention(text, botUserID string) (prompt string) {
-	rest := text
 	if botUserID != "" {
-		botRE := regexp.MustCompile(`<@` + regexp.QuoteMeta(botUserID) + `(\|[^>]*)?>`)
-		if loc := botRE.FindStringIndex(text); loc != nil {
-			rest = text[loc[1]:]
-		} else {
-			rest = leadingMentionRE.ReplaceAllString(text, "")
+		botRE := regexp.MustCompile(`[ \t]*<@` + regexp.QuoteMeta(botUserID) + `(\|[^>]*)?>[ \t]*`)
+		if botRE.MatchString(text) {
+			return strings.TrimSpace(botRE.ReplaceAllString(text, " "))
 		}
-	} else {
-		rest = leadingMentionRE.ReplaceAllString(text, "")
 	}
-	return strings.TrimSpace(rest)
+	return strings.TrimSpace(leadingMentionRE.ReplaceAllString(text, ""))
 }
 
 func encodeActionValue(parts ...string) string {

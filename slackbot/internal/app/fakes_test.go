@@ -44,6 +44,7 @@ type fakeAPI struct {
 	templates    []string
 	templatesErr error
 	subscribeErr []error
+	getErr       []error
 	eventPage    int
 }
 
@@ -137,9 +138,20 @@ func (f *fakeAPI) EndSession(_ context.Context, req *pb.EndSessionRequest) (*pb.
 	return &pb.EndSessionResponse{}, nil
 }
 
+func (f *fakeAPI) failGets(errs ...error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getErr = append(f.getErr, errs...)
+}
+
 func (f *fakeAPI) GetSession(_ context.Context, req *pb.GetSessionRequest) (*pb.GetSessionResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.getErr) > 0 {
+		err := f.getErr[0]
+		f.getErr = f.getErr[1:]
+		return nil, err
+	}
 	ref := req.GetRef()
 	view, ok := f.sessions[f.lookup(ref)]
 	if !ok {
@@ -485,6 +497,7 @@ type fakePoster struct {
 	posted    []slack.Message
 	failReads int
 	tooLong   bool
+	reactErr  map[string]error
 }
 
 func (p *fakePoster) PostMessage(_ context.Context, channelID string, opts ...slack.MsgOption) (string, error) {
@@ -579,9 +592,21 @@ func (p *fakePoster) Respond(_ context.Context, _ string, _ bool, text string, _
 	return nil
 }
 
+func (p *fakePoster) rejectReaction(emoji string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.reactErr == nil {
+		p.reactErr = map[string]error{}
+	}
+	p.reactErr[emoji] = err
+}
+
 func (p *fakePoster) AddReaction(_ context.Context, channelID, ts, emoji string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.reactErr[emoji]; err != nil {
+		return err
+	}
 	p.reactions = append(p.reactions, reactionOp{add: true, channel: channelID, ts: ts, emoji: emoji})
 	return nil
 }

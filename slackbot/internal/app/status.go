@@ -112,7 +112,7 @@ func endedStatus(p *pb.SessionEnded, approvalWindow time.Duration, workflow stri
 	case api.EndNeverApproved:
 		return statusLapsed(approvalWindow, workflow)
 	case api.EndExpired:
-		return ":x: This session's approval ran out, so I've stopped and cleaned up." + resume
+		return ":x: This session reached its time limit, so I've stopped and cleaned up." + resume
 	case api.EndAgentExit:
 		return ":x: The agent stopped, so this session is over." + resume
 	case api.EndTunnelLost:

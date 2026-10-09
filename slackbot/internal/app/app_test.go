@@ -44,17 +44,44 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureLogging(t, slog.NewTextHandler(newTestWriter(t), &slog.HandlerOptions{Level: slog.LevelError}))
+}
+
+func newFixtureLogging(t *testing.T, h slog.Handler) *fixture {
+	t.Helper()
 	clock := &tsClock{}
-	logs := newTestWriter(t)
 	f := &fixture{
 		api: newFakeAPI(), poster: &fakePoster{clock: clock},
 		resolver: boundResolver(testTemplate), clock: clock,
 	}
 	f.app = slackapp.New(f.api.serve(t), f.poster, f.resolver,
 		slackapp.WithBotUserID("UBOT"), slackapp.WithHomeTeamID("T1"),
-		slackapp.WithLogger(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelError}))))
+		slackapp.WithLogger(slog.New(h)))
 	t.Cleanup(f.app.Shutdown)
 	return f
+}
+
+type logCapture struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *logCapture) contains(s string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Contains(c.buf.String(), s)
+}
+
+func (c *logCapture) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
 }
 
 func (f *fixture) ts() string { return f.clock.next() }
@@ -553,7 +580,7 @@ func TestStartupWatchesASessionThatPausedWhileTheBotWasDown(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	go f.app.RunSweeper(ctx, 10*time.Millisecond)
-	f.poster.waitForPost(t, "approval ran out")
+	f.poster.waitForPost(t, "reached its time limit")
 }
 
 func TestARestartMidAnswerKeepsTheAnswerInOneMessage(t *testing.T) {
@@ -647,7 +674,7 @@ func TestTheSweeperShowsAnEndingThatCameWhileTheBotWasDown(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	go restarted.RunSweeper(ctx, 10*time.Millisecond)
-	f.poster.waitForPost(t, "approval ran out")
+	f.poster.waitForPost(t, "reached its time limit")
 }
 
 func TestTheSweeperDoesNotRepeatAnEnding(t *testing.T) {
@@ -792,7 +819,7 @@ func TestSweepReadsEveryPageOfAPausedSessionsEvents(t *testing.T) {
 	defer stop()
 	go f.app.RunSweeper(sweepCtx, 20*time.Millisecond)
 
-	f.poster.waitForPost(t, "approval ran out")
+	f.poster.waitForPost(t, "reached its time limit")
 }
 
 func TestSweepRendersTheReleaseCopy(t *testing.T) {
@@ -821,4 +848,44 @@ func TestSweepRendersTheReleaseCopy(t *testing.T) {
 	waitFor(t, "the watch to end once the session can produce nothing further", func() bool {
 		return f.slackState("sess-1")["watching"] != true
 	})
+}
+
+func TestASessionPastItsLifetimeDoesNotBlameTheApproval(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+
+	f.api.setState("sess-1", api.StateRunning, api.StateEnded, noReason)
+	f.api.emit("sess-1", "", &pb.SessionEnded{Reason: api.EndExpired, Detail: "the session reached its maximum lifetime"})
+
+	f.poster.waitForPost(t, "reached its time limit")
+	for _, p := range f.poster.allPosts() {
+		if strings.Contains(p.text, "approval ran out") {
+			t.Errorf("a session that hit its lifetime was told its approval ran out: %q", p.text)
+		}
+	}
+}
+
+func TestAReactionSlackDoesNotKnowIsReportedAsAMissingEmoji(t *testing.T) {
+	for _, tc := range []struct {
+		slackErr string
+		want     string
+		notWant  string
+	}{
+		{slackErr: "invalid_name", want: "custom emoji", notWant: "reactions:write"},
+		{slackErr: "missing_scope", want: "reactions:write", notWant: "custom emoji"},
+	} {
+		t.Run(tc.slackErr, func(t *testing.T) {
+			logs := &logCapture{}
+			f := newFixtureLogging(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			f.poster.rejectReaction("hourglass_flowing_sand", slack.SlackErrorResponse{Err: tc.slackErr})
+
+			f.app.HandleMention(context.Background(), mention(f, "ship it"))
+			f.poster.waitForPost(t, "Getting ready")
+
+			waitFor(t, "the reaction warning", func() bool { return logs.contains("add reaction failed") })
+			if !logs.contains(tc.want) || logs.contains(tc.notWant) {
+				t.Errorf("Slack error %s was logged as:\n%s", tc.slackErr, logs)
+			}
+		})
+	}
 }

@@ -60,6 +60,8 @@ func statusLapsed(window time.Duration, workflow string) string {
 		"ask an admin rather than trying again.", humanMinutes(window), workflow)
 }
 
+const msgHintBareMention = ":information_source: Your session here is running. @mention me with what you want it to do."
+
 const msgHintLaunching = ":hourglass_flowing_sand: Not running yet — I'm still waiting for the approval (check your DMs). I won't see anything posted here before then."
 
 func approvalDMText(userID, workflow, threadLink string) string {
@@ -97,8 +99,9 @@ const (
 )
 
 const (
-	msgNoAgentForChannel = ":wave: No agent is configured for this channel yet. Ask an admin to set one up for this channel."
-	msgLookupFailed      = ":warning: I couldn't look up the agent for this channel — something is broken on my side. Ask an admin to check the app logs."
+	msgNoAgentForChannel   = ":wave: No agent is configured for this channel yet. Ask an admin to set one up for this channel."
+	msgLookupFailed        = ":warning: I couldn't look up the agent for this channel — something is broken on my side. Ask an admin to check the app logs."
+	msgSessionLookupFailed = ":warning: I couldn't check this thread's session — something is broken on my side. @mention me again in a moment, or ask an admin to check the app logs."
 )
 
 func missingAgent(name string) string {
