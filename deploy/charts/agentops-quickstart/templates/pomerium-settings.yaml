@@ -45,10 +45,16 @@ spec:
     act.kubernetes.io.pod.name: act.kubernetes.io.pod.name
     act.kubernetes.io.pod.uid: act.kubernetes.io.pod.uid
   identityProviders:
+    # One provider per issuer: Pomerium refuses two with the same issuer. The
+    # egress audience, for workload-mode sidecars, is a second audience on the
+    # same provider; routes pin the audience they expect with `claim/aud`.
     cluster:
       issuer: kubernetes:///
       audiences:
         - {{ .Values.agentops.config.agentic.audience }}
+        {{- if .Values.egress.enabled }}
+        - {{ .Values.egress.audience }}
+        {{- end }}
       supportedAlgs:
         - RS256
 ---

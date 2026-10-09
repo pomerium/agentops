@@ -1,0 +1,45 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: python-egress
+  annotations:
+    # The agentops kustomize Component adds, to a template with this
+    # annotation: the `sidecar` native sidecar (`sidecar serve
+    # workload-identity`), a projected ServiceAccount token with audience
+    # `pomerium-egress` mounted into the sidecar only,
+    # `automountServiceAccountToken: false`, and a network policy that admits
+    # egress to DNS and Pomerium and nothing else.
+    agents.pomerium.com/inject: "workload"
+spec:
+  podTemplate:
+    spec:
+      serviceAccountName: sandbox-egress
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        - name: python-runtime
+          # python-runtime-sandbox, the in-pod server the Python SDK talks to
+          # (/execute, /upload, ...), plus pillow: see image/Dockerfile. Build
+          # and push it, and point `images:` in your kustomization at it.
+          image: python-egress-sandbox:latest
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8888
+            periodSeconds: 1
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8888
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 512Mi

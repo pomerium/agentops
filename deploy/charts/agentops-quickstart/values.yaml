@@ -58,6 +58,14 @@ anthropic:
   apiKey: ""
   existingSecret: ""
 
+# The audience that workload-mode sidecars (deploy/components/agentops,
+# `agents.pomerium.com/inject: "workload"`) present. Pomerium's Kubernetes
+# identity provider then accepts it next to the agentic audience, and an
+# egress route pins it with `claim/aud`.
+egress:
+  enabled: true
+  audience: pomerium-egress
+
 sandbox:
   sidecar:
     image:

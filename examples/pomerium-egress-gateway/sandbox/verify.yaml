@@ -1,0 +1,33 @@
+# The demo upstream. pomerium/verify echoes the identity that Pomerium
+# attached to the request (its /json path returns it as JSON), so the test
+# can see which ServiceAccount reached it. Replace it with your real upstream.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verify
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: verify
+  template:
+    metadata:
+      labels:
+        app: verify
+    spec:
+      containers:
+        - name: verify
+          image: pomerium/verify:latest
+          ports:
+            - containerPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: verify
+spec:
+  selector:
+    app: verify
+  ports:
+    - port: 80
+      targetPort: 8000

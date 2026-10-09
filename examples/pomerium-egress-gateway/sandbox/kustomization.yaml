@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The sandbox side of the example: a SandboxTemplate that carries the
+# agentops egress sidecar, its warm pool, the ServiceAccount that is the
+# sandbox's identity, the demo upstream (pomerium/verify) and the Pomerium
+# route that admits the sandbox's token.
+namespace: sandbox-egress
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - sandbox-template.yaml
+  - sandbox-warmpool.yaml
+  - verify.yaml
+  - route-verify.yaml
+
+components:
+  # Pin a release of https://github.com/pomerium/agentops in a real overlay.
+  - ../../../deploy/components/agentops
+
+images:
+  - name: agentops/sidecar
+    newName: pomerium/agentops-sidecar
+    newTag: main
+  # The sandbox image from image/Dockerfile, once you push it:
+  # - name: python-egress-sandbox
+  #   newName: registry.example.com/python-egress-sandbox
+  #   newTag: v1
+
+patches:
+  # Where the sidecar forwards each loopback port: the Pomerium routes.
+  - path: sidecar-endpoints.yaml
+  # The component also brings a `sandbox-agent` ServiceAccount for its
+  # platform mode. Workload mode keeps the pod's own ServiceAccount, so this
+  # example does not need it.
+  - patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: sandbox-agent

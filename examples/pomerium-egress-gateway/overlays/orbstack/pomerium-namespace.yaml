@@ -1,0 +1,38 @@
+# The quickstart's Pomerium: its namespace in the egress policy and the
+# in-cluster Service the sidecar dials.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: python-egress
+spec:
+  networkPolicy:
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: agentops-pomerium
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: pomerium
+        ports:
+          - protocol: TCP
+            port: 8443
+  podTemplate:
+    spec:
+      initContainers:
+        - name: sidecar
+          env:
+            - {name: SIDECAR_HTTP_VERIFY_UPSTREAM_URL, value: https://verify.localhost.pomerium.io}
+            - {name: SIDECAR_HTTP_VERIFY_DIAL_ADDRESS, value: pomerium-proxy.agentops-pomerium.svc.cluster.local:443}

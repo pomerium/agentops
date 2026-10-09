@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The Pomerium route in front of the sandbox-router. The router itself is the
+# upstream deployment (sandbox-router/deploy in kubernetes-sigs/agent-sandbox);
+# this only publishes it. The route lives next to the router's Service.
+namespace: agent-sandbox-system
+
+resources:
+  - route-sandbox.yaml

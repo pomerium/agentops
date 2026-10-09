@@ -1,0 +1,32 @@
+# The ingress route. The agent reaches the sandbox-router through it with the
+# Python SDK's Direct connection mode. Pomerium admits a Kubernetes
+# ServiceAccount token as a JWT: the agent's projected token in production, or
+# a token a developer mints for the same ServiceAccount locally.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandbox
+  annotations:
+    ingress.pomerium.io/bearer_token_format: jwt
+    ingress.pomerium.io/identity_providers: '["cluster"]'
+    # Commands can run long; the router's own limit is --proxy-timeout (180s).
+    ingress.pomerium.io/timeout: 180s
+    ingress.pomerium.io/policy: |
+      allow:
+        and:
+          - claim/aud: pomerium-egress
+          - claim/kubernetes.io.namespace: sandbox-egress
+          - claim/kubernetes.io.serviceaccount.name: agent
+spec:
+  ingressClassName: pomerium
+  rules:
+    - host: sandbox.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sandbox-router-svc
+                port:
+                  number: 8080

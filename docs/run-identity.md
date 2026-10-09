@@ -279,9 +279,13 @@ with an error if envoy dies, or if the token file is missing, unreadable, carrie
 the wrong audience, or has expired because the kubelet stopped rotating it.
 
 **Keep the audiences apart.** The egress token needs its own projected volume and
-audience. Pomerium accepts a JWT on any route whose identity provider lists its
-audience, so a token with `pomerium-agentic-as` would be accepted at
-`/agentic/token`, and an AS token would be accepted on egress routes. The token is
+audience. Pomerium allows one identity provider per issuer, so both audiences
+sit on the one `kubernetes:///` provider, and that provider accepts either
+token on every route that lists it. The route policy therefore pins the
+audience it expects with `claim/aud`: `pomerium-egress` on egress routes, and
+`pomerium-agentic-as` at `/agentic/token`. Without that, a token with
+`pomerium-agentic-as` would be accepted at an egress route, and an egress token
+at `/agentic/token`, subject only to the ServiceAccount checks. The token is
 mounted into the sidecar only, and the SDS file envoy reads it from is on the
 sidecar's own filesystem, so the app container never holds it. Keep the network
 policy as well: DNS and Pomerium only. Without it the app can go around the
@@ -295,25 +299,32 @@ this up on a SandboxTemplate, Deployment, StatefulSet, DaemonSet or Job (see
 
 ```yaml
 identity_providers:
-  cluster-egress:
-    issuer: "kubernetes:///"
-    audiences: ["pomerium-egress"]      # == SIDECAR_WORKLOAD_AUDIENCE, never pomerium-agentic-as
+  cluster:
+    issuer: "kubernetes:///"            # one provider per issuer
+    audiences:
+      - pomerium-agentic-as             # run mode
+      - pomerium-egress                 # == SIDECAR_WORKLOAD_AUDIENCE
     supported_algs: ["RS256"]
 
 routes:
   - from: https://anthropic.example.com
     to: https://api.anthropic.com
     bearer_token_format: jwt
-    identity_providers: [cluster-egress]
+    identity_providers: [cluster]
     set_request_headers:
       x-api-key: "<the Anthropic API key>"
     remove_request_headers: [Authorization]   # see below
     policy:
       allow:
         and:
+          - claim/aud: pomerium-egress
           - claim/kubernetes.io.namespace: team-a
           - claim/kubernetes.io.serviceaccount.name: nightly-report
 ```
+
+[`examples/pomerium-egress-gateway`](../examples/pomerium-egress-gateway/README.md)
+is a complete, tested instance of this: an agent-sandbox SandboxTemplate in
+workload mode, the routes, and agent frameworks driving it.
 
 **Strip `Authorization` on routes that don't overwrite it.** Pomerium does not
 remove a `Bearer` credential it has verified: the pod's JWT is forwarded to the
