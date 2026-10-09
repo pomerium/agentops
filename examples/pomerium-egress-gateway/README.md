@@ -13,7 +13,9 @@ Pomerium route that accepts the agent's ServiceAccount token: a projected token
 in the cluster, or a token minted with `kubectl create token` on a laptop.
 
 The tests drive the sandbox from five agent frameworks, each through its own
-sandbox interface, and check that the upstream saw the sandbox's identity.
+sandbox interface, and check that the upstream saw the sandbox's identity. The
+five are examples. Any framework that lets you plug in a sandbox works the same
+way: build a `SandboxClient` as shown below and hand it to the framework.
 
 - [How it works](#how-it-works)
 - [Files](#files)
@@ -232,9 +234,8 @@ Each test module also has one test that drives an LLM. It is skipped without
 
 ## Frameworks
 
-These five are the most used Python agent frameworks that define an interface
-for a sandbox to implement. Each section describes the interface, the code
-here, and the test.
+Each section describes the framework's sandbox interface, the code here, and
+the test.
 
 ### LangChain DeepAgents
 
