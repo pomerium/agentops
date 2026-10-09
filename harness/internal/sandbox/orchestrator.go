@@ -257,6 +257,7 @@ type Attachment struct {
 
 	forgotten atomic.Bool
 	spawned   atomic.Bool
+	attached  atomic.Bool
 	down      func(cause string)
 	downOnce  sync.Once
 	onDelayed func(waited time.Duration)
@@ -265,6 +266,8 @@ type Attachment struct {
 }
 
 func (a *Attachment) RunID() string { return a.runID }
+
+func (a *Attachment) Attached() bool { return a != nil && a.attached.Load() }
 
 func (a *Attachment) Forget() {
 	if a == nil || a.forgotten.Swap(true) {
@@ -307,6 +310,7 @@ func (o *Orchestrator) expect(runID string, seal agenticrun.Executor, podName st
 	linkOpts = append(linkOpts,
 		agentlink.WithOnAttached(
 			func(attempt uint32, agentRunning bool) {
+				att.attached.Store(true)
 				att.cancelGrace()
 				o.log.Info("sandbox attached", "run_id", runID, "pod", podName,
 					"attempt", attempt, "agent_running", agentRunning)

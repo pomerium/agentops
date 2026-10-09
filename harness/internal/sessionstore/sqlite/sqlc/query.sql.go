@@ -33,9 +33,9 @@ INSERT INTO sessions (
     id, client_id, conversation_ref,
     template_name, template_spec, initial_prompt, status,
     parent_session_id,
-    created_at, updated_at
+    created_at, updated_at, launched_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 `
 
@@ -50,6 +50,7 @@ type CreateSessionParams struct {
 	ParentSessionID string `json:"parent_session_id"`
 	CreatedAt       int64  `json:"created_at"`
 	UpdatedAt       int64  `json:"updated_at"`
+	LaunchedAt      int64  `json:"launched_at"`
 }
 
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) error {
@@ -64,6 +65,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 		arg.ParentSessionID,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.LaunchedAt,
 	)
 	return err
 }
@@ -130,7 +132,7 @@ func (q *Queries) FinishSession(ctx context.Context, arg FinishSessionParams) (i
 }
 
 const getLatestSessionByConversation = `-- name: GetLatestSessionByConversation :one
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq, launched_at FROM sessions
 WHERE client_id = ? AND conversation_ref = ?
 ORDER BY created_at DESC
 LIMIT 1
@@ -168,12 +170,13 @@ func (q *Queries) GetLatestSessionByConversation(ctx context.Context, arg GetLat
 		&i.Executor,
 		&i.StreamID,
 		&i.PodSeq,
+		&i.LaunchedAt,
 	)
 	return i, err
 }
 
 const getLiveSessionByConversation = `-- name: GetLiveSessionByConversation :one
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq, launched_at FROM sessions
 WHERE client_id = ? AND conversation_ref = ?
   AND status NOT IN ('ended', 'interrupted')
 ORDER BY created_at DESC
@@ -212,12 +215,13 @@ func (q *Queries) GetLiveSessionByConversation(ctx context.Context, arg GetLiveS
 		&i.Executor,
 		&i.StreamID,
 		&i.PodSeq,
+		&i.LaunchedAt,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq, launched_at FROM sessions
 WHERE id = ?
 `
 
@@ -248,6 +252,7 @@ func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
 		&i.Executor,
 		&i.StreamID,
 		&i.PodSeq,
+		&i.LaunchedAt,
 	)
 	return i, err
 }
@@ -279,7 +284,7 @@ func (q *Queries) InsertSessionEvent(ctx context.Context, arg InsertSessionEvent
 }
 
 const listActiveSessions = `-- name: ListActiveSessions :many
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq, launched_at FROM sessions
 WHERE status NOT IN ('ended', 'interrupted')
 ORDER BY created_at
 `
@@ -317,6 +322,7 @@ func (q *Queries) ListActiveSessions(ctx context.Context) ([]Session, error) {
 			&i.Executor,
 			&i.StreamID,
 			&i.PodSeq,
+			&i.LaunchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -332,7 +338,7 @@ func (q *Queries) ListActiveSessions(ctx context.Context) ([]Session, error) {
 }
 
 const listLiveSessionsByClient = `-- name: ListLiveSessionsByClient :many
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq, launched_at FROM sessions
 WHERE client_id = ? AND status NOT IN ('ended', 'interrupted') AND updated_at >= ?
 ORDER BY created_at DESC
 `
@@ -375,6 +381,7 @@ func (q *Queries) ListLiveSessionsByClient(ctx context.Context, arg ListLiveSess
 			&i.Executor,
 			&i.StreamID,
 			&i.PodSeq,
+			&i.LaunchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -468,7 +475,7 @@ func (q *Queries) ListSessionEvents(ctx context.Context, arg ListSessionEventsPa
 }
 
 const listSessionsByClient = `-- name: ListSessionsByClient :many
-SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq FROM sessions
+SELECT id, client_id, conversation_ref, template_name, template_spec, initial_prompt, sandbox_claim_name, sandbox_name, acp_session_id, status, run_id, approval_url, run_expires_at, approver_subject, parent_session_id, event_seq, turn_seq, suspended_at, created_at, updated_at, executor, stream_id, pod_seq, launched_at FROM sessions
 WHERE client_id = ? AND updated_at >= ?
 ORDER BY created_at DESC
 `
@@ -511,6 +518,7 @@ func (q *Queries) ListSessionsByClient(ctx context.Context, arg ListSessionsByCl
 			&i.Executor,
 			&i.StreamID,
 			&i.PodSeq,
+			&i.LaunchedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -615,6 +623,29 @@ type UpdateSessionApproverParams struct {
 
 func (q *Queries) UpdateSessionApprover(ctx context.Context, arg UpdateSessionApproverParams) error {
 	_, err := q.db.ExecContext(ctx, updateSessionApprover, arg.ApproverSubject, arg.UpdatedAt, arg.ID)
+	return err
+}
+
+const updateSessionLaunched = `-- name: UpdateSessionLaunched :exec
+UPDATE sessions
+SET status = ?, launched_at = ?, updated_at = ?
+WHERE id = ?
+`
+
+type UpdateSessionLaunchedParams struct {
+	Status     string `json:"status"`
+	LaunchedAt int64  `json:"launched_at"`
+	UpdatedAt  int64  `json:"updated_at"`
+	ID         string `json:"id"`
+}
+
+func (q *Queries) UpdateSessionLaunched(ctx context.Context, arg UpdateSessionLaunchedParams) error {
+	_, err := q.db.ExecContext(ctx, updateSessionLaunched,
+		arg.Status,
+		arg.LaunchedAt,
+		arg.UpdatedAt,
+		arg.ID,
+	)
 	return err
 }
 

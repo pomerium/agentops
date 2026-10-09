@@ -73,7 +73,7 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		s.endSession(ctx, sess.ID, from, api.EndLaunchFailed, "the session's agent template snapshot could not be read")
 		return
 	}
-	if !s.setState(ctx, sess.ID, from, api.StateLaunching, launchReason(opts.revive)) {
+	if !s.beginLaunch(ctx, sess.ID, from, launchReason(opts.revive)) {
 		s.failLaunch(ctx, sess, opts, o, "", api.EndLaunchFailed, unrecorded)
 		return
 	}
@@ -151,7 +151,7 @@ func (s *Service) launch(ctx context.Context, o *owner, sessionID string, opts l
 		ApprovalUrl: res.ApprovalURL, ExpiresAt: api.Timestamp(res.ExpiresAt),
 	}}})
 
-	go s.pollRun(ctx, cancel, sess.ID, res.RunID, outcome)
+	go s.pollRun(ctx, cancel, sess.ID, res.RunID, outcome, att.Attached)
 
 	b := s.activateAndRun(ctx, sess, opts, prepared, att, res.RunID, o)
 	registered = b != nil
@@ -345,6 +345,9 @@ type runOutcome struct {
 	reason api.EndReason
 
 	approved bool
+
+	delayedSince time.Time
+	stalled      bool
 }
 
 func (o *runOutcome) set(r api.EndReason) { o.mu.Lock(); o.reason = r; o.mu.Unlock() }
@@ -357,8 +360,20 @@ func (o *runOutcome) isApproved() bool {
 	return o.approved
 }
 
-func (s *Service) pollRun(ctx context.Context, cancel context.CancelFunc, sessionID, runID string, outcome *runOutcome) {
-	ticker := time.NewTicker(runPollInterval)
+func (o *runOutcome) markDelayed(since time.Time) { o.mu.Lock(); o.delayedSince = since; o.mu.Unlock() }
+
+func (o *runOutcome) stall() (time.Duration, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.approved || o.delayedSince.IsZero() || o.stalled {
+		return 0, false
+	}
+	o.stalled = true
+	return time.Since(o.delayedSince).Round(time.Second), true
+}
+
+func (s *Service) pollRun(ctx context.Context, cancel context.CancelFunc, sessionID, runID string, outcome *runOutcome, attached func() bool) {
+	ticker := time.NewTicker(s.cfg.runPollInterval)
 	defer ticker.Stop()
 	var storedExpiry time.Time
 	for {
@@ -395,6 +410,8 @@ func (s *Service) pollRun(ctx context.Context, cancel context.CancelFunc, sessio
 			return
 		case st.State == "approved" && !outcome.isApproved():
 			outcome.markApproved()
+		case st.State == "approved" && !attached():
+			s.reportStall(ctx, sessionID, runID, outcome)
 		}
 	}
 }
@@ -452,9 +469,18 @@ func (s *Service) recordApproverFromRun(ctx context.Context, sessionID, runID st
 }
 
 func (s *Service) reportAttachDelayed(ctx context.Context, sessionID, runID string, outcome *runOutcome, waited time.Duration) {
+	outcome.markDelayed(time.Now().Add(-waited))
 	if !outcome.isApproved() {
 		s.tel.Debug(ctx, "sandbox has not attached yet, but the run is not approved either",
 			"session", sessionID, "run_id", runID, "waited", waited.String())
+		return
+	}
+	s.reportStall(ctx, sessionID, runID, outcome)
+}
+
+func (s *Service) reportStall(ctx context.Context, sessionID, runID string, outcome *runOutcome) {
+	waited, ok := outcome.stall()
+	if !ok {
 		return
 	}
 	s.log.WarnContext(ctx, "run is approved but the sandbox has not connected to the agent link",

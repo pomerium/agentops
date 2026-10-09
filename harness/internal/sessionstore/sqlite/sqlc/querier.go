@@ -29,6 +29,7 @@ type Querier interface {
 	PutPodCommand(ctx context.Context, arg PutPodCommandParams) error
 	UpdateSessionACP(ctx context.Context, arg UpdateSessionACPParams) error
 	UpdateSessionApprover(ctx context.Context, arg UpdateSessionApproverParams) error
+	UpdateSessionLaunched(ctx context.Context, arg UpdateSessionLaunchedParams) error
 	UpdateSessionLink(ctx context.Context, arg UpdateSessionLinkParams) (int64, error)
 	UpdateSessionRun(ctx context.Context, arg UpdateSessionRunParams) error
 	UpdateSessionRunExpiry(ctx context.Context, arg UpdateSessionRunExpiryParams) error

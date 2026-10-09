@@ -1060,3 +1060,28 @@ func TestExpectFailureIsReported(t *testing.T) {
 		t.Fatal("Expect succeeded although the Agent Link refused")
 	}
 }
+
+func TestAnAttachmentKnowsWhenItsSandboxAttached(t *testing.T) {
+	link := newFakeAgentLink()
+	o := New(newFakeClaims(), testPods(), nil, link,
+		WithNamespace("ns"), WithHarnessRoute("https://harness.example.com"))
+	prepared, err := o.Prepare(context.Background(), LaunchSpec{SessionID: "s1", Template: testTemplate()})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	att, err := o.Expect("run-1", prepared)
+	if err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	if att.Attached() {
+		t.Error("an attachment reported its sandbox attached before it connected")
+	}
+	link.handle("run-1").opts.OnAttached(1, false)
+	if !att.Attached() {
+		t.Error("an attachment did not report its sandbox attached after it connected")
+	}
+	var none *Attachment
+	if none.Attached() {
+		t.Error("a missing attachment reported a sandbox attached")
+	}
+}

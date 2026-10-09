@@ -106,6 +106,7 @@ func sessionFromRow(r sqlcgen.Session) sessionstore.Session {
 		EventSeq:         r.EventSeq,
 		TurnSeq:          r.TurnSeq,
 		SuspendedAt:      fromUnix(r.SuspendedAt),
+		LaunchedAt:       fromUnix(r.LaunchedAt),
 		CreatedAt:        fromUnix(r.CreatedAt),
 		UpdatedAt:        fromUnix(r.UpdatedAt),
 		Executor:         r.Executor,
@@ -130,6 +131,7 @@ func (s *Store) CreateSession(ctx context.Context, sess sessionstore.Session) er
 		ParentSessionID: sess.ParentSessionID,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		LaunchedAt:      now,
 	})
 	if isUniqueViolation(err) {
 		return fmt.Errorf("%w: %v", sessionstore.ErrConflict, err)
@@ -210,6 +212,15 @@ func (s *Store) UpdateSessionSuspended(ctx context.Context, id string, status ap
 		SuspendedAt: toUnix(suspendedAt),
 		UpdatedAt:   time.Now().Unix(),
 		ID:          id,
+	})
+}
+
+func (s *Store) UpdateSessionLaunched(ctx context.Context, id string, status api.SessionState, launchedAt time.Time) error {
+	return s.q.UpdateSessionLaunched(ctx, sqlcgen.UpdateSessionLaunchedParams{
+		Status:     statusText(status),
+		LaunchedAt: toUnix(launchedAt),
+		UpdatedAt:  time.Now().Unix(),
+		ID:         id,
 	})
 }
 

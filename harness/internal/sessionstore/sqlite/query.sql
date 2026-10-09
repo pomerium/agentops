@@ -3,9 +3,9 @@ INSERT INTO sessions (
     id, client_id, conversation_ref,
     template_name, template_spec, initial_prompt, status,
     parent_session_id,
-    created_at, updated_at
+    created_at, updated_at, launched_at
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 );
 
 -- name: GetSession :one
@@ -63,6 +63,11 @@ WHERE id = ?;
 -- name: UpdateSessionSuspended :exec
 UPDATE sessions
 SET status = ?, suspended_at = ?, updated_at = ?
+WHERE id = ?;
+
+-- name: UpdateSessionLaunched :exec
+UPDATE sessions
+SET status = ?, launched_at = ?, updated_at = ?
 WHERE id = ?;
 
 -- name: ListActiveSessions :many

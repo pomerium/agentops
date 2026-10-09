@@ -95,7 +95,7 @@ func TestAnExitBeforeRegisterStopsTheLaunch(t *testing.T) {
 		t.Fatal("claim the launch")
 	}
 
-	svc.superviseLaunch(ctx, "s1", o)("agent_exited")
+	svc.superviseLaunch(ctx, "s1", o)("runner_lost")
 
 	if svc.register(o, readyBinding(svc, "s1")) {
 		t.Error("registered an agent that had already exited")

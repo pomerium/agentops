@@ -2,7 +2,6 @@ package sandbox_test
 
 import (
 	"testing"
-	"time"
 
 	v1alpha1 "github.com/pomerium/agentops/harness/apis/v1alpha1"
 	"github.com/pomerium/agentops/harness/internal/sandbox"
@@ -14,7 +13,6 @@ func TestBuildSandboxClaimCarriesNothingThatBlocksAdoption(t *testing.T) {
 			WarmPoolRef: v1alpha1.SandboxWarmPoolReference{Name: "pomerium-zero-claude-code"},
 		},
 	}
-	deadline := time.Now().Add(30 * time.Minute)
 	claim := sandbox.BuildSandboxClaim("agentops", sandbox.LaunchSpec{
 		SessionID:    "abc123",
 		Template:     wf,
@@ -22,7 +20,6 @@ func TestBuildSandboxClaimCarriesNothingThatBlocksAdoption(t *testing.T) {
 		Endpoints: []sandbox.ProxiedEndpoint{{
 			Name: "agno", ListenPort: 9100, UpstreamURL: "https://x.example.com",
 		}},
-		Deadline: deadline,
 	})
 
 	if claim.Namespace != "agentops" {
@@ -39,7 +36,7 @@ func TestBuildSandboxClaimCarriesNothingThatBlocksAdoption(t *testing.T) {
 		t.Errorf("claim carries %d volume claim templates; they forfeit adoption too",
 			len(claim.Spec.VolumeClaimTemplates))
 	}
-	if claim.Spec.Lifecycle == nil || claim.Spec.Lifecycle.ShutdownTime == nil {
-		t.Fatal("expected lifecycle shutdown time to be set from deadline")
+	if claim.Spec.Lifecycle != nil {
+		t.Errorf("claim carries a lifecycle %+v; the deadline is the Sandbox's lease, not the claim's", claim.Spec.Lifecycle)
 	}
 }

@@ -205,6 +205,7 @@ func testCreateSessionStoresCreationFieldsOnly(t *testing.T, open Opener) {
 		EventSeq:         9,
 		TurnSeq:          9,
 		SuspendedAt:      past,
+		LaunchedAt:       past,
 		CreatedAt:        past,
 		UpdatedAt:        past,
 	})
@@ -220,6 +221,7 @@ func testCreateSessionStoresCreationFieldsOnly(t *testing.T, open Opener) {
 		InitialPrompt:   "hello",
 		ParentSessionID: "parent",
 		Status:          api.StatePending,
+		LaunchedAt:      got.LaunchedAt,
 		CreatedAt:       got.CreatedAt,
 		UpdatedAt:       got.UpdatedAt,
 	}
@@ -231,6 +233,9 @@ func testCreateSessionStoresCreationFieldsOnly(t *testing.T, open Opener) {
 	}
 	if !got.UpdatedAt.Equal(got.CreatedAt) {
 		t.Errorf("UpdatedAt = %v, want CreatedAt %v", got.UpdatedAt, got.CreatedAt)
+	}
+	if !got.LaunchedAt.Equal(got.CreatedAt) {
+		t.Errorf("LaunchedAt = %v, want CreatedAt %v", got.LaunchedAt, got.CreatedAt)
 	}
 
 	create(t, s, sessionstore.Session{ID: "s2", ClientID: "client", ConversationRef: "conv2", Status: api.StateSuspended})
@@ -446,6 +451,12 @@ func testUpdatesChangeOnlyTheirFields(t *testing.T, open Opener) {
 			true,
 		},
 		{
+			"UpdateSessionLaunched",
+			func(id string) error { return s.UpdateSessionLaunched(ctx, id, api.StateLaunching, later) },
+			func(s *sessionstore.Session) { s.Status, s.LaunchedAt = api.StateLaunching, later },
+			true,
+		},
+		{
 			"NextTurnSeq",
 			func(id string) error { _, err := s.NextTurnSeq(ctx, id); return err },
 			func(s *sessionstore.Session) { s.TurnSeq++ },
@@ -527,18 +538,20 @@ func testSessionTimestampsAreSeconds(t *testing.T, open Opener) {
 	got := get(t, s, "s1")
 	assertSeconds(t, "CreatedAt", got.CreatedAt)
 	assertSeconds(t, "UpdatedAt", got.UpdatedAt)
+	assertSeconds(t, "LaunchedAt", got.LaunchedAt)
 	if !got.RunExpiresAt.IsZero() || !got.SuspendedAt.IsZero() {
 		t.Errorf("unset timestamps = %v, %v, want zero", got.RunExpiresAt, got.SuspendedAt)
 	}
 
 	must(t, s.UpdateSessionRun(ctx, "s1", "run", "url", at, api.StateAwaitingApproval))
+	must(t, s.UpdateSessionLaunched(ctx, "s1", api.StateLaunching, at))
 	must(t, s.UpdateSessionSuspended(ctx, "s1", api.StateSuspended, at))
 	got = get(t, s, "s1")
-	for name, v := range map[string]time.Time{"RunExpiresAt": got.RunExpiresAt, "SuspendedAt": got.SuspendedAt, "UpdatedAt": got.UpdatedAt} {
+	for name, v := range map[string]time.Time{"RunExpiresAt": got.RunExpiresAt, "SuspendedAt": got.SuspendedAt, "LaunchedAt": got.LaunchedAt, "UpdatedAt": got.UpdatedAt} {
 		assertSeconds(t, name, v)
 	}
-	if !got.RunExpiresAt.Equal(want) || !got.SuspendedAt.Equal(want) {
-		t.Errorf("RunExpiresAt, SuspendedAt = %v, %v, want %v", got.RunExpiresAt, got.SuspendedAt, want)
+	if !got.RunExpiresAt.Equal(want) || !got.SuspendedAt.Equal(want) || !got.LaunchedAt.Equal(want) {
+		t.Errorf("RunExpiresAt, SuspendedAt, LaunchedAt = %v, %v, %v, want %v", got.RunExpiresAt, got.SuspendedAt, got.LaunchedAt, want)
 	}
 
 	must(t, s.UpdateSessionRunExpiry(ctx, "s1", time.Time{}))
