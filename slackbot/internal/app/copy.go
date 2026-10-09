@@ -60,6 +60,8 @@ func statusLapsed(window time.Duration, workflow string) string {
 		"ask an admin rather than trying again.", humanMinutes(window), workflow)
 }
 
+const msgHintBareMention = ":information_source: Your session here is running. @mention me with what you want it to do."
+
 const msgHintLaunching = ":hourglass_flowing_sand: Not running yet — I'm still waiting for the approval (check your DMs). I won't see anything posted here before then."
 
 func approvalDMText(userID, workflow, threadLink string) string {

@@ -92,7 +92,9 @@ func TestParseMention(t *testing.T) {
 		{"<@U0BOT> deploy prod now", "U0BOT", "deploy prod now"},
 		{"<@U0BOT|the-bot> review", "U0BOT", "review"},
 		{"  <@U0BOT>   hello   ", "U0BOT", "hello"},
-		{"hey <@U0BOT> do it", "U0BOT", "do it"},
+		{"hey <@U0BOT> do it", "U0BOT", "hey do it"},
+		{"deploy it <@U0BOT>", "U0BOT", "deploy it"},
+		{"<@U0BOT> ask <@U0OTHER> about it", "U0BOT", "ask <@U0OTHER> about it"},
 		{"<@U0BOT>", "U0BOT", ""},
 		{"<@U0BOT> stuff", "", "stuff"},
 	}

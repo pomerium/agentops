@@ -220,6 +220,11 @@ func (a *App) handleThreadedMention(ctx context.Context, in gateway.MentionInvoc
 	if t := a.lookup(in.ChannelID, in.OriginThreadTS, in.TeamID, in.UserID); t != nil {
 		switch t.currentState() {
 		case api.StateRunning:
+			if strings.TrimSpace(in.Prompt) == "" {
+				a.hintInThread(ctx, in.ChannelID, in.OriginThreadTS, in.UserID,
+					slack.MsgOptionText(msgHintBareMention, false))
+				return
+			}
 			a.promptThread(ctx, t, in.Prompt, in.MessageTS, in.MessageTS)
 		case api.StateSuspended:
 			a.reviveThread(ctx, t, in, in.MessageTS)

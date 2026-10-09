@@ -588,3 +588,37 @@ func TestAFailedSessionLookupIsNotReportedAsAMissingAgent(t *testing.T) {
 		t.Errorf("a failed session lookup started %d sessions", n)
 	}
 }
+
+func TestAThreadedMentionAtTheEndKeepsTheRequest(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+
+	in := mentionIn(f, "U1", "deploy it <@UBOT>")
+	in.Prompt = gateway.ParseMention(in.Text, "UBOT")
+	f.app.HandleMention(context.Background(), in)
+
+	prompts := f.api.promptRequests()
+	if len(prompts) != 1 || prompts[0].Content != "deploy it" {
+		t.Fatalf("the owner's mention became %+v, want one turn with \"deploy it\"", prompts)
+	}
+}
+
+func TestABareMentionInARunningThreadSendsNoTurn(t *testing.T) {
+	f := newFixture(t)
+	liveThread(t, f)
+
+	in := mentionIn(f, "U1", "<@UBOT>")
+	in.Prompt = gateway.ParseMention(in.Text, "UBOT")
+	f.app.HandleMention(context.Background(), in)
+
+	if prompts := f.api.promptRequests(); len(prompts) != 0 {
+		t.Errorf("a bare mention became %+v, want no turn", prompts)
+	}
+	hints := f.poster.ephemeralTo("U1")
+	if len(hints) != 1 || !strings.Contains(hints[0].text, "with what you want") {
+		t.Errorf("a bare mention got hints %+v, want one that asks for the request", hints)
+	}
+	if posts := f.poster.postsContaining("couldn't send"); len(posts) != 0 {
+		t.Errorf("a bare mention was reported as a failed send: %+v", posts)
+	}
+}

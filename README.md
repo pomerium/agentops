@@ -93,8 +93,8 @@ kind; the `gstack` example agent checks out the second one.
    @bot roll out the latest api build
    ```
 
-   The channel decides which agent runs. The text after the mention is the
-   prompt. The bot reacts to your message with :hourglass_flowing_sand: while it
+   The channel decides which agent runs. Your message without the mention is
+   the prompt. The bot reacts to your message with :hourglass_flowing_sand: while it
    prepares the session, and changes the reaction to :rocket: when the agent is
    ready or to :x: if the launch failed. One status message in the thread shows
    the state of the session.
