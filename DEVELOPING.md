@@ -143,6 +143,7 @@ the workspace fails.
 | `make build` | `go build ./...` in each module. |
 | `make test` | `go test ./...` in each module. The e2e suite does not run (see [End-to-end tests](#end-to-end-tests)). |
 | `make vet` | `go vet ./...` in each module. |
+| `make fmt-check` | Fails if a Go file in either module is not `gofmt`-clean. |
 | `make boundary` | Fails if the Slack bot depends on a package under `harness/` outside `harness/api` (see [Two modules](#two-modules)). |
 | `make telemetry-in-sync` | Fails if the two copies of the telemetry package differ. |
 | `make generate` | Regenerates deepcopy methods and CRDs, the sqlc bindings, the Go protobuf code, both SDKs, and the chart's CRD copy. |
@@ -166,7 +167,7 @@ the workspace fails.
 `HARNESS_IMAGE`, `SLACKBOT_IMAGE`, `SIDECAR_IMAGE` and `AGENT_IMAGE` override the
 image tags.
 
-CI runs `vet`, `boundary`, `telemetry-in-sync`, `proto-check`, `build` and
+CI runs `fmt-check`, `vet`, `boundary`, `telemetry-in-sync`, `proto-check`, `build` and
 `test` in one job, and `sdk-generate-check`, `sdk-test-ts` and `sdk-test-py` in
 another. A separate workflow runs `helm-lint`, `helm-template` (also with
 persistence off) and `helm-check-client-isolation`.

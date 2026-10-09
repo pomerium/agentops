@@ -934,10 +934,10 @@ subscription and ignores `app_mention` events.
 
 GitHub Actions workflows in [`.github/workflows`](./.github/workflows):
 
-- **`test.yaml`**, on pushes to `main` and on pull requests: `make vet`,
-  `make boundary`, `make telemetry-in-sync`, `make proto-check`, `make build`
-  and `make test` (without the opt-in e2e suite), and the SDK checks
-  (`make sdk-generate-check`, `make sdk-test-ts`, `make sdk-test-py`).
+- **`test.yaml`**, on pushes to `main` and on pull requests: `make fmt-check`,
+  `make vet`, `make boundary`, `make telemetry-in-sync`, `make proto-check`,
+  `make build` and `make test` (without the opt-in e2e suite), and the SDK
+  checks (`make sdk-generate-check`, `make sdk-test-ts`, `make sdk-test-py`).
 - **`docker.yaml`** builds `pomerium/agentops`, `pomerium/agentops-slackbot`
   and `pomerium/agentops-sidecar`. Pull requests build `linux/amd64` only and
   push nothing. Pushes to `main` publish `:main` and `:git-<sha8>` for

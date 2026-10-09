@@ -41,7 +41,9 @@ func WithOnError(f func(reason string, cause error)) ExpectOption {
 
 func WithStreamID(id []byte) ExpectOption { return func(o *ExpectCallbacks) { o.StreamID = id } }
 
-func WithResumeAfter(seq uint64) ExpectOption { return func(o *ExpectCallbacks) { o.ResumeAfter = seq } }
+func WithResumeAfter(seq uint64) ExpectOption {
+	return func(o *ExpectCallbacks) { o.ResumeAfter = seq }
+}
 
 func newExpectCallbacks(opts []ExpectOption) ExpectCallbacks {
 	var o ExpectCallbacks
