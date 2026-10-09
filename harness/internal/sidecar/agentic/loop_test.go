@@ -252,6 +252,53 @@ func TestLoop_TokenLifetimeCountsFromPollStart(t *testing.T) {
 	assert.Equal(t, expiresAt, now, "the lifetime starts when the exchange was sent, not when it answered")
 }
 
+func TestLoop_RotationSleepStopsAtTokenExpiry(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		exchange  time.Duration
+		wantSlept []time.Duration
+		wantEnd   time.Duration
+	}{
+		{"answered with time left", 5500 * time.Millisecond, []time.Duration{500 * time.Millisecond}, 6 * time.Second},
+		{"answered after the lifetime", 7 * time.Second, []time.Duration{0}, 7 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			start := time.Unix(1000, 0)
+			now := start
+			polls := 0
+			poll := pollFunc(func(context.Context) PollResult {
+				polls++
+				if polls == 1 {
+					now = now.Add(tc.exchange)
+					return PollResult{Kind: PollOk, Token: tok("Bearer pom_art_1", 6*time.Second)}
+				}
+				return PollResult{Kind: PollRetryable, Err: errors.New("token exchange unavailable (503)")}
+			})
+			var slept []time.Duration
+			loop := NewLoop(LoopConfig{
+				Poll: poll,
+				Sink: func(*Token) error { return nil },
+				Now:  func() time.Time { return now },
+				Sleep: func(ctx context.Context, d time.Duration) error {
+					slept = append(slept, d)
+					now = now.Add(d)
+					return ctx.Err()
+				},
+			})
+
+			err := loop.Run(context.Background())
+			var te *TerminalError
+			require.ErrorAs(t, err, &te)
+			assert.Equal(t, ReasonASUnreachable, te.Reason)
+			assert.Equal(t, tc.wantSlept, slept, "a slow exchange must not push the next one past the new token's expiry")
+			assert.Equal(t, start.Add(tc.wantEnd), now)
+		})
+	}
+}
+
 func TestLoop_PollIsBoundedByHeldTokenLifetime(t *testing.T) {
 	t.Parallel()
 	var deadline time.Time
