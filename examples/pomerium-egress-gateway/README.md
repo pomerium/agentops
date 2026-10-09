@@ -12,10 +12,14 @@ The agent reaches the sandbox the same way. The sandbox-router is behind a
 Pomerium route that accepts the agent's ServiceAccount token: a projected token
 in the cluster, or a token minted with `kubectl create token` on a laptop.
 
-The tests drive the sandbox from five agent frameworks, each through its own
-sandbox interface, and check that the upstream saw the sandbox's identity. The
-five are examples. Any framework that lets you plug in a sandbox works the same
-way: build a `SandboxClient` as shown below and hand it to the framework.
+The tests show the same thing from a few agent frameworks:
+[LangChain DeepAgents](#langchain-deepagents), the
+[OpenAI Agents SDK](#openai-agents-sdk), [smolagents](#smolagents),
+[Google ADK](#google-adk) and [Pydantic AI](#pydantic-ai). Each one runs code in
+the sandbox through its own sandbox interface and checks that the upstream saw
+the sandbox's identity. Nothing here is specific to them, or to Python. The
+sandbox is reached over HTTP with a Bearer token and the agent-sandbox SDK or
+its Go client, so a framework in another language plugs in the same way.
 
 - [How it works](#how-it-works)
 - [Files](#files)
