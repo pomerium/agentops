@@ -50,8 +50,9 @@ token. The sandbox's request carries the pod's. Each is a JWT signed by the
 cluster, and Pomerium verifies it against the cluster's OIDC discovery
 endpoint, the same way it would verify a login from an identity provider. A
 route's policy then matches the token's claims: audience, namespace, and
-ServiceAccount name. Open-source Pomerium does all of this; the routes only
-set `bearer_token_format: jwt`.
+ServiceAccount name. Open-source Pomerium does all of this. Each route sets
+`bearer_token_format: jwt`, names the identity provider that issued the token,
+and carries its policy as annotations.
 
 The sidecar is a small HTTP proxy, `pomerium/agentops-sidecar` from
 [pomerium/agentops](https://github.com/pomerium/agentops), started as
