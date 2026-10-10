@@ -80,7 +80,6 @@ Pomerium needs no agentic features for this. The routes use
 | [`router/`](router) | The Pomerium route in front of the sandbox-router. |
 | [`agent/`](agent) | The agent's ServiceAccount and RBAC, and a Job that runs the SDK test in the cluster with a projected token. |
 | [`python/`](python) | The SDK helper, adapters for smolagents, ADK and Pydantic AI, and the tests. DeepAgents and the OpenAI Agents SDK use integrations that agent-sandbox already ships. |
-| [`overlays/orbstack/`](overlays/orbstack) | The overlay the tests ran on: a local OrbStack cluster with the agentops quickstart. Hosts, namespaces, the mkcert CA, and a Makefile. |
 
 ## Prerequisites
 
@@ -219,19 +218,28 @@ print(urllib.request.urlopen("http://127.0.0.1:9000/json", timeout=15).read().de
 the sandbox's ServiceAccount, via the identity provider `cluster`. One more test
 checks that a direct connection to the outside fails.
 
-With the OrbStack overlay (see its [Makefile](overlays/orbstack/Makefile)):
+The tests read their settings from the environment:
 
-```sh
-cd overlays/orbstack
-make deploy          # the overlay, with the mkcert CA and the local image
-make test-local      # every framework, one uv environment each
-make test-in-cluster # the SDK test as a Job, with a projected token
-```
+| Variable | Meaning |
+|---|---|
+| `SANDBOX_API_URL` | The Pomerium route in front of the sandbox-router. |
+| `POMERIUM_TOKEN` or `POMERIUM_TOKEN_FILE` | The Bearer, or the file that holds it. |
+| `POMERIUM_CA_CERT` | The CA bundle, if Pomerium presents a private CA. |
+| `SANDBOX_NAMESPACE`, `SANDBOX_WARMPOOL` | Where claims go and which pool serves them. Default `sandbox-egress`, `python-egress`. |
 
 The frameworks need different versions of the `openai` package, so
 [`python/pyproject.toml`](python/pyproject.toml) declares them as mutually
 exclusive extras, and `uv run --extra <framework>` builds an environment for
-one framework at a time.
+one framework at a time:
+
+```sh
+cd python
+uv run --extra test pytest tests/test_sdk.py
+uv run --extra test --extra pydantic-ai pytest tests/test_pydantic_ai.py
+```
+
+[`agent/job.yaml`](agent/job.yaml) runs the SDK test in the cluster, with the
+projected token as the Bearer.
 
 Each test module also has one test that drives an LLM. It is skipped without
 `ANTHROPIC_API_KEY` (`OPENAI_API_KEY` for the OpenAI Agents SDK).
