@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="962" viewBox="0 0 840 962" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f2328"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill: #ffffff; stroke: #57606a; stroke-width: 1.2; rx: 4; }
+    .pomerium { fill: #ddf4ff; stroke: #0969da; }
+    .group { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1; stroke-dasharray: 5 3; rx: 6; }
+    .title { fill: #1f2328; font-weight: 600; text-anchor: middle; }
+    .sub { fill: #57606a; font-size: 12; text-anchor: middle; }
+    .label { fill: #1f2328; font-size: 12; }
+    .step { fill: #ffffff; font-size: 11; font-weight: 700; text-anchor: middle; }
+    .flow { stroke: #1f2328; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+    .side { stroke: #8c959f; stroke-width: 1.2; fill: none; stroke-dasharray: 4 3; }
+    .sidelabel { fill: #57606a; font-size: 12; }
+  </style>
+  <rect width="840" height="962" fill="#ffffff"/>
+  <rect class="group" x="220" y="16" width="360" height="172"/>
+  <text class="sub" x="400" y="36" font-weight="600" fill="#1f2328">agent, on a laptop or in a pod</text>
+  <rect class="group" x="220" y="486" width="360" height="218"/>
+  <text class="sub" x="400" y="506" font-weight="600" fill="#1f2328">Sandbox pod, ServiceAccount sandbox-egress</text>
+  <text class="sub" x="400" y="522">network policy: DNS and Pomerium only</text>
+  <rect class="box" x="240" y="48" width="320" height="66"/>
+  <text class="title" x="400" y="68">agent framework</text>
+  <text class="sub" x="400" y="86">DeepAgents, OpenAI Agents, smolagents,</text>
+  <text class="sub" x="400" y="104">ADK, Pydantic AI, or your own</text>
+  <path class="flow" d="M 400 114 L 400 128"/>
+  <rect class="box" x="240" y="128" width="320" height="48"/>
+  <text class="title" x="400" y="148">agent-sandbox SDK, Direct mode</text>
+  <text class="sub" x="400" y="166">adds Authorization: Bearer with the agent's token</text>
+  <path class="flow" d="M 400 188 L 400 252"/>
+  <circle cx="400" cy="220" r="9" fill="#1f2328"/><text class="step" x="400" y="224">1</text>
+  <text class="label" x="416" y="216">https://sandbox.example.com</text>
+  <text class="label" x="416" y="232">Bearer: the agent's token</text>
+  <rect class="box pomerium" x="220" y="252" width="360" height="48"/>
+  <text class="title" x="400" y="272">Pomerium, route sandbox.example.com</text>
+  <text class="sub" x="400" y="290">verifies the JWT, allows only ServiceAccount agent</text>
+  <path class="flow" d="M 400 300 L 400 364"/>
+  <circle cx="400" cy="332" r="9" fill="#1f2328"/><text class="step" x="400" y="336">2</text>
+  <text class="label" x="416" y="336">X-Sandbox-ID names the Sandbox</text>
+  <rect class="box" x="220" y="364" width="360" height="48"/>
+  <text class="title" x="400" y="384">sandbox-router</text>
+  <text class="sub" x="400" y="402">forwards to that Sandbox's pod</text>
+  <path class="flow" d="M 400 412 L 400 486"/>
+  <circle cx="400" cy="449" r="9" fill="#1f2328"/><text class="step" x="400" y="453">3</text>
+  <text class="label" x="416" y="453">POST /execute</text>
+  <rect class="box" x="240" y="534" width="320" height="48"/>
+  <text class="title" x="400" y="554">python-runtime :8888</text>
+  <text class="sub" x="400" y="572">runs the code the agent sent</text>
+  <path class="flow" d="M 400 582 L 400 626"/>
+  <circle cx="400" cy="604" r="9" fill="#1f2328"/><text class="step" x="400" y="608">4</text>
+  <text class="label" x="416" y="608">http://127.0.0.1:9000, no credential</text>
+  <rect class="box" x="240" y="626" width="320" height="66"/>
+  <text class="title" x="400" y="646">sidecar, loopback :9000</text>
+  <text class="sub" x="400" y="664">adds the pod's projected token,</text>
+  <text class="sub" x="400" y="682">one port per upstream</text>
+  <path class="flow" d="M 400 704 L 400 768"/>
+  <circle cx="400" cy="736" r="9" fill="#1f2328"/><text class="step" x="400" y="740">5</text>
+  <text class="label" x="416" y="732">https://verify.example.com</text>
+  <text class="label" x="416" y="748">Bearer: the pod's projected token</text>
+  <rect class="box pomerium" x="220" y="768" width="360" height="48"/>
+  <text class="title" x="400" y="788">Pomerium, route verify.example.com</text>
+  <text class="sub" x="400" y="806">verifies the JWT, allows ServiceAccount sandbox-egress</text>
+  <path class="flow" d="M 400 816 L 400 880"/>
+  <circle cx="400" cy="848" r="9" fill="#1f2328"/><text class="step" x="400" y="852">6</text>
+  <text class="label" x="416" y="844">Authorization removed</text>
+  <text class="label" x="416" y="860">X-Pomerium-Jwt-Assertion names the pod</text>
+  <rect class="box" x="220" y="880" width="360" height="66"/>
+  <text class="title" x="400" y="900">your upstream</text>
+  <text class="sub" x="400" y="918">pomerium/verify in the tests;</text>
+  <text class="sub" x="400" y="936">it echoes the identity it saw</text>
+  <rect class="box" x="16" y="365" width="150" height="46"/>
+  <text class="title" x="91" y="385">kube-apiserver</text>
+  <text class="sub" x="91" y="403">issues both tokens</text>
+  <path class="side" d="M 91 365 L 91 152 L 240 152"/>
+  <text class="sidelabel" x="99" y="124">SandboxClaim,</text>
+  <text class="sidelabel" x="99" y="140">agent's token</text>
+  <path class="side" d="M 91 411 L 91 659 L 240 659"/>
+  <text class="sidelabel" x="99" y="607">projected token,</text>
+  <text class="sidelabel" x="99" y="623">audience</text>
+  <text class="sidelabel" x="99" y="639">pomerium-egress</text>
+</svg>

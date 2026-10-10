@@ -1,16 +1,19 @@
 # Sandbox with an egress gateway
 
-This example runs an agent-sandbox Sandbox whose outbound traffic goes through
-Pomerium. The pod's network policy allows DNS and Pomerium and nothing else. A
-sidecar in the pod listens on loopback ports and forwards each one to a Pomerium
-route, adding the pod's projected ServiceAccount token as a Bearer. Pomerium
-checks the token as a Kubernetes JWT, applies a policy that names the
-ServiceAccount, and forwards the request. Code in the sandbox talks to
-`http://127.0.0.1:9000` and never sees a credential.
+This example runs an
+[agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) Sandbox whose
+outbound traffic goes through [Pomerium](https://www.pomerium.com), an
+identity-aware proxy. The pod's network policy allows DNS and Pomerium and
+nothing else. A sidecar in the pod listens on loopback ports and forwards each
+one to a Pomerium route, adding the pod's projected ServiceAccount token as a
+Bearer. Pomerium verifies the token as a Kubernetes JWT, applies a policy that
+names the ServiceAccount, and forwards the request. Code in the sandbox talks
+to `http://127.0.0.1:9000` and never sees a credential.
 
-The agent reaches the sandbox the same way. The sandbox-router is behind a
-Pomerium route that accepts the agent's ServiceAccount token: a projected token
-in the cluster, or a token minted with `kubectl create token` on a laptop.
+The agent reaches the sandbox the same way. agent-sandbox's sandbox-router is
+behind a Pomerium route that accepts the agent's ServiceAccount token: a
+projected token in the cluster, or a token minted with `kubectl create token`
+on a laptop.
 
 The tests show the same thing from a few agent frameworks:
 [LangChain DeepAgents](#langchain-deepagents), the
@@ -39,37 +42,27 @@ its Go client, so a framework in another language plugs in the same way.
 
 ## How it works
 
-```mermaid
-flowchart LR
-  subgraph agent["agent (laptop or pod)"]
-    FW["framework<br/>(DeepAgents, OpenAI Agents, smolagents, ADK, Pydantic AI)"]
-    SDK["k8s-agent-sandbox SDK<br/>Direct mode + Bearer"]
-    FW --> SDK
-  end
-  SDK -->|"https://sandbox.example.com<br/>Bearer: agent's SA token"| P1["Pomerium<br/>route: sandbox"]
-  P1 -->|"X-Sandbox-ID"| R["sandbox-router"]
-  R --> RT
-  subgraph pod["Sandbox pod (SA sandbox-egress)"]
-    RT["python-runtime :8888"]
-    SC["sidecar<br/>serve workload-identity"]
-    RT -->|"http://127.0.0.1:9000"| SC
-  end
-  SC -->|"https://verify.example.com<br/>Bearer: pod's projected token"| P2["Pomerium<br/>route: verify"]
-  P2 --> V["pomerium/verify<br/>(your upstream)"]
-  K["kube-apiserver"] -. "SandboxClaim" .- SDK
-```
+![The agent's request passes Pomerium and the sandbox-router to reach the sandbox pod. Code in the pod calls the sidecar on loopback, and the sidecar passes Pomerium with the pod's projected token to reach the upstream.](how-it-works.svg)
 
-The sidecar is `pomerium/agentops-sidecar` from
+Two things are checked twice: who is calling, and whether that caller may
+reach this route. The agent's request carries the agent's ServiceAccount
+token. The sandbox's request carries the pod's. Each is a JWT signed by the
+cluster, and Pomerium verifies it against the cluster's OIDC discovery
+endpoint, the same way it would verify a login from an identity provider. A
+route's policy then matches the token's claims: audience, namespace, and
+ServiceAccount name. Open-source Pomerium does all of this. Each route sets
+`bearer_token_format: jwt`, names the identity provider that issued the token,
+and carries its policy as annotations.
+
+The sidecar is a small HTTP proxy, `pomerium/agentops-sidecar` from
 [pomerium/agentops](https://github.com/pomerium/agentops), started as
-`sidecar serve workload-identity`. In this mode it does not need the agentops
-platform. It needs a projected token, a CA, and one group of
-`SIDECAR_HTTP_<NAME>_*` variables per upstream. The agentops kustomize Component
-adds the sidecar to any SandboxTemplate annotated
-`agents.pomerium.com/inject: "workload"`, along with the token volume,
-`automountServiceAccountToken: false`, and the network policy.
-
-Pomerium needs no agentic features for this. The routes use
-`bearer_token_format: jwt`, which core Pomerium supports.
+`sidecar serve workload-identity`. Each group of `SIDECAR_HTTP_<NAME>_*`
+variables opens one loopback port and names the upstream behind it. The
+sidecar reads the pod's projected token from a file and adds it to every
+request it forwards. A kustomize Component from the same repo adds the sidecar
+to any SandboxTemplate annotated `agents.pomerium.com/inject: "workload"`,
+along with the token volume, `automountServiceAccountToken: false`, and the
+network policy.
 
 ## Files
 
@@ -116,10 +109,11 @@ Pomerium needs no agentic features for this. The routes use
 
 ## The egress route
 
-[`sandbox/sandbox-template.yaml`](sandbox/sandbox-template.yaml) is a plain
-template for the python-runtime image plus the annotation.
-[`sandbox/sidecar-endpoints.yaml`](sandbox/sidecar-endpoints.yaml) is a
-name-keyed patch on the sidecar's environment:
+[`sandbox/sandbox-template.yaml`](sandbox/sandbox-template.yaml) is an
+ordinary SandboxTemplate for the python-runtime image, with the
+`agents.pomerium.com/inject` annotation added.
+[`sandbox/sidecar-endpoints.yaml`](sandbox/sidecar-endpoints.yaml) patches the
+sidecar's environment; kustomize merges the entries by name:
 
 ```yaml
 - {name: SIDECAR_HTTP_VERIFY_PORT, value: "9000"}
@@ -129,14 +123,15 @@ name-keyed patch on the sidecar's environment:
 ```
 
 Each upstream is one such group on its own port; for example
-`SIDECAR_HTTP_ANTHROPIC_*` on 9999. `DIAL_ADDRESS` is the in-cluster Pomerium
-Service. TLS SNI and the `Host` header still come from the URL, so the public
-host does not have to resolve inside the pod.
+`SIDECAR_HTTP_ANTHROPIC_*` on 9999. The sidecar connects to `DIAL_ADDRESS`,
+the Pomerium Service inside the cluster, but takes the TLS server name and the
+`Host` header from the URL, so the public host does not have to resolve inside
+the pod.
 
 [`sandbox/route-verify.yaml`](sandbox/route-verify.yaml) is the route. It
 accepts the pod's token as a JWT, allows only the sandbox's ServiceAccount with
-the egress audience, and removes the token before forwarding. Pomerium passes a
-verified Bearer on to the upstream unless the route removes it.
+the egress audience, and removes the token before forwarding. Without that last
+annotation Pomerium would pass the verified token on to the upstream.
 
 ```yaml
 ingress.pomerium.io/bearer_token_format: jwt
@@ -150,9 +145,9 @@ ingress.pomerium.io/policy: |
       - claim/kubernetes.io.serviceaccount.name: sandbox-egress
 ```
 
-Anyone who can run a pod as `sandbox-egress` gets this egress, so RBAC on that
-ServiceAccount decides who can. A pool with a different ServiceAccount gets
-different routes.
+Any pod that runs as `sandbox-egress` gets this egress, so RBAC over that
+ServiceAccount decides who gets it. A pool with a different ServiceAccount can
+have different routes.
 
 ## The sandbox route
 
@@ -316,8 +311,8 @@ order, and writes each result as JSON. `final_answer` and errors are reported
 the way the E2B executor reports them.
 
 smolagents asks the executor to pip-install each tool's requirements. The
-sandbox has no route to a package index, so the executor keeps packages the
-image already has and logs the rest. The `final_answer` tool imports `PIL` at
+sandbox has no route to a package index, so the executor checks that each
+package imports and logs the ones that do not. The `final_answer` tool imports `PIL` at
 module level, which is why the image includes `pillow`.
 
 ```python
