@@ -60,7 +60,7 @@ docs/
 dist/            # compiled output (ES modules)
 ```
 
-Config files (`vite.config.ts`, `tsconfig.json`, `mise.toml`, `Dockerfile`) live at the root of this example. `vite.config.ts` holds the Vite build plus the Oxlint (`lint`) and Oxfmt (`fmt`) settings. Vendored anti-slop Oxlint rules live in `tools/oxlint/anti-slop/`.
+Config files (`vite.config.ts`, `tsconfig.json`, `mise.toml`, `Dockerfile`) live at the root of this example. `vite.config.ts` holds the Vite build plus the Oxlint (`lint`) and Oxfmt (`fmt`) settings.
 
 ## Architecture
 
@@ -101,7 +101,7 @@ Defined and validated in `src/config.ts`:
 
 - TypeScript with ES module syntax (`import`/`export`)
 - Oxfmt, configured in the `fmt` block of `vite.config.ts`, with Prettier-compatible defaults: 2-space indent, double quotes, trailing commas
-- Oxlint, configured in the `lint` block of `vite.config.ts`, with the TypeScript plugin and vendored anti-slop rules — `any` is discouraged (warn). Test files import Vitest from `vite-plus/test`
+- Oxlint, configured in the `lint` block of `vite.config.ts`, with the TypeScript plugin — `any` is discouraged (warn). Test files import Vitest from `vite-plus/test`
 - Private class methods use `#` prefix
 - Intentionally unused params/vars: prefix with `_`
 - `camelCase` for functions/variables, `PascalCase` for types

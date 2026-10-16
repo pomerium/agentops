@@ -222,7 +222,7 @@ server and sign in through Pomerium.
 npm run dev          # watch mode
 npm run build        # typecheck, then bundle to dist/index.js
 npm test             # Vitest
-npm run lint         # Oxlint, with the vendored rules in tools/oxlint/anti-slop
+npm run lint         # Oxlint
 npm run format       # Oxfmt
 ```
 
