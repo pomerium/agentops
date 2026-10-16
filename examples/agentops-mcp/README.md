@@ -252,7 +252,7 @@ only from the repository root, so none of them run inside pomerium/agentops.
 | [`ci.yml`](.github/workflows/ci.yml) | Lint, format check, tests, build, Agent Skill validation and a Docker build, on pushes and PRs to `main` |
 | [`validate-commits.yml`](.github/workflows/validate-commits.yml) | Checks PR commits against [`.commitlintrc.json`](.commitlintrc.json) (Conventional Commits) |
 | [`release.yml`](.github/workflows/release.yml) | On `main`, tests and builds, then semantic-release ([`.releaserc.json`](.releaserc.json)) tags a version and creates a GitHub release |
-| [`publish-image.yml`](.github/workflows/publish-image.yml) | After a release, builds and pushes the image to `ghcr.io/<owner>/<repo>`; tags come from [`scripts/determine-image-tags.mts`](scripts/determine-image-tags.mts) |
+| [`publish-image.yml`](.github/workflows/publish-image.yml) | After a release, builds and pushes the image to `ghcr.io/<owner>/<repo>` (`sha-<commit>`, the release version, and `latest`) |
 
 The image runs on any cluster that can pull from GHCR; point
 `deploy/agentops-mcp.yaml` at it and drop `imagePullPolicy: Never`.

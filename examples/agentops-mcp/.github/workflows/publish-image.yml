@@ -37,11 +37,6 @@ jobs:
             ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha ||
             (inputs.version != '' && format('v{0}', inputs.version) || github.ref) }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24.x
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -52,35 +47,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine image tags
-        id: tags
+      # The checked-out commit, not github.sha: on workflow_run that is main's
+      # tip. semantic-release tags the commit it released (vX.Y.Z).
+      - name: Read commit and release version
+        id: version
         env:
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || '' }}
           VERSION_INPUT: ${{ inputs.version }}
-        run: node scripts/determine-image-tags.mts
+        run: |
+          set -euo pipefail
+          version="${VERSION_INPUT:-$(git tag --points-at HEAD --list 'v*' | head -n1 | sed 's/^v//')}"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=true
+          tags: |
+            type=raw,value=sha-${{ steps.version.outputs.sha }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version != '' }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.version.outputs.sha }}
 
       - name: Build and push image
-        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.tags.outputs.source_sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-
-      - name: Update latest tag
-        if: steps.tags.outputs.update_latest == 'true'
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          tip="$(git rev-parse origin/main)"
-          if [ "$tip" != "${{ steps.tags.outputs.source_sha }}" ]; then
-            echo "main is ${tip}; leaving ${IMAGE}:latest unchanged"
-            exit 0
-          fi
-          docker buildx imagetools create \
-            --tag "${IMAGE}:latest" \
-            "${IMAGE}@${{ steps.push.outputs.digest }}"
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
