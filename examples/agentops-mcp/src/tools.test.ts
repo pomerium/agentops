@@ -19,7 +19,13 @@ import {
   type TemplateSummary,
 } from "./harness.ts";
 import { userFromHeaders } from "./identity.ts";
-import { registerTools, signState, verifyState } from "./tools.ts";
+import {
+  registerTools,
+  signState,
+  verifyState,
+  type RunEvents,
+  type ToolDeps,
+} from "./tools.ts";
 import { registerTasks, TASKS_EXTENSION, TaskStore } from "./tasks.ts";
 
 const PROTOCOL = "2026-07-28";
@@ -152,13 +158,24 @@ type TaskServer = {
  * A raw-JSON-RPC client for the task flow: the SDK Client cannot consume
  * `resultType: "task"`, so these tests send the requests directly.
  */
-function setupTaskServer(harness: HarnessClient): TaskServer {
+function setupTaskServer(
+  harness: HarnessClient,
+  events?: RunEvents,
+): TaskServer {
   const store = new TaskStore();
 
   const handler = createMcpHandler(() => {
     const server = new McpServer({ name: "test-server", version: "0.0.0" });
     registerTasks(server, store);
-    registerTools(server, { harness: () => harness, store, template: "hello" });
+
+    const deps: ToolDeps = {
+      harness: () => harness,
+      store,
+      template: "hello",
+    };
+
+    if (events) deps.events = () => events;
+    registerTools(server, deps);
 
     return server;
   });
@@ -600,6 +617,43 @@ describe("launch_hello_demo as a task", () => {
   });
 });
 
+describe("launch_hello_demo with MCP Events first", () => {
+  const subscribed: RunEvents = { covers: () => true };
+
+  it("prefers events over the tasks extension when the user subscribed", async () => {
+    const server = setupTaskServer(
+      fakeHarness(LAUNCH_EVENTS).client,
+      subscribed,
+    );
+
+    const reply = await server.rpc(
+      "tools/call",
+      { name: "launch_hello_demo", arguments: {} },
+      { name: "launch_hello_demo", user: "alice@example.com" },
+    );
+
+    expect(reply.error).toBeUndefined();
+    expect(reply.result?.resultType).not.toBe("task");
+    expect(reply.result?.structuredContent).toMatchObject({
+      delivery: "events",
+      status: "input_required",
+      approvalUrl: APPROVAL_URL,
+    });
+    expect(JSON.stringify(reply.result?.content)).toContain("run.finished");
+    expect(JSON.stringify(reply.result?.content)).toContain(
+      "No need to call get_run_status",
+    );
+  }, 20_000);
+
+  it("falls back to a task when no subscription covers the run", async () => {
+    const server = setupTaskServer(fakeHarness(LAUNCH_EVENTS).client, {
+      covers: () => false,
+    });
+
+    await launch(server, { user: "alice@example.com" });
+  });
+});
+
 describe("launch_hello_demo over MRTR (no tasks extension)", () => {
   it("asks for approval by URL and resolves with the answer after accept", async () => {
     const fake = fakeHarness(LAUNCH_EVENTS);
@@ -652,6 +706,29 @@ describe("launch_hello_demo over MRTR (no tasks extension)", () => {
         (ids) => ids.length > 0,
       ),
     ).toEqual([SESSION_ID]);
+  }, 20_000);
+
+  // A client that dismissed or couldn't show the prompt answers `cancel`:
+  // the run must survive and the link must reach the user as plain text.
+  it("keeps the run and returns the link when the prompt is cancelled", async () => {
+    const fake = fakeHarness(LAUNCH_EVENTS);
+    const { client } = await connectModernClient(fake);
+    client.setRequestHandler(
+      "elicitation/create",
+      async (): Promise<ElicitResult> => ({ action: "cancel" }),
+    );
+
+    const result = await client.callTool({
+      name: "launch_hello_demo",
+      arguments: {},
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      status: "input_required",
+      approvalUrl: APPROVAL_URL,
+    });
+    expect(fake.endSessions).toEqual([]);
   }, 20_000);
 });
 
@@ -883,105 +960,50 @@ describe("list_pending_approvals", () => {
 });
 
 describe("launch_hello_demo with form-only elicitation (ChatGPT)", () => {
-  // What ChatGPT declares: `elicitation: {}` (form mode), no URL mode, no tasks.
+  // What ChatGPT declares: `elicitation: {}` (form mode), no URL mode, no
+  // tasks. It gets the plain link, never a form: dots draw forms ~1px wide.
   const form: RpcOptions = {
-    name: "launch_hello_demo",
     declareTasks: false,
     declareUrlElicitation: false,
     declareFormElicitation: true,
   };
 
-  async function launchForm(server: TaskServer): Promise<JsonObject> {
+  it("returns the approval link as plain text, not a form", async () => {
+    const fake = fakeHarness(LAUNCH_EVENTS);
+    const server = setupTaskServer(fake.client);
+
     const reply = await server.rpc(
       "tools/call",
       { name: "launch_hello_demo", arguments: {} },
-      form,
+      { ...form, name: "launch_hello_demo" },
     );
 
     expect(reply.error).toBeUndefined();
+    expect(reply.result?.resultType).not.toBe("input_required");
+    expect(reply.result?.structuredContent).toMatchObject({
+      status: "input_required",
+      approvalUrl: APPROVAL_URL,
+    });
 
-    // SAFETY: a successful tools/call returns a result object.
-    return reply.result as JsonObject;
-  }
+    const text = JSON.stringify(reply.result?.content);
+    expect(text).toContain(APPROVAL_URL);
+    expect(text).toContain("get_run_status");
+    expect(text).toContain("run.finished");
 
-  async function confirm(
-    server: TaskServer,
-    first: JsonObject,
-    action: "accept" | "decline",
-  ): Promise<JsonObject> {
-    const reply = await server.rpc(
-      "tools/call",
-      {
-        name: "launch_hello_demo",
-        arguments: {},
-        requestState: first.requestState ?? null,
-        inputResponses: {
-          [APPROVAL_KEY]:
-            action === "accept"
-              ? { action, content: { approved: true } }
-              : { action },
-        },
-      },
-      form,
-    );
-
-    expect(reply.error).toBeUndefined();
-
-    // SAFETY: a successful tools/call returns a result object.
-    return reply.result as JsonObject;
-  }
-
-  it("asks for a form confirmation carrying the approval link", async () => {
-    const server = setupTaskServer(fakeHarness(LAUNCH_EVENTS).client);
-
-    const first = await launchForm(server);
-
-    expect(first.resultType).toBe("input_required");
-    expect(first.requestState).toEqual(expect.any(String));
-
-    // SAFETY: input_required results carry inputRequests keyed by request.
-    const request = (first.inputRequests as JsonObject)[
-      APPROVAL_KEY
-    ] as JsonObject;
-
-    expect(request.method).toBe("elicitation/create");
-    expect(request.params).not.toMatchObject({ mode: "url" });
-    expect(JSON.stringify(request.params)).toContain(APPROVAL_URL);
-    expect(JSON.stringify(request.params)).toContain("approved");
-  }, 20_000);
-
-  it("returns the answer in the same call once the user confirms", async () => {
-    const fake = fakeHarness(LAUNCH_EVENTS);
-    const server = setupTaskServer(fake.client);
-    const first = await launchForm(server);
-
+    // SAFETY: the link result always carries structuredContent with runId.
+    const runId = (reply.result?.structuredContent as JsonObject).runId;
     fake.events.push(...APPROVED_AND_ANSWERED);
-    const final = await confirm(server, first, "accept");
 
-    expect(final.resultType).not.toBe("input_required");
-    expect(final.isError).toBeFalsy();
-    expect(final.structuredContent).toEqual({
-      sessionId: SESSION_ID,
+    const status = await server.rpc(
+      "tools/call",
+      { name: "get_run_status", arguments: { runId: String(runId) } },
+      { ...form, name: "get_run_status" },
+    );
+
+    expect(status.result?.structuredContent).toMatchObject({
       answer: "Hello world",
     });
-  }, 20_000);
-
-  it("ends the run when the user declines the form", async () => {
-    const fake = fakeHarness(LAUNCH_EVENTS);
-    const server = setupTaskServer(fake.client);
-    const first = await launchForm(server);
-
-    const final = await confirm(server, first, "decline");
-
-    expect(final.isError).toBeFalsy();
-    expect(final.structuredContent).toMatchObject({ cancelled: true });
-    expect(
-      await waitFor(
-        () => fake.endSessions,
-        (ids) => ids.length > 0,
-      ),
-    ).toEqual([SESSION_ID]);
-  }, 20_000);
+  }, 30_000);
 });
 
 describe("end_session", () => {

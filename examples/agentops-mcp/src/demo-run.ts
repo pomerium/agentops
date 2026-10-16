@@ -98,12 +98,24 @@ export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
           ),
         );
 
-        if (response.kind === "elicit" && response.action !== "accept") {
+        if (response.kind === "elicit" && response.action === "decline") {
           store.update(taskId, {
             status: "cancelled",
             statusMessage: "Approval declined; the agent session was ended",
           });
           endSession();
+
+          return;
+        }
+
+        // `cancel`: the prompt was dismissed, or the client couldn't show
+        // it (a ChatGPT dot does this). Not a refusal: keep the run and its
+        // link; the caller reports the link as plain text.
+        if (response.kind === "elicit" && response.action === "cancel") {
+          store.update(taskId, {
+            statusMessage:
+              "The approval prompt was dismissed; still waiting for approval in Pomerium",
+          });
 
           return;
         }
@@ -224,6 +236,7 @@ function applyEvent(
       status: "input_required",
       statusMessage: `Waiting for approval in Pomerium${until}`,
       approvalUrl,
+      approvalExpiresAt: expiresAt,
       inputRequests: {
         [approvalKey(event.seq)]: inputRequired.elicitUrl({
           message: `Approve the AgentOps agent run on Pomerium's consent page${until}. Sign in as an approver, review what the agent asks for, and click Approve.`,

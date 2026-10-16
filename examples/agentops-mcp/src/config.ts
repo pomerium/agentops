@@ -37,6 +37,11 @@ const configEffect = EffectConfig.all({
   STATE_SECRET: EffectConfig.String("STATE_SECRET").pipe(
     EffectConfig.withDefault(""),
   ),
+  // MCP Events subscriptions (they hold signing secrets). Empty: in memory
+  // only, lost on restart.
+  EVENTS_STORE_FILE: EffectConfig.String("EVENTS_STORE_FILE").pipe(
+    EffectConfig.withDefault(""),
+  ),
 });
 
 export type Config = Effect.Success<typeof configEffect>;

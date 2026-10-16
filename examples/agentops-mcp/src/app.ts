@@ -4,6 +4,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { Effect } from "effect";
 import { logger } from "./logger.ts";
 import { getConfig } from "./config.ts";
+import { registerEvents } from "./events.ts";
 import { registerTasks } from "./tasks.ts";
 import { registerTools } from "./tools.ts";
 import { getSkillsInstructions, registerSkills } from "./skills.ts";
@@ -22,6 +23,7 @@ const getServer = () => {
   );
 
   registerTasks(server);
+  registerEvents(server);
   registerTools(server);
   registerSkills(server);
 

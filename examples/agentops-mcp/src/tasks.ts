@@ -62,6 +62,8 @@ export type TaskRecord = {
   sessionId?: string;
   /** The Pomerium consent page for the current approval, once known. */
   approvalUrl?: string;
+  /** When the current approval expires, if the platform said. */
+  approvalExpiresAt?: string;
   result?: CallToolResult;
   /** Set by the task's driver: receives `tasks/update` inputResponses. */
   onInputResponses?: (responses: TaskInputResponses) => void;
@@ -77,6 +79,7 @@ type TaskPatch = Partial<
     | "inputRequests"
     | "sessionId"
     | "approvalUrl"
+    | "approvalExpiresAt"
     | "result"
   >
 >;
@@ -87,6 +90,14 @@ const DEFAULT_POLL_INTERVAL_MS = 2000;
 export class TaskStore {
   #tasks = new Map<string, TaskRecord>();
   #waiters = new Map<string, Set<() => void>>();
+  #listeners = new Set<(record: TaskRecord) => void>();
+
+  /** Calls `listener` after every task change; returns an unsubscribe. */
+  onUpdate(listener: (record: TaskRecord) => void): () => void {
+    this.#listeners.add(listener);
+
+    return () => this.#listeners.delete(listener);
+  }
 
   create(owner: string | undefined): TaskRecord {
     this.#sweep();
@@ -137,6 +148,8 @@ export class TaskStore {
     }
 
     for (const wake of this.#waiters.get(taskId) ?? []) wake();
+
+    for (const listener of this.#listeners) listener(record);
   }
 
   /** Resolves once `predicate` holds for the task, or after `timeoutMs`. */
@@ -258,8 +271,6 @@ export type ClientSupport = {
   tasks: boolean;
   /** URL-mode elicitation (`elicitation.url`). */
   urlElicitation: boolean;
-  /** Form-mode elicitation (any `elicitation` declaration; `{}` means form). */
-  formElicitation: boolean;
 };
 
 /**
@@ -276,7 +287,6 @@ export function clientSupport(ctx: ServerContext): ClientSupport {
       name: "unknown",
       tasks: false,
       urlElicitation: false,
-      formElicitation: false,
     };
   }
 
@@ -286,7 +296,6 @@ export function clientSupport(ctx: ServerContext): ClientSupport {
     name: envelope.success[CLIENT_INFO_META_KEY]?.name ?? "unknown",
     tasks: capabilities?.extensions?.[TASKS_EXTENSION] !== undefined,
     urlElicitation: capabilities?.elicitation?.url !== undefined,
-    formElicitation: capabilities?.elicitation !== undefined,
   };
 }
 

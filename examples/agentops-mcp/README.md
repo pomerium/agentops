@@ -52,7 +52,13 @@ Tasks live in memory, so run one replica.
 ### launch_hello_demo
 
 Starts a run of the `hello` demo agent, with an optional `prompt`. How the
-approval reaches the user depends on what the client supports:
+approval reaches the user depends on what the client supports, tried in this
+order:
+
+- **MCP Events:** if the user has a subscription to `run.approval_required` or
+  `run.finished` that covers the run, the tool returns the `runId` and approval
+  link at once, and the approval and the answer arrive as events (see
+  [MCP Events](#mcp-events)).
 
 - **MCP Tasks extension** (`io.modelcontextprotocol/tasks`, SEP-2663):
   the tool returns a task right away. `tasks/get` reports `working` while the
@@ -64,12 +70,13 @@ approval reaches the user depends on what the client supports:
 - **URL elicitation, no tasks:** the tool returns `input_required` with the
   URL elicitation and an HMAC-signed `requestState`, then answers when the
   agent finishes, waiting up to about 90 seconds per round.
-- **Form elicitation only** (ChatGPT declares `elicitation: {}`): the tool
-  returns a form whose message carries the approval link. The user approves
-  in Pomerium, confirms the form, and the same call waits for the answer.
-  Declining ends the run.
 - **Neither:** a plain result with the approval link and a `runId` to pass to
-  `get_run_status`.
+  `get_run_status`. Clients with only form elicitation (ChatGPT declares
+  `elicitation: {}`) get this too: the server can't control how a client
+  draws a form, and ChatGPT dots render them about 1px wide.
+
+Dismissing an approval prompt (`cancel`) keeps the run and returns the link as
+plain text; only declining it ends the run.
 
 ### get_run_status
 
@@ -92,6 +99,44 @@ Lists the agent templates this server may run, from its ClientBinding.
 
 Ends an AgentOps session by `sessionId` and frees its pod.
 
+### MCP Events
+
+The server implements the draft
+[MCP Events](https://github.com/modelcontextprotocol/experimental-ext-triggers-events/blob/main/docs/design-sketch-proposal.md)
+extension the way
+[ChatGPT](https://developers.openai.com/plugins/build/mcp-events) uses it
+(dots and Work chats): `events` on `server/discover`, plus `events/list`,
+`events/subscribe` and `events/unsubscribe`, with webhook delivery only.
+
+| Event | Payload |
+| --- | --- |
+| `run.approval_required` | `run_id`, `session_id`, `template`, `approval_url`, `expires_at` |
+| `run.finished` | `run_id`, `session_id`, `template`, `status` (`completed`, `failed` or `cancelled`), `answer` (up to 32 KiB), `answer_truncated`, `error` |
+
+- Both accept an optional `run_id` filter, and go only to subscriptions of
+  the user who launched the run. They aren't replayable (`cursor: null`): a
+  run that finishes while the server is down sends no event, but
+  `get_run_status` still reports it.
+- **Subscribe:** the secret must be `whsec_` plus base64 of 24 to 64 bytes.
+  The server sends a signed, single-use challenge to the callback and stores
+  the subscription only if it's echoed back (cached for 24 hours per user and
+  callback URL). Failures return `-32015` with `data.reason`. The id is
+  derived from the user, callback URL, event and arguments, so repeated
+  subscribes refresh one subscription. Lifetimes default to 24 hours and are
+  clamped to between 5 minutes and 7 days; after a secret change, both
+  secrets sign for an hour.
+- **Delivery:** Standard Webhooks signatures plus `X-MCP-Subscription-Id`,
+  at most 256 KiB, retried after 1 s, 5 s, 30 s and 2 min with the same
+  event id. A `410` drops the subscription; `413` and other `4xx` aren't
+  retried.
+- **Callbacks** must be HTTPS and resolve only to public addresses, checked at
+  connect time so DNS can't swap in a private one. Redirects aren't followed.
+- Subscriptions persist to `EVENTS_STORE_FILE`.
+
+Client support is thin while the extension is a draft: ChatGPT dots and Work
+chats subscribe when the user asks them to watch for an event. Every other
+client falls back to the paths above.
+
 ## Agent skill
 
 The server publishes the [`agentops-demo`](skills/agentops-demo/SKILL.md)
@@ -110,6 +155,7 @@ for `skill://agentops-demo/SKILL.md`, then read it with `resources/read`. See
 | `HARNESS_TOKEN` | — | Static token for local development; overrides the file |
 | `DEMO_TEMPLATE` | `hello` | AgentTemplate that `launch_hello_demo` runs |
 | `STATE_SECRET` | random per process | HMAC key for `requestState` |
+| `EVENTS_STORE_FILE` | empty (in memory) | JSON file for MCP Events subscriptions; holds signing secrets and is written with mode 0600 |
 | `PORT` | `3000` | HTTP port |
 | `SERVER_NAME`, `SERVER_VERSION` | `name` and `version` in `package.json` | MCP server identity |
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info` or `debug` |
@@ -137,7 +183,8 @@ deployed route for the full approval flow.
 ## Deploy to an AgentOps cluster
 
 [`deploy/agentops-mcp.yaml`](deploy/agentops-mcp.yaml) has the namespace,
-ServiceAccount, Deployment and Service.
+ServiceAccount, Deployment and Service, plus a small PersistentVolumeClaim for
+MCP Events subscriptions.
 [`deploy/route.yaml`](deploy/route.yaml) is the Pomerium route at
 `https://mcp.agentops.example.com/mcp`. Replace `agentops.example.com` with
 your domain and set the route policy to your users.
@@ -184,6 +231,8 @@ npm run format       # Oxfmt
 | `src/tools.ts` | Tool registration and logic |
 | `src/demo-run.ts` | Maps one AgentOps session's events to one MCP task |
 | `src/tasks.ts` | In-memory task store, scoped per user |
+| `src/events.ts` | MCP Events: event catalog, subscriptions and delivery |
+| `src/webhook.ts` | Standard Webhooks signing and the public-address-only callback POST |
 | `src/harness.ts` | Harness API client |
 | `src/identity.ts` | Reads the user from `X-Pomerium-Jwt-Assertion` |
 | `src/skills.ts` | Agent Skills over MCP |

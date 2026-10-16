@@ -2,14 +2,14 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type {
   CallToolResult,
   InputRequiredResult,
-  InputRequests,
   McpServer,
   ServerContext,
 } from "@modelcontextprotocol/server";
-import { inputRequired } from "@modelcontextprotocol/server";
+import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import { Effect, Schema } from "effect";
 import { getConfig } from "./config.ts";
 import { replayRun, runDemoSession, SESSION_REF_PREFIX } from "./demo-run.ts";
+import { getEventHub, RUN_APPROVAL_REQUIRED, RUN_FINISHED } from "./events.ts";
 import { getHarnessClient, type HarnessClient } from "./harness.ts";
 import { userFromContext } from "./identity.ts";
 import type { JsonObject } from "./lib/json.ts";
@@ -25,6 +25,7 @@ import {
   createTaskResult,
   isTerminal,
   taskStore,
+  type TaskInputResponses,
   type TaskRecord,
   type TaskStore,
 } from "./tasks.ts";
@@ -72,10 +73,17 @@ type ToolCallResult =
   | InputRequiredResult
   | ReturnType<typeof createTaskResult>;
 
+/** Whether a user's MCP Events subscriptions cover a run. */
+export type RunEvents = {
+  covers(owner: string | undefined, runId: string): boolean;
+};
+
 export type ToolDeps = {
   harness: () => HarnessClient;
   store: TaskStore;
   template: string;
+  /** MCP Events; without it, launches use the fallbacks only. */
+  events?: () => RunEvents;
 };
 
 const defaultDeps: ToolDeps = {
@@ -84,6 +92,7 @@ const defaultDeps: ToolDeps = {
   get template() {
     return getConfig().DEMO_TEMPLATE;
   },
+  events: getEventHub,
 };
 
 /**
@@ -102,10 +111,13 @@ export function registerTools(
       title: "Launch the AgentOps hello demo",
       description:
         "Start a run of the AgentOps `hello` demo agent in a Kubernetes sandbox. " +
-        "The user must approve the run on Pomerium's consent page. Clients with the " +
-        "MCP Tasks extension get a task whose approval arrives as a URL elicitation. " +
-        "Other clients get the approval link and a runId in the result: show the user " +
-        "the link, then call get_run_status with the runId until the run completes.",
+        "The user must approve the run on Pomerium's consent page. Preferred: " +
+        `subscribe to the MCP events ${RUN_APPROVAL_REQUIRED} and ${RUN_FINISHED} ` +
+        "first; the result then has the runId and approval link, and the answer " +
+        "arrives as an event, so don't poll. Without a subscription, clients with " +
+        "the MCP Tasks extension get a task whose approval arrives as a URL " +
+        "elicitation, and other clients get the approval link and a runId: show the " +
+        "user the link, then call get_run_status with the runId until the run completes.",
       inputSchema: LaunchInputSchema,
       annotations: {
         readOnlyHint: false,
@@ -212,14 +224,21 @@ function launchHelloDemo(
         return createErrorResult({ error: "Unknown or expired request state" });
       }
 
-      record.onInputResponses?.(ctx.mcpReq.inputResponses ?? {});
+      const responses = ctx.mcpReq.inputResponses ?? {};
+      record.onInputResponses?.(responses);
 
-      return yield* awaitSync(
-        deps.store,
-        record,
-        owner,
-        !clientSupport(ctx).urlElicitation,
-      );
+      // The prompt was dismissed or couldn't be shown: asking again would
+      // loop, so hand over the link and runId as plain text instead.
+      if (promptCancelled(responses)) {
+        yield* logger.info(
+          { toolName, requestId, taskId: record.taskId, mode: "link" },
+          "Approval prompt cancelled; falling back to the link",
+        );
+
+        return runStatusResult(record);
+      }
+
+      return yield* awaitSync(deps.store, record, owner);
     }
 
     const record = deps.store.create(owner);
@@ -235,13 +254,15 @@ function launchHelloDemo(
     );
 
     const client = clientSupport(ctx);
+    const viaEvents = deps.events?.().covers(owner, record.taskId) ?? false;
 
-    const mode = client.tasks
-      ? "task"
-      : client.urlElicitation
-        ? "mrtr-url-elicitation"
-        : client.formElicitation
-          ? "mrtr-form-elicitation"
+    // MCP Events first, then the fallbacks, from richest to plainest.
+    const mode = viaEvents
+      ? "events"
+      : client.tasks
+        ? "task"
+        : client.urlElicitation
+          ? "mrtr-url-elicitation"
           : "link";
 
     yield* logger.info(
@@ -260,25 +281,50 @@ function launchHelloDemo(
       "Run started",
     );
 
+    // The user's event subscriptions cover this run: hand back the link as
+    // soon as it exists; the approval and the answer follow as events.
+    if (viaEvents) {
+      return yield* Effect.promise(() =>
+        deps.store.waitFor(
+          record.taskId,
+          (r) =>
+            isTerminal(r.status) ||
+            (r.status === "input_required" && r.approvalUrl !== undefined),
+          STATUS_WAIT_MS,
+        ),
+      ).pipe(
+        Effect.map((current) =>
+          current
+            ? eventsLaunchResult(current)
+            : createErrorResult({ error: "The run expired" }),
+        ),
+      );
+    }
+
     // Tasks extension: return the task; the approval is a URL elicitation.
     if (client.tasks) return createTaskResult(record);
 
     // URL elicitation without tasks: drive the same task over MRTR.
     if (client.urlElicitation) {
-      return yield* awaitSync(deps.store, record, owner, false);
-    }
-
-    // Form elicitation only (e.g. ChatGPT): the same MRTR flow, with the
-    // approval link in a form the user confirms once they have approved.
-    if (client.formElicitation) {
-      return yield* awaitSync(deps.store, record, owner, true);
+      return yield* awaitSync(deps.store, record, owner);
     }
 
     // Neither (e.g. ChatGPT): answer with the approval link and a runId, and
-    // let the model follow up with get_run_status.
+    // let the model follow up with get_run_status. Form-only clients land
+    // here too: the client draws a form however it likes (in ChatGPT dots, a
+    // ~1px card or nothing), while plain text renders as a normal link.
     // A fresh launch has shown no link yet, even if the run already needs
     // approval, so return as soon as the link exists.
     return yield* awaitStatus(deps.store, record.taskId, owner, false);
+  });
+}
+
+/** Whether the client answered an approval prompt with `cancel`. */
+function promptCancelled(responses: TaskInputResponses): boolean {
+  return Object.keys(responses).some((key) => {
+    const response = inputResponse(responses, key);
+
+    return response.kind === "elicit" && response.action === "cancel";
   });
 }
 
@@ -290,7 +336,6 @@ function awaitSync(
   store: TaskStore,
   record: TaskRecord,
   owner: string | undefined,
-  asForm: boolean,
 ): Effect.Effect<CallToolResult | InputRequiredResult> {
   return Effect.promise(() =>
     store.waitFor(
@@ -308,9 +353,7 @@ function awaitSync(
 
       if (latest.status === "input_required" && latest.inputRequests) {
         return inputRequired({
-          inputRequests: asForm
-            ? approvalForms(latest.inputRequests, latest)
-            : latest.inputRequests,
+          inputRequests: latest.inputRequests,
           requestState: signState(latest.taskId),
         });
       }
@@ -403,6 +446,34 @@ function awaitStatus(
   );
 }
 
+/** A launch whose progress arrives as MCP events. */
+export function eventsLaunchResult(record: TaskRecord): CallToolResult {
+  if (isTerminal(record.status)) return runStatusResult(record);
+
+  const runId = record.taskId;
+
+  const lines = [
+    `Run ${runId} started. Its updates arrive as MCP events: ${RUN_APPROVAL_REQUIRED} ` +
+      `with the approval link, then ${RUN_FINISHED} with the agent's answer. ` +
+      "No need to call get_run_status.",
+  ];
+
+  if (record.approvalUrl) {
+    lines.push(
+      "Ask the user to open this link, sign in, review the run and click Approve:",
+      record.approvalUrl,
+    );
+  }
+
+  return statusResult(lines.join("\n"), {
+    runId,
+    status: record.status,
+    statusMessage: record.statusMessage ?? null,
+    approvalUrl: record.approvalUrl ?? null,
+    delivery: "events",
+  });
+}
+
 /** A run's state as text for the model plus structuredContent. */
 export function runStatusResult(record: TaskRecord): CallToolResult {
   const runId = record.taskId;
@@ -416,6 +487,7 @@ export function runStatusResult(record: TaskRecord): CallToolResult {
         `Ask the user to open this link, sign in, review the run and click Approve:`,
         record.approvalUrl,
         `Once the user says they approved, call get_run_status once with runId "${runId}": it waits up to 45 seconds for the agent's answer.`,
+        `If you support MCP Events, subscribe to ${RUN_FINISHED} with run_id "${runId}" instead, and the answer is delivered when the run finishes.`,
       ].join("\n"),
       {
         runId,
@@ -570,42 +642,6 @@ function replayFromPlatform(
       ),
     ),
   );
-}
-
-/**
- * The approval as a form-mode elicitation, for clients without URL mode: the
- * message carries the Pomerium link, and the form only confirms that the user
- * approved there. The approval itself still happens only on Pomerium's page;
- * accepting the form just makes this call wait for the agent's answer, and
- * declining it ends the run. Keys match the URL requests, so the run driver
- * handles the response the same way.
- */
-function approvalForms(
-  requests: InputRequests,
-  record: TaskRecord,
-): InputRequests {
-  const forms: InputRequests = {};
-
-  for (const key of Object.keys(requests)) {
-    forms[key] = inputRequired.elicit({
-      message:
-        `Approve this AgentOps run on Pomerium's consent page: ${record.approvalUrl ?? "(link unavailable)"}\n` +
-        "Sign in, review what the agent asks for, and click Approve there. " +
-        "Then confirm here, and the agent's answer will follow.",
-      requestedSchema: {
-        type: "object",
-        properties: {
-          approved: {
-            type: "boolean",
-            title: "I approved the run in Pomerium",
-            default: true,
-          },
-        },
-      },
-    });
-  }
-
-  return forms;
 }
 
 function listAgents(

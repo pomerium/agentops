@@ -15,6 +15,20 @@ metadata:
   namespace: agentops-mcp
 automountServiceAccountToken: false
 ---
+# MCP Events subscriptions (with their signing secrets) must survive
+# restarts. ReadWriteOnce is fine: one replica, Recreate strategy. Uses the
+# cluster's default StorageClass.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentops-mcp-events
+  namespace: agentops-mcp
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,10 +74,14 @@ spec:
                 secretKeyRef:
                   name: agentops-mcp
                   key: state-secret
+            - name: EVENTS_STORE_FILE
+              value: /var/lib/agentops-mcp/subscriptions.json
           volumeMounts:
             - name: harness-token
               mountPath: /var/run/secrets/agentops
               readOnly: true
+            - name: events
+              mountPath: /var/lib/agentops-mcp
           readinessProbe:
             httpGet:
               path: /health
@@ -80,6 +98,9 @@ spec:
             limits:
               memory: 512Mi
       volumes:
+        - name: events
+          persistentVolumeClaim:
+            claimName: agentops-mcp-events
         - name: harness-token
           projected:
             sources:

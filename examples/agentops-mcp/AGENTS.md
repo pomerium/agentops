@@ -42,6 +42,8 @@ src/
   index.ts       # Effect startup and shutdown; runs the app on PORT
   tools.ts       # registerTools() wiring + per-tool logic functions
   tools.test.ts  # colocated integration tests (in-memory client/server)
+  events.ts      # MCP Events: events/list|subscribe|unsubscribe, delivery hub, subscription store
+  webhook.ts     # Standard Webhooks signing + public-address-only HTTPS POST for callbacks
   skills.ts      # bundled Agent Skills and MCP Skills extension handlers
   skills.test.ts # skill discovery, manifest integrity, and resource tests
   config.ts      # Env var loading and validation via Effect Config
@@ -71,6 +73,7 @@ Config files (`vite.config.ts`, `tsconfig.json`, `mise.toml`, `Dockerfile`) live
 - Genuine execution failures return `isError: true` (via `createErrorResult`), not thrown; valid outcomes (e.g. a user declining an elicitation) are normal results
 - Stateless per the MCP 2026-07-28 spec: no session handshake or `Mcp-Session-Id`; `createMcpHandler` creates a fresh server per request and supports older clients through its fallback.
 - `GET /health` is a plain liveness endpoint (used by the Docker healthcheck) — `GET /mcp` itself is routed to the MCP handler and no longer doubles as one
+- MCP Events (draft extension, webhook delivery only, as ChatGPT dots/Work chats use it): `run.approval_required` and `run.finished`, sent only to the launching user's subscriptions, not replayable (`cursor: null`). `launch_hello_demo` picks its response in this order: events (the user has a covering subscription) → tasks → MRTR URL elicitation → plain link + `get_run_status` (form-only clients such as ChatGPT get the plain link: their form cards render badly). A `cancel`led prompt keeps the run and returns the link; only `decline` ends it
 - If a tool needs state across calls, mint an explicit handle and have the model pass it back as an argument on the next call — there is no transport-level session to hang state off anymore
 - Graceful shutdown on `SIGTERM`/`SIGINT` (closes the handler and HTTP server in parallel with `Effect.all`, then exits)
 
@@ -92,6 +95,7 @@ Defined and validated in `src/config.ts`:
 | `SERVER_NAME`    | `name` in `package.json`    | MCP server name                       |
 | `SERVER_VERSION` | `version` in `package.json` | MCP server version                    |
 | `LOG_LEVEL`      | `info`                      | `error` / `warn` / `info` / `debug`   |
+| `EVENTS_STORE_FILE` | — (in memory) | JSON file for MCP Events subscriptions (holds signing secrets; written 0600) |
 
 ## Coding Conventions
 

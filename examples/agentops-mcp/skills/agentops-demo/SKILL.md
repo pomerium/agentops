@@ -22,9 +22,11 @@ This server fronts AgentOps, which runs coding agents in Kubernetes sandbox pods
 3. `working`: "Approved"; the agent is starting, thinking, calling tools or answering.
 4. `completed`: the result holds `sessionId` and the agent's `answer`. A failed turn or a session that ended early (for example, the approval expired) completes with `isError: true` and the reason.
 
-Cancelling the task ends the AgentOps session. Declining the URL elicitation does too.
+Cancelling the task ends the AgentOps session. Declining the URL elicitation does too. Dismissing it (`cancel`) does not: the run keeps waiting for approval.
 
-Without the Tasks extension, a client that supports URL-mode elicitation gets the approval request in the tool call itself, then the answer when the agent finishes. A client with only form-mode elicitation (for example ChatGPT) gets a form carrying the approval link: the user approves on Pomerium's page, confirms the form, and the same call returns the answer. Any other client gets a plain result with the approval link and a `runId`: show the user the link, then call `get_run_status` with the `runId` until the run completes.
+If the client supports MCP Events, subscribe to `run.approval_required` and `run.finished` before launching. The launch then returns the `runId` and approval link at once, and the answer arrives as a `run.finished` event: don't poll.
+
+Without events or the Tasks extension, a client that supports URL-mode elicitation gets the approval request in the tool call itself, then the answer when the agent finishes. Any other client (for example ChatGPT) gets a plain result with the approval link and a `runId`: show the user the link, then call `get_run_status` with the `runId` until the run completes, or subscribe to `run.finished` with that `run_id`.
 
 If a launch fails because too many runs are waiting for approval, call `list_pending_approvals`, then approve those runs or end them with `end_session`.
 

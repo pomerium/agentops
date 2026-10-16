@@ -24,6 +24,7 @@ describe("configuration", () => {
     vi.stubEnv("HARNESS_TOKEN", undefined);
     vi.stubEnv("DEMO_TEMPLATE", undefined);
     vi.stubEnv("STATE_SECRET", undefined);
+    vi.stubEnv("EVENTS_STORE_FILE", undefined);
 
     const { getConfig } = await importConfig();
 
@@ -38,6 +39,7 @@ describe("configuration", () => {
       HARNESS_TOKEN: "",
       DEMO_TEMPLATE: "hello",
       STATE_SECRET: "",
+      EVENTS_STORE_FILE: "",
     });
   });
 
@@ -61,6 +63,7 @@ describe("configuration", () => {
       HARNESS_TOKEN: "",
       DEMO_TEMPLATE: "hello",
       STATE_SECRET: "",
+      EVENTS_STORE_FILE: "",
     });
   });
 
