@@ -66,7 +66,7 @@ Config files (`vite.config.ts`, `tsconfig.json`, `mise.toml`, `Dockerfile`) live
 
 - HTTP transport via Express on `PORT` (default 3000) — **not** stdio; app wiring lives in `src/app.ts`, startup and shutdown in `src/index.ts`
 - Tools registered via `registerTools(server)` in `src/tools.ts`, the single source of truth for tool wiring — called from `getServer()` in `src/app.ts` and reused by the tests
-- Agent Skills under `skills/` are registered by `registerSkills(server)` in `src/skills.ts` and served through MCP resources plus the `io.modelcontextprotocol/skills` extension. Coding skills in `.agents/skills/` are for agents editing this example and are separate from that catalog
+- Agent Skills under `skills/` are registered by `registerSkills(server)` in `src/skills.ts` and served through MCP resources plus the `io.modelcontextprotocol/skills` extension.
 - Tool responses use `createTextResult` / `createErrorResult` from `src/lib/utils.ts`: a text `content` block plus `structuredContent` (for clients that declare an `outputSchema`)
 - Tool workflows use `Effect` and cross the MCP callback boundary with `runMcpEffect()`
 - Effect Schemas cross the MCP boundary through `toMcpSchema()`, which supports the MCP SDK's `draft-07` and `draft-2020-12` JSON Schema targets
@@ -122,7 +122,7 @@ Log levels: `error` > `warn` > `info` > `debug`. For tool-call logs, include `re
 
 ## Adding a New Tool
 
-See the `create-mcp-tool` skill (`.agents/skills/create-mcp-tool`) for the full walkthrough. In short:
+To add a tool:
 
 1. Add the `server.registerTool()` call inside `registerTools()` in `src/tools.ts`
 2. Provide a `title`, `description`, `inputSchema`/`outputSchema` created with `toMcpSchema(Schema.Struct({...}))`, and `annotations` (e.g. `readOnlyHint`)

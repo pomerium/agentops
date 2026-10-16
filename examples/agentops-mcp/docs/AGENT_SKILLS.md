@@ -2,8 +2,6 @@
 
 This server publishes Agent Skills through the stable MCP Skills extension (`io.modelcontextprotocol/skills`). It ships one, [skills/agentops-demo/SKILL.md](../skills/agentops-demo/SKILL.md), which explains the approval and task flow to a host. Add sibling directories under `skills/` for more.
 
-Coding skills under `.agents/skills/` and `.claude/skills/` are for agents editing this example. The running server publishes only the directories in `skills/`.
-
 ## Discovery and retrieval
 
 For protocol revision `2026-07-28` or later, `server/discover` includes:
