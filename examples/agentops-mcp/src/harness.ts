@@ -158,6 +158,29 @@ function harnessErrorMessage(text: string, status: number): string {
   }
 }
 
+/** A session's events after `afterSeq`, following every page to the end. */
+export function listAllEvents(
+  harness: HarnessClient,
+  sessionId: string,
+  afterSeq = 0,
+): Effect.Effect<HarnessEvent[], HarnessError> {
+  return Effect.gen(function* () {
+    const all: HarnessEvent[] = [];
+    let after = afterSeq;
+
+    for (;;) {
+      const page = yield* harness.listEvents(sessionId, after);
+      const next = Math.max(after, ...page.map((e) => Number(e.seq)));
+
+      all.push(...page);
+
+      // An empty page is the end; one that doesn't advance would loop.
+      if (page.length === 0 || next === after) return all;
+      after = next;
+    }
+  });
+}
+
 let defaultClient: HarnessClient | undefined;
 
 /** The process-wide client built from config. */

@@ -398,7 +398,8 @@ export class EventHub {
 
   /**
    * Whether `owner` will hear about this run through events: an active
-   * subscription to run.finished or run.approval_required that covers it.
+   * run.finished subscription that covers it. The launch result carries the
+   * approval link, but only run.finished delivers the answer.
    */
   covers(owner: string | undefined, runId: string): boolean {
     if (!owner) return false;
@@ -408,7 +409,7 @@ export class EventHub {
       .some(
         (sub) =>
           sub.owner === owner &&
-          EVENT_NAMES.has(sub.name) &&
+          sub.name === RUN_FINISHED &&
           (sub.arguments.run_id === undefined ||
             sub.arguments.run_id === runId),
       );

@@ -546,6 +546,13 @@ describe("event delivery", () => {
     expect(delivery?.headers["webhook-signature"].split(" ")).toHaveLength(2);
   });
 
+  it("keeps the fallback for approval-only subscriptions", async () => {
+    const { hub, subscribe } = setup();
+    await subscribe(RUN_APPROVAL_REQUIRED);
+
+    expect(hub.covers("alice@example.com", "new-run")).toBe(false);
+  });
+
   it("covers a launch only for the subscribing user", async () => {
     const { hub, subscribe } = setup();
     await subscribe(RUN_FINISHED);

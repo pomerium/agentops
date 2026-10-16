@@ -8,9 +8,20 @@ import type {
 import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import { Effect, Schema } from "effect";
 import { getConfig } from "./config.ts";
-import { replayRun, runDemoSession, SESSION_REF_PREFIX } from "./demo-run.ts";
+import {
+  ownsSession,
+  replayRun,
+  runDemoSession,
+  runIdFromRef,
+  SESSION_REF_PREFIX,
+  sessionRef,
+} from "./demo-run.ts";
 import { getEventHub, RUN_APPROVAL_REQUIRED, RUN_FINISHED } from "./events.ts";
-import { getHarnessClient, type HarnessClient } from "./harness.ts";
+import {
+  getHarnessClient,
+  listAllEvents,
+  type HarnessClient,
+} from "./harness.ts";
 import { userFromContext } from "./identity.ts";
 import type { JsonObject } from "./lib/json.ts";
 import { toMcpSchema } from "./lib/mcp-schema.ts";
@@ -396,7 +407,7 @@ function getRunStatus(
         "Run not in memory; replaying from the platform",
       );
 
-      return yield* replayFromPlatform(args.runId, deps.harness());
+      return yield* replayFromPlatform(args.runId, owner, deps.harness());
     }
 
     yield* logger.info(
@@ -551,15 +562,13 @@ function listPendingApprovals(
     const pending = yield* Effect.forEach(
       waiting,
       (session) =>
-        harness.listEvents(session.id, 0).pipe(
+        listAllEvents(harness, session.id).pipe(
           Effect.map((events): PendingApproval => {
             const approval = events
               .filter((e) => e.approvalRequired)
               .at(-1)?.approvalRequired;
 
-            const runId = (session.conversationRef ?? "").slice(
-              SESSION_REF_PREFIX.length,
-            );
+            const runId = runIdFromRef(session.conversationRef ?? "");
 
             return {
               sessionId: session.id,
@@ -617,20 +626,22 @@ function pendingApprovalsText(pending: PendingApproval[]): string {
 
 function replayFromPlatform(
   runId: string,
+  owner: string | undefined,
   harness: HarnessClient,
 ): Effect.Effect<CallToolResult> {
   return Effect.gen(function* () {
     const sessions = yield* harness.listSessions(false);
 
+    // Matching the owner's ref keeps other users' runs unknown.
     const session = sessions.find(
-      (s) => s.conversationRef === `${SESSION_REF_PREFIX}${runId}`,
+      (s) => s.conversationRef === sessionRef(runId, owner),
     );
 
     if (!session) {
       return createErrorResult({ error: `Unknown run: ${runId}` });
     }
 
-    const events = yield* harness.listEvents(session.id, 0);
+    const events = yield* listAllEvents(harness, session.id);
 
     return runStatusResult(replayRun(runId, session.id, events));
   }).pipe(
@@ -675,22 +686,36 @@ function endSession(
 ): Effect.Effect<CallToolResult> {
   const toolName = "end_session";
   const requestId = ctx.mcpReq.id;
+  const owner = userFromContext(ctx);
+  const harness = deps.harness();
 
-  return deps
-    .harness()
-    .endSession(args.sessionId)
-    .pipe(
-      Effect.tap(() => logger.info({ toolName, requestId }, "Tool executed")),
-      Effect.as(createTextResult({ ended: args.sessionId })),
-      Effect.catch((error) =>
-        logger
-          .error(
-            { toolName, requestId, error: error.message },
-            "Tool execution failed",
-          )
-          .pipe(Effect.as(createErrorResult({ error: error.message }))),
-      ),
+  return Effect.gen(function* () {
+    // Every session runs as this server's ServiceAccount: check that the
+    // caller launched this one before ending it.
+    const sessions = yield* harness.listSessions(false);
+
+    const session = sessions.find(
+      (s) => s.id === args.sessionId && ownsSession(s.conversationRef, owner),
     );
+
+    if (!session) {
+      return createErrorResult({ error: `Unknown session: ${args.sessionId}` });
+    }
+
+    yield* harness.endSession(session.id);
+    yield* logger.info({ toolName, requestId }, "Tool executed");
+
+    return createTextResult({ ended: args.sessionId });
+  }).pipe(
+    Effect.catch((error) =>
+      logger
+        .error(
+          { toolName, requestId, error: error.message },
+          "Tool execution failed",
+        )
+        .pipe(Effect.as(createErrorResult({ error: error.message }))),
+    ),
+  );
 }
 
 let stateKey: Buffer | undefined;

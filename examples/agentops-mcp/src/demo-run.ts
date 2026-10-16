@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import type { Duration } from "effect";
 import { Effect } from "effect";
@@ -24,6 +25,43 @@ import { isTerminal, TaskStore, type TaskRecord } from "./tasks.ts";
 
 /** conversationRef prefix of every session this server creates. */
 export const SESSION_REF_PREFIX = "mcp-";
+
+/**
+ * A session's conversationRef: the run id plus a tag of the user who launched
+ * it. Every session runs as this server's ServiceAccount, so the Harness API
+ * can't tell users apart; the tag keeps a run its owner's after this process
+ * forgets it.
+ */
+export function sessionRef(runId: string, owner: string | undefined): string {
+  return `${SESSION_REF_PREFIX}${runId}.${ownerTag(owner)}`;
+}
+
+/** The run id in a conversationRef this server made. */
+export function runIdFromRef(ref: string): string {
+  const id = ref.slice(SESSION_REF_PREFIX.length);
+  const dot = id.indexOf(".");
+
+  return dot === -1 ? id : id.slice(0, dot);
+}
+
+/** Whether `owner` launched the session with this conversationRef. */
+export function ownsSession(
+  ref: string | undefined,
+  owner: string | undefined,
+): boolean {
+  return (
+    ref !== undefined &&
+    ref.startsWith(SESSION_REF_PREFIX) &&
+    ref.endsWith(`.${ownerTag(owner)}`)
+  );
+}
+
+function ownerTag(owner: string | undefined): string {
+  return createHash("sha256")
+    .update(owner ?? "")
+    .digest("base64url")
+    .slice(0, 16);
+}
 
 export type DemoRunOptions = {
   store: TaskStore;
@@ -54,9 +92,18 @@ export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
 
     if (!record) return;
 
+    // A cancel can arrive while CreateSession is pending: record it now and
+    // end the session once it exists.
+    record.onCancel = () => {
+      store.update(taskId, {
+        status: "cancelled",
+        statusMessage: "Cancelled before the agent session started",
+      });
+    };
+
     const session = yield* harness.createSession({
       template,
-      conversationRef: `${SESSION_REF_PREFIX}${taskId}`,
+      conversationRef: sessionRef(taskId, owner),
       approvalPrompt: `Run the AgentOps "${template}" demo agent${owner ? ` for ${owner}` : ""}?`,
       initialPrompt: prompt,
     });
@@ -68,6 +115,12 @@ export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
       Effect.runFork(
         harness.endSession(sessionId).pipe(Effect.catch(() => Effect.void)),
       );
+
+    if (isTerminal(store.get(taskId, owner)?.status ?? "cancelled")) {
+      endSession();
+
+      return;
+    }
 
     record.onCancel = () => {
       store.update(taskId, {

@@ -18,6 +18,7 @@ import {
   type HarnessEvent,
   type TemplateSummary,
 } from "./harness.ts";
+import { sessionRef } from "./demo-run.ts";
 import { userFromHeaders } from "./identity.ts";
 import {
   registerTools,
@@ -544,6 +545,41 @@ describe("launch_hello_demo as a task", () => {
     ).toEqual([SESSION_ID]);
   }, 20_000);
 
+  it("records a cancellation made while CreateSession is pending", async () => {
+    let release!: () => void;
+
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const fake = fakeHarness(LAUNCH_EVENTS, {
+      createSession: () =>
+        Effect.promise(async () => {
+          await gate;
+
+          return { id: SESSION_ID };
+        }),
+    });
+
+    const server = setupTaskServer(fake.client);
+    const taskId = await launch(server);
+
+    try {
+      await server.rpc("tasks/cancel", { taskId }, { name: taskId });
+      expect(server.store.get(taskId, undefined)?.status).toBe("cancelled");
+    } finally {
+      release();
+    }
+
+    // The session created after the cancel is ended, not left waiting.
+    expect(
+      await waitFor(
+        () => fake.endSessions,
+        (ids) => ids.length > 0,
+      ),
+    ).toEqual([SESSION_ID]);
+  }, 20_000);
+
   it("completes with an error result when the turn fails", async () => {
     const fake = fakeHarness(LAUNCH_EVENTS);
     const server = setupTaskServer(fake.client);
@@ -814,7 +850,7 @@ describe("launch_hello_demo with plain results (no tasks, no URL elicitation)", 
           {
             id: "old-session",
             state: "SESSION_STATE_ENDED",
-            conversationRef: "mcp-lost-run",
+            conversationRef: sessionRef("lost-run", undefined),
           },
         ]),
     }).client;
@@ -832,6 +868,42 @@ describe("launch_hello_demo with plain results (no tasks, no URL elicitation)", 
       runId: "lost-run",
       status: "input_required",
       approvalUrl: APPROVAL_URL,
+    });
+  });
+
+  it("get_run_status replays answers beyond the first event page", async () => {
+    const events = [
+      ...Array.from({ length: 500 }, (_, i) =>
+        event(i + 1, { agentThought: { text: "working" } }),
+      ),
+      event(501, { agentMessage: { text: "done" } }),
+      event(502, { turnCompleted: {} }),
+    ];
+
+    const server = setupTaskServer(
+      fakeHarness([], {
+        listSessions: () =>
+          Effect.succeed([
+            {
+              id: "old-session",
+              conversationRef: sessionRef("lost-run", undefined),
+            },
+          ]),
+        // The Harness API returns at most 500 events per call.
+        listEvents: (_sessionId, afterSeq) =>
+          Effect.succeed(
+            events.filter((e) => Number(e.seq) > afterSeq).slice(0, 500),
+          ),
+      }).client,
+    );
+
+    const result = await callTool(server, "get_run_status", {
+      runId: "lost-run",
+    });
+
+    expect(structured(result)).toEqual({
+      sessionId: "old-session",
+      answer: "done",
     });
   });
 
@@ -895,12 +967,12 @@ describe("list_pending_approvals", () => {
           {
             id: "stale-session",
             state: "SESSION_STATE_AWAITING_APPROVAL",
-            conversationRef: "mcp-lost-run",
+            conversationRef: sessionRef("lost-run", undefined),
           },
           {
             id: "running",
             state: "SESSION_STATE_RUNNING",
-            conversationRef: "mcp-other",
+            conversationRef: sessionRef("other", undefined),
           },
           {
             id: "not-ours",
@@ -1007,18 +1079,59 @@ describe("launch_hello_demo with form-only elicitation (ChatGPT)", () => {
 });
 
 describe("end_session", () => {
-  it("ends the session and reports its id", async () => {
-    const fake = fakeHarness();
-    const { client } = await connectModernClient(fake);
+  /** A platform that lists the session the server last created. */
+  function trackingHarness(events: HarnessEvent[] = LAUNCH_EVENTS) {
+    let conversationRef = "";
 
-    const result = await client.callTool({
-      name: "end_session",
-      arguments: { sessionId: SESSION_ID },
+    return fakeHarness(events, {
+      createSession: (request) =>
+        Effect.sync(() => {
+          conversationRef = request.conversationRef;
+
+          return { id: SESSION_ID };
+        }),
+      listSessions: () => Effect.succeed([{ id: SESSION_ID, conversationRef }]),
     });
+  }
 
-    expect(result.isError).toBeFalsy();
-    expect(parseText(result)).toEqual({ ended: SESSION_ID });
+  it("ends the caller's session and reports its id", async () => {
+    const fake = trackingHarness();
+    const server = setupTaskServer(fake.client);
+    await launch(server, { user: "alice@example.com" });
+
+    const reply = await server.rpc(
+      "tools/call",
+      { name: "end_session", arguments: { sessionId: SESSION_ID } },
+      { name: "end_session", user: "alice@example.com" },
+    );
+
+    expect(reply.result?.isError).toBeFalsy();
+    expect(reply.result?.structuredContent).toEqual({ ended: SESSION_ID });
     expect(fake.endSessions).toEqual([SESSION_ID]);
+  });
+
+  it("blocks another user from reading or ending a run", async () => {
+    const fake = trackingHarness([...LAUNCH_EVENTS, ...APPROVED_AND_ANSWERED]);
+    const server = setupTaskServer(fake.client);
+    const runId = await launch(server, { user: "alice@example.com" });
+    await server.store.waitFor(runId, (r) => r.status === "completed", 5000);
+
+    const read = await server.rpc(
+      "tools/call",
+      { name: "get_run_status", arguments: { runId } },
+      { name: "get_run_status", user: "bob@example.com" },
+    );
+
+    expect.soft(read.result?.isError).toBe(true);
+
+    const end = await server.rpc(
+      "tools/call",
+      { name: "end_session", arguments: { sessionId: SESSION_ID } },
+      { name: "end_session", user: "bob@example.com" },
+    );
+
+    expect.soft(end.result?.isError).toBe(true);
+    expect.soft(fake.endSessions).toEqual([]);
   });
 });
 
