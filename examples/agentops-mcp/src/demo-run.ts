@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { inputRequired, inputResponse } from "@modelcontextprotocol/server";
 import type { Duration } from "effect";
 import { Effect } from "effect";
-import type { HarnessClient, HarnessEvent } from "./harness.ts";
+import { nextSeq, type HarnessClient, type HarnessEvent } from "./harness.ts";
 import { createErrorResult, createTextResult } from "./lib/utils.ts";
 import { logger } from "./logger.ts";
 import { isTerminal, TaskStore, type TaskRecord } from "./tasks.ts";
@@ -79,6 +79,9 @@ const STATE_MESSAGES = new Map([
   ["SESSION_STATE_RUNNING", "Agent running"],
 ]);
 
+/** Consecutive failed ListEvents polls before the run gives up. */
+const MAX_POLL_FAILURES = 5;
+
 export function approvalKey(seq: string): string {
   return `approve-run-${seq}`;
 }
@@ -86,6 +89,8 @@ export function approvalKey(seq: string): string {
 export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
   const { store, harness, taskId, template, prompt, owner } = options;
   const pollInterval = options.pollInterval ?? "1500 millis";
+  /** Set once CreateSession returns, so a failure can end the session. */
+  let createdSessionId: string | undefined;
 
   return Effect.gen(function* () {
     const record = store.get(taskId, owner);
@@ -109,6 +114,7 @@ export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
     });
 
     const sessionId = session.id;
+    createdSessionId = sessionId;
     yield* logger.info({ taskId, sessionId, template }, "Session created");
 
     const endSession = () =>
@@ -189,17 +195,42 @@ export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
     });
 
     let afterSeq = 0;
+    let failures = 0;
     const answer: string[] = [];
 
     while (!isTerminal(store.get(taskId, owner)?.status ?? "cancelled")) {
-      const events = yield* harness.listEvents(sessionId, afterSeq);
+      // A transient Harness or Pomerium error shouldn't end the run: retry a
+      // few polls before giving up.
+      const events = yield* harness
+        .listEvents(sessionId, afterSeq)
+        .pipe(
+          Effect.catch((error) =>
+            ++failures < MAX_POLL_FAILURES
+              ? logger
+                  .warn(
+                    { taskId, sessionId, failures, error: error.message },
+                    "ListEvents failed; retrying",
+                  )
+                  .pipe(Effect.as(undefined))
+              : Effect.fail(error),
+          ),
+        );
+
+      if (events === undefined) {
+        yield* Effect.sleep(pollInterval);
+        continue;
+      }
+
+      failures = 0;
+      const before = afterSeq;
+      afterSeq = nextSeq(afterSeq, events);
 
       for (const event of events) {
-        afterSeq = Math.max(afterSeq, Number(event.seq));
         applyEvent(store, taskId, sessionId, event, answer);
       }
 
-      if (events.length === 0) yield* Effect.sleep(pollInterval);
+      // Nothing new (or a page that doesn't advance): wait before polling.
+      if (afterSeq === before) yield* Effect.sleep(pollInterval);
     }
 
     yield* logger.info(
@@ -217,6 +248,15 @@ export function runDemoSession(options: DemoRunOptions): Effect.Effect<void> {
           { taskId, method: error.method, error: error.message },
           "Harness API call failed",
         );
+
+        // Nobody follows the run any more: end its session so it doesn't
+        // hold a quota slot or a sandbox, or run after a late approval.
+        if (createdSessionId !== undefined) {
+          yield* harness
+            .endSession(createdSessionId)
+            .pipe(Effect.catch(() => Effect.void));
+        }
+
         const quota = error.message.startsWith("resource_exhausted");
 
         store.update(taskId, {

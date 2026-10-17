@@ -184,8 +184,13 @@ export class TaskStore {
   #sweep(): void {
     const now = Date.now();
 
+    // An active task stays: its driver still polls it, and deleting it would
+    // orphan the session. Its driver ends it with a terminal status.
     for (const [id, record] of this.#tasks) {
-      if (Date.parse(record.createdAt) + record.ttlMs < now) {
+      if (
+        isTerminal(record.status) &&
+        Date.parse(record.createdAt) + record.ttlMs < now
+      ) {
         this.#tasks.delete(id);
         this.#waiters.delete(id);
       }

@@ -14,11 +14,12 @@ import { Effect } from "effect";
 import type { JsonObject, JsonValue } from "./lib/json.ts";
 import {
   HarnessError,
+  listAllEvents,
   type HarnessClient,
   type HarnessEvent,
   type TemplateSummary,
 } from "./harness.ts";
-import { sessionRef } from "./demo-run.ts";
+import { runDemoSession, sessionRef, type DemoRunOptions } from "./demo-run.ts";
 import { userFromHeaders } from "./identity.ts";
 import {
   registerTools,
@@ -1018,6 +1019,29 @@ describe("list_pending_approvals", () => {
     expect(JSON.stringify(result.content)).toContain(staleUrl);
   }, 20_000);
 
+  it("lists only the caller's runs", async () => {
+    const server = setupTaskServer(
+      fakeHarness(LAUNCH_EVENTS, {
+        listSessions: () =>
+          Effect.succeed([
+            {
+              id: "alice-session",
+              state: "SESSION_STATE_AWAITING_APPROVAL",
+              conversationRef: sessionRef("alice-run", "alice@example.com"),
+            },
+          ]),
+      }).client,
+    );
+
+    const reply = await server.rpc(
+      "tools/call",
+      { name: "list_pending_approvals", arguments: {} },
+      { name: "list_pending_approvals", user: "bob@example.com" },
+    );
+
+    expect(JSON.stringify(reply.result?.content)).toContain("No AgentOps runs");
+  });
+
   it("says so when nothing is waiting", async () => {
     const server = setupTaskServer(fakeHarness().client);
 
@@ -1197,4 +1221,103 @@ describe("userFromHeaders", () => {
     expect(userFromHeaders(notAJwt)).toBeUndefined();
     expect(userFromHeaders(badPayload)).toBeUndefined();
   });
+});
+
+describe("runDemoSession", () => {
+  const BAD_GATEWAY = new HarnessError({
+    method: "ListEvents",
+    status: 502,
+    message: "HTTP 502",
+  });
+
+  function drive(
+    fake: FakeHarness,
+    pollInterval: DemoRunOptions["pollInterval"] = "1 millis",
+  ) {
+    const store = new TaskStore();
+    const record = store.create(undefined);
+
+    const run = Effect.runPromise(
+      runDemoSession({
+        store,
+        harness: fake.client,
+        taskId: record.taskId,
+        template: "hello",
+        prompt: "Hi",
+        owner: undefined,
+        pollInterval,
+      }),
+    );
+
+    return { store, record, run };
+  }
+
+  it("keeps polling through a transient Harness error", async () => {
+    let calls = 0;
+    const events = [...LAUNCH_EVENTS, ...APPROVED_AND_ANSWERED];
+
+    const fake = fakeHarness([], {
+      listEvents: (_sessionId, afterSeq) =>
+        ++calls === 1
+          ? Effect.fail(BAD_GATEWAY)
+          : Effect.succeed(events.filter((e) => Number(e.seq) > afterSeq)),
+    });
+
+    const { store, record, run } = drive(fake);
+    await run;
+
+    const done = store.get(record.taskId, undefined);
+    expect(done?.status).toBe("completed");
+    expect(done?.result?.isError).toBeFalsy();
+    expect(fake.endSessions).toEqual([]);
+  });
+
+  it("ends the session when the Harness keeps failing", async () => {
+    const fake = fakeHarness([], {
+      listEvents: () => Effect.fail(BAD_GATEWAY),
+    });
+
+    const { store, record, run } = drive(fake);
+    await run;
+
+    expect(store.get(record.taskId, undefined)?.result?.isError).toBe(true);
+    expect(
+      await waitFor(
+        () => fake.endSessions,
+        (ids) => ids.length > 0,
+      ),
+    ).toEqual([SESSION_ID]);
+  });
+
+  it("waits between polls when a page doesn't advance", async () => {
+    let calls = 0;
+    const stuck: HarnessEvent = { seq: "x", agentThought: { text: "hm" } };
+
+    const fake = fakeHarness([], {
+      listEvents: () =>
+        Effect.sync(() => {
+          calls++;
+
+          return [stuck];
+        }),
+    });
+
+    const { record, run } = drive(fake, "20 millis");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    record.onCancel?.();
+    await run;
+
+    expect(calls).toBeLessThan(20);
+  });
+});
+
+describe("listAllEvents", () => {
+  it("stops on a page whose seq doesn't parse", async () => {
+    const stuck: HarnessEvent = { seq: "x", agentThought: { text: "hm" } };
+    const fake = fakeHarness([], { listEvents: () => Effect.succeed([stuck]) });
+
+    const events = await Effect.runPromise(listAllEvents(fake.client, "s1"));
+
+    expect(events).toEqual([stuck]);
+  }, 5000);
 });

@@ -9,7 +9,7 @@ This server fronts AgentOps, which runs coding agents in Kubernetes sandbox pods
 
 - `launch_hello_demo` starts a run of the `hello` demo agent. Pass an optional `prompt`.
 - `get_run_status` waits briefly and reports a run by `runId`: the approval link, progress, or the answer.
-- `list_pending_approvals` lists every run still waiting for approval, with its link and expiry, including stale runs no client follows any more.
+- `list_pending_approvals` lists the user's runs still waiting for approval, with its link and expiry, including stale runs no client follows any more.
 - `list_agents` lists the agent templates this server may run.
 - `end_session` ends a session by `sessionId` and frees its pod.
 

@@ -85,11 +85,11 @@ approval link, progress or the agent's answer.
 
 ### list_pending_approvals
 
-Lists every run this server started that is still waiting for approval, from
+Lists the caller's runs that are still waiting for approval, from
 the platform's session list. It includes stale runs the server no longer
 tracks, after a restart or from a client that gave up. Each entry has its
 approval link, expiry, and whether `get_run_status` can still follow it.
-Ending stale runs frees the client's `maxPendingApprovals` quota.
+Ending stale runs frees the client's `maxPendingApprovals` quota. That quota is shared by every user of this server, but each user sees and ends only their own runs.
 
 ### list_agents
 

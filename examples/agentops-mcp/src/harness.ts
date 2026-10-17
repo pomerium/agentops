@@ -158,6 +158,15 @@ function harnessErrorMessage(text: string, status: number): string {
   }
 }
 
+/** The highest seq in `events`, or `afterSeq`; ignores seqs that don't parse. */
+export function nextSeq(afterSeq: number, events: HarnessEvent[]): number {
+  return events.reduce((max, event) => {
+    const seq = Number(event.seq);
+
+    return Number.isFinite(seq) ? Math.max(max, seq) : max;
+  }, afterSeq);
+}
+
 /** A session's events after `afterSeq`, following every page to the end. */
 export function listAllEvents(
   harness: HarnessClient,
@@ -170,7 +179,7 @@ export function listAllEvents(
 
     for (;;) {
       const page = yield* harness.listEvents(sessionId, after);
-      const next = Math.max(after, ...page.map((e) => Number(e.seq)));
+      const next = nextSeq(after, page);
 
       all.push(...page);
 

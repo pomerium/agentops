@@ -377,7 +377,7 @@ export class EventHub {
   readonly #template: () => string;
   readonly #now: () => number;
   readonly #retryDelaysMs: readonly number[];
-  /** `${owner}\n${url}` → when its verification stops counting. */
+  /** (owner, url, secret hash) → when its verification stops counting. */
   #verified = new Map<string, number>();
   /** runId → event keys already emitted, so each fires once. */
   #emitted = new Map<string, Set<string>>();
@@ -504,7 +504,10 @@ export class EventHub {
     secret: string,
     id: string,
   ): Promise<void> {
-    const key = `${owner}\n${url}`;
+    // A new secret is verified again: a mistyped one would otherwise sign
+    // every delivery with a key the receiver rejects.
+    const secretHash = createHash("sha256").update(secret).digest("base64url");
+    const key = `${owner}\n${url}\n${secretHash}`;
     const now = this.#now();
 
     if ((this.#verified.get(key) ?? 0) > now) return;

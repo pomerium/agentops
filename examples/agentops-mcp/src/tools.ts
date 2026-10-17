@@ -13,7 +13,6 @@ import {
   replayRun,
   runDemoSession,
   runIdFromRef,
-  SESSION_REF_PREFIX,
   sessionRef,
 } from "./demo-run.ts";
 import { getEventHub, RUN_APPROVAL_REQUIRED, RUN_FINISHED } from "./events.ts";
@@ -168,7 +167,7 @@ export function registerTools(
     {
       title: "List AgentOps runs waiting for approval",
       description:
-        "List every AgentOps run this server started that is still waiting for " +
+        "List the caller's AgentOps runs that are still waiting for " +
         "approval, with its Pomerium approval link and expiry, including stale runs " +
         "that no client is following any more (for example after a restart). Approve " +
         "a run on its link, or end it with end_session to free the approval quota.",
@@ -556,7 +555,7 @@ function listPendingApprovals(
     const waiting = sessions.filter(
       (session) =>
         session.state === "SESSION_STATE_AWAITING_APPROVAL" &&
-        session.conversationRef?.startsWith(SESSION_REF_PREFIX),
+        ownsSession(session.conversationRef, owner),
     );
 
     const pending = yield* Effect.forEach(

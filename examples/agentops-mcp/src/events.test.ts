@@ -546,6 +546,20 @@ describe("event delivery", () => {
     expect(delivery?.headers["webhook-signature"].split(" ")).toHaveLength(2);
   });
 
+  it("verifies a callback again when its secret changes", async () => {
+    const { subscribe, receiver } = setup();
+    await subscribe(RUN_APPROVAL_REQUIRED);
+    await subscribe(RUN_FINISHED, {}, undefined, {
+      delivery: { mode: "webhook", url: CALLBACK, secret: OTHER_SECRET },
+    });
+
+    const verifications = receiver.sent.filter(
+      (sent) => sent.body.type === "verification",
+    );
+
+    expect(verifications).toHaveLength(2);
+  });
+
   it("keeps the fallback for approval-only subscriptions", async () => {
     const { hub, subscribe } = setup();
     await subscribe(RUN_APPROVAL_REQUIRED);
