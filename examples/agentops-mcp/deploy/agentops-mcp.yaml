@@ -1,0 +1,123 @@
+# AgentOps MCP server: namespace, ServiceAccount, Deployment and Service.
+# The image is built on the node and imported into k3s's containerd
+# (see deploy/README.md), so it is never pulled.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentops-mcp
+---
+# A Harness API client. Its subject is in the quickstart values' `clients`,
+# which adds it to the harness-api route policy and creates its ClientBinding.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentops-mcp
+  namespace: agentops-mcp
+automountServiceAccountToken: false
+---
+# MCP Events subscriptions (with their signing secrets) must survive
+# restarts. ReadWriteOnce is fine: one replica, Recreate strategy. Uses the
+# cluster's default StorageClass.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentops-mcp-events
+  namespace: agentops-mcp
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentops-mcp
+  namespace: agentops-mcp
+  labels:
+    app.kubernetes.io/name: agentops-mcp
+spec:
+  # Tasks live in memory: keep exactly one replica.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentops-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentops-mcp
+    spec:
+      serviceAccountName: agentops-mcp
+      automountServiceAccountToken: false
+      containers:
+        - name: mcp
+          image: docker.io/library/agentops-mcp:dev
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: SERVER_NAME
+              value: agentops-mcp
+            - name: HARNESS_API_URL
+              value: https://harness-api.agentops.example.com
+            - name: HARNESS_TOKEN_FILE
+              value: /var/run/secrets/agentops/token
+            - name: DEMO_TEMPLATE
+              value: hello
+            - name: STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agentops-mcp
+                  key: state-secret
+            - name: EVENTS_STORE_FILE
+              value: /var/lib/agentops-mcp/subscriptions.json
+          volumeMounts:
+            - name: harness-token
+              mountPath: /var/run/secrets/agentops
+              readOnly: true
+            - name: events
+              mountPath: /var/lib/agentops-mcp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: events
+          persistentVolumeClaim:
+            claimName: agentops-mcp-events
+        - name: harness-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: pomerium-agentic-as
+                  expirationSeconds: 3600
+                  path: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentops-mcp
+  namespace: agentops-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: agentops-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

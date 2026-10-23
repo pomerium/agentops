@@ -1,0 +1,161 @@
+# Repository Guidelines
+
+An HTTP [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that runs AgentOps agents as MCP tasks, with Pomerium approval through URL elicitation. Built from [nickytonline/mcp-typescript-template](https://github.com/nickytonline/mcp-typescript-template). See [README.md](README.md) for the tools, configuration and deployment.
+
+## Key Commands
+
+```bash
+# Development (hot reload via native Node.js type stripping)
+npm run dev
+
+# Build (Vite+ → ES modules in dist/index.js)
+npm run build
+
+# Production
+npm start
+
+# Lint & format
+npm run lint
+npm run lint:fix
+npm run format
+npm run format:check
+
+# Tests
+npm run test       # interactive Vitest via Vite+
+npm run test:ci    # outputs test-results.json
+```
+
+## Before Submitting
+
+Always run these and fix any failures before opening a PR:
+
+```bash
+npm run lint && npm run format:check && npm run build && npm run test:ci && npm run verify:skill-package
+```
+
+## Project Structure
+
+```
+src/
+  app.ts         # Express app and MCP Node adapter wiring
+  app.test.ts    # HTTP boundary integration tests
+  index.ts       # Effect startup and shutdown; runs the app on PORT
+  tools.ts       # registerTools() wiring + per-tool logic functions
+  tools.test.ts  # colocated integration tests (in-memory client/server)
+  events.ts      # MCP Events: events/list|subscribe|unsubscribe, delivery hub, subscription store
+  webhook.ts     # Standard Webhooks signing + public-address-only HTTPS POST for callbacks
+  skills.ts      # bundled Agent Skills and MCP Skills extension handlers
+  skills.test.ts # skill discovery, manifest integrity, and resource tests
+  config.ts      # Env var loading and validation via Effect Config
+  logger.ts      # Effect structured logging
+  lib/
+    utils.ts       # MCP response helpers (createTextResult, createErrorResult)
+    mcp-schema.ts  # Effect Schema adapter for MCP Standard Schema
+    utils.test.ts  # colocated unit tests
+    mcp-schema.test.ts # adapter and JSON Schema dialect tests
+skills/
+  agentops-demo/SKILL.md # Agent Skill published by the running server
+docs/
+  AGENT_SKILLS.md # discovery, security, packaging, and client compatibility
+dist/            # compiled output (ES modules)
+```
+
+Config files (`vite.config.ts`, `tsconfig.json`, `mise.toml`, `Dockerfile`) live at the root of this example. `vite.config.ts` holds the Vite build plus the Oxlint (`lint`) and Oxfmt (`fmt`) settings.
+
+## Architecture
+
+- HTTP transport via Express on `PORT` (default 3000) — **not** stdio; app wiring lives in `src/app.ts`, startup and shutdown in `src/index.ts`
+- Tools registered via `registerTools(server)` in `src/tools.ts`, the single source of truth for tool wiring — called from `getServer()` in `src/app.ts` and reused by the tests
+- Agent Skills under `skills/` are registered by `registerSkills(server)` in `src/skills.ts` and served through MCP resources plus the `io.modelcontextprotocol/skills` extension.
+- Tool responses use `createTextResult` / `createErrorResult` from `src/lib/utils.ts`: a text `content` block plus `structuredContent` (for clients that declare an `outputSchema`)
+- Tool workflows use `Effect` and cross the MCP callback boundary with `runMcpEffect()`
+- Effect Schemas cross the MCP boundary through `toMcpSchema()`, which supports the MCP SDK's `draft-07` and `draft-2020-12` JSON Schema targets
+- Genuine execution failures return `isError: true` (via `createErrorResult`), not thrown; valid outcomes (e.g. a user declining an elicitation) are normal results
+- Stateless per the MCP 2026-07-28 spec: no session handshake or `Mcp-Session-Id`; `createMcpHandler` creates a fresh server per request and supports older clients through its fallback.
+- `GET /health` is a plain liveness endpoint (used by the Docker healthcheck) — `GET /mcp` itself is routed to the MCP handler and no longer doubles as one
+- MCP Events (draft extension, webhook delivery only, as ChatGPT dots/Work chats use it): `run.approval_required` and `run.finished`, sent only to the launching user's subscriptions, not replayable (`cursor: null`). `launch_hello_demo` picks its response in this order: events (the user has a covering subscription) → tasks → MRTR URL elicitation → plain link + `get_run_status` (form-only clients such as ChatGPT get the plain link: their form cards render badly). A `cancel`led prompt keeps the run and returns the link; only `decline` ends it
+- If a tool needs state across calls, mint an explicit handle and have the model pass it back as an argument on the next call — there is no transport-level session to hang state off anymore
+- Graceful shutdown on `SIGTERM`/`SIGINT` (closes the handler and HTTP server in parallel with `Effect.all`, then exits)
+
+### Build System
+
+- Vite+ (`vite-plus`) provides the Vite build, Vitest, Oxlint, and Oxfmt. `npm run build` runs `vp build` and emits `dist/index.js`; `@modelcontextprotocol/server` and `@modelcontextprotocol/node` stay external
+- TypeScript 7 provides the `tsc` compiler. `npm run typecheck` stays `tsc --noEmit`. The `typescript` dependency remains an npm alias for `@typescript/typescript6` and exposes `tsc6` for compatibility checks
+- `@` path alias maps to `src/`
+- Node.js >=24.11.0 for the Vite+ toolchain (native TypeScript type stripping in dev). `mise.toml` pins Node 24 for mise; Vite+ does not read that file, and a global `vp` install is not required
+
+## Environment Variables
+
+Defined and validated in `src/config.ts`:
+
+| Variable         | Default                     | Description                           |
+| ---------------- | --------------------------- | ------------------------------------- |
+| `PORT`           | `3000`                      | HTTP server port                      |
+| `NODE_ENV`       | —                           | `development` / `production` / `test` |
+| `SERVER_NAME`    | `name` in `package.json`    | MCP server name                       |
+| `SERVER_VERSION` | `version` in `package.json` | MCP server version                    |
+| `LOG_LEVEL`      | `info`                      | `error` / `warn` / `info` / `debug`   |
+| `EVENTS_STORE_FILE` | — (in memory) | JSON file for MCP Events subscriptions (holds signing secrets; written 0600) |
+
+## Coding Conventions
+
+- TypeScript with ES module syntax (`import`/`export`)
+- Oxfmt, configured in the `fmt` block of `vite.config.ts`, with Prettier-compatible defaults: 2-space indent, double quotes, trailing commas
+- Oxlint, configured in the `lint` block of `vite.config.ts`, with the TypeScript plugin — `any` is discouraged (warn). Test files import Vitest from `vite-plus/test`
+- Private class methods use `#` prefix
+- Intentionally unused params/vars: prefix with `_`
+- `camelCase` for functions/variables, `PascalCase` for types
+- Descriptive filenames: `logger.ts`, `utils.ts`
+- Use `Effect.all` with explicit concurrency for independent parallel effects; use `Effect.tryPromise` only at Promise-based integration boundaries
+
+## Logging
+
+Use `logger` from `src/logger.ts` — yield the returned Effect inside an Effect workflow or run it with `runMcpEffect()` at a callback boundary. Never use `console.log`.
+
+```ts
+// Structured data first, message second
+yield* logger.info({ requestId, toolName }, "Tool executed");
+yield* logger.error({ requestId, toolName, error: error.message }, "Tool execution failed");
+```
+
+Log levels: `error` > `warn` > `info` > `debug`. For tool-call logs, include `requestId` and `toolName` so entries can be correlated back to a single call. Lifecycle and shutdown logs should include the context available to them. Add other scalar fields relevant to the outcome (e.g. `action`, `kind`). Never log the raw `args` object — tool inputs may carry user-provided or sensitive data — log individual fields only when they're known to be safe to record. Effect logging carries structured annotations and integrates with Effect's tracing context.
+
+## Adding a New Tool
+
+To add a tool:
+
+1. Add the `server.registerTool()` call inside `registerTools()` in `src/tools.ts`
+2. Provide a `title`, `description`, `inputSchema`/`outputSchema` created with `toMcpSchema(Schema.Struct({...}))`, and `annotations` (e.g. `readOnlyHint`)
+3. The handler receives `(args, ctx)` (or just `(ctx)` with no `inputSchema`) — `ctx.mcpReq.id` is the request id; there is no `sessionId` to rely on
+4. Compose the implementation as an `Effect` and return `runMcpEffect(effect)` from the MCP callback
+5. Return `createTextResult(result)` on success (it also emits `structuredContent`)
+6. On genuine failure return `createErrorResult({ error })` (sets `isError: true`); don't throw
+7. Log with `yield* logger.info({ toolName, requestId }, "Tool executed")` on success
+8. Log with `yield* logger.error({ toolName, requestId, error: error.message }, "Tool execution failed")` on failure — omit the raw `args` object (see Logging)
+9. If the tool needs user input mid-call, return `inputRequired({ inputRequests: {...} })` (see `launch_hello_demo` in `src/tools.ts`, whose MRTR fallback returns a URL elicitation) — the older synchronous `elicitInput()` push request throws on a 2026-07-28-era connection
+10. Add integration tests to `src/tools.test.ts` (import `registerTools`, wire an in-memory client/server)
+
+## Adding a Skill
+
+The running server publishes valid, non-hidden skill directories under `skills/`. See [docs/AGENT_SKILLS.md](docs/AGENT_SKILLS.md).
+
+1. Create `skills/<name>/SKILL.md` with YAML frontmatter. `name` must match `<name>`, and `description` must say what the skill does and when to use it
+2. Add supporting files in that directory when the workflow needs them. The manifest lists every non-hidden file
+3. Leave `src/skills.ts` unchanged unless the protocol behavior itself changes. `registerSkills()` loads the directory at startup
+4. Cover discovery, `skills/get`, and `resources/read` in `src/skills.test.ts` when you change the example or the handlers
+
+To publish no skills, delete the directories under `skills/` and leave `skills/` itself. The server then does not advertise the extension, and the image build does not require a `SKILL.md`. Deleting `skills/` entirely also requires removing `COPY ./skills/ ./skills/` from the `Dockerfile`.
+
+## Testing
+
+- Framework: Vitest, run through Vite+ (`vp test`). Import the test API from `vite-plus/test`
+- Test files: `*.test.ts`, colocated beside the source (see `src/lib/utils.test.ts`)
+- Cover new tools, transports, config logic, schema adapters, and the HTTP app with focused tests
+- Use `async/await` for all async tests
+- Write a failing test that reproduces a bug before fixing it
+
+## Commit & PR Guidelines
+
+Inside [pomerium/agentops](https://github.com/pomerium/agentops), follow that repository's conventions. Once copied into its own repository, the bundled pipeline expects [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, `docs:`): commitlint checks PRs and semantic-release versions from them.
+
+Include verification evidence in the PR: `npm run lint`, `npm run test:ci`.

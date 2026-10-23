@@ -1,0 +1,45 @@
+# Pomerium route for the MCP server. The controller reads Ingresses in its own
+# namespace only, and a backend must be a Service in the Ingress's namespace,
+# hence the ExternalName Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentops-mcp
+  namespace: agentops-pomerium
+spec:
+  type: ExternalName
+  externalName: agentops-mcp.agentops-mcp.svc.cluster.local
+  ports:
+    - name: http
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp
+  namespace: agentops-pomerium
+  annotations:
+    # Pomerium acts as the OAuth authorization server for MCP clients.
+    ingress.pomerium.io/mcp_server: "true"
+    # X-Pomerium-Jwt-Assertion: the MCP scopes tasks to the signed-in user.
+    ingress.pomerium.io/pass_identity_headers: "true"
+    # Long-poll friendly: launch_hello_demo's MRTR fallback waits up to 90s.
+    ingress.pomerium.io/timeout: 120s
+    ingress.pomerium.io/policy: |
+      allow:
+        or:
+          - domain:
+              is: example.com
+spec:
+  ingressClassName: pomerium-agentops
+  rules:
+    - host: mcp.agentops.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: agentops-mcp
+                port:
+                  number: 80
