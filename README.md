@@ -36,6 +36,9 @@ More documentation:
   the sidecar without the platform. An agent-sandbox Sandbox whose only way
   out is Pomerium, driven by five Python agent frameworks through the
   agent-sandbox SDK.
+- [examples/agentops-mcp](./examples/agentops-mcp/README.md): an MCP server
+  that launches AgentOps runs as MCP tasks, with Pomerium approval through URL
+  elicitation.
 
 ## What people build with it
 
